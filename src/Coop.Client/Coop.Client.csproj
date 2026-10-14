@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net472 = runtime réel du jeu (Mono / .NET 4.x), comme le plugin serveur. -->
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>Coop.Client</AssemblyName>
+    <RootNamespace>Coop.Client</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Les dépendances (LiteNetLib, Coop.Model) sont copiées à côté du plugin :
+         BepInEx les charge depuis le dossier du plugin. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <DebugType>none</DebugType>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+    <NoWarn>$(NoWarn);CS1701;CS1702</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExCore)\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Assembly-CSharp est nécessaire depuis que le client charge le monde :
+         AutoLoadBehaviour manipule uGUI_MainMenu / SaveLoadManager / MainMenuLoadButton,
+         et la garde de sauvegarde patche IngameMenu. -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(SubnauticaManaged)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- HarmonyX fourni par BepInEx ; chargé par le preloader, jamais copié. -->
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExCore)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Coop.Model\Coop.Model.csproj" />
+    <PackageReference Include="LiteNetLib" Version="1.3.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\BepInExModList.cs" Link="BepInExModList.cs" />
+    <Compile Include="..\Shared\InstanceLogFile.cs" Link="InstanceLogFile.cs" />
+    <Compile Include="..\Shared\AutoLoadBehaviour.cs" Link="AutoLoadBehaviour.cs" />
+  </ItemGroup>
+
+</Project>
