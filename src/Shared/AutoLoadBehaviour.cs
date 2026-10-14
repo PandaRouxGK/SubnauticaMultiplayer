@@ -1,0 +1,108 @@
+using System.Collections;
+using BepInEx.Logging;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+
+namespace Coop.Shared
+{
+    /// <summary>
+    /// Amène l'instance dans le monde sans intervention, en réutilisant le chemin de code du menu.
+    ///
+    /// Utilisé par le serveur **et** par le client : sans monde chargé côté client, il n'y a rien à
+    /// répliquer (la présence des joueurs suppose que les deux instances soient dans la partie).
+    ///
+    /// Pourquoi passer par le bouton du menu plutôt que reconstruire les paramètres : le chargement
+    /// attend `saveGame`, `sessionId`, `changeSet` et `gameMode`, valeurs que seul le menu sait
+    /// composer depuis la sauvegarde. Appeler `MainMenuLoadButton.Load()` suit donc le format de
+    /// sauvegarde sans qu'on ait à le connaître.
+    ///
+    /// Compilé dans plusieurs projets via un &lt;Compile Include&gt; partagé.
+    /// </summary>
+    public class AutoLoadBehaviour : MonoBehaviour
+    {
+        /// <summary>Source de log dédiée : lisible quel que soit le plugin qui l'utilise.</summary>
+        // Préfixe explicite : `using UnityEngine` apporte aussi un `Logger`, la référence seule serait ambiguë.
+        private static readonly ManualLogSource Log = BepInEx.Logging.Logger.CreateLogSource("Coop Autoload");
+
+        /// <summary>Délai laissé au menu pour finir de se peupler avant de le solliciter.</summary>
+        private const float MenuSettleSeconds = 3f;
+
+        /// <summary>Délai maximum accordé au chargement du monde.</summary>
+        private const float WorldLoadTimeoutSeconds = 60f;
+
+        /// <summary>Scènes du menu : tant qu'on y est, le monde n'est pas chargé.</summary>
+        private static bool IsMenuScene(string sceneName) =>
+            sceneName == "XMenu" || sceneName == "MenuEnvironment" || sceneName == "StartScreen";
+
+        private IEnumerator Start()
+        {
+            Log.LogInfo("[monde] attente du menu principal...");
+            yield return new WaitUntil(() => uGUI_MainMenu.main != null);
+            Log.LogInfo("[monde] uGUI_MainMenu.main disponible.");
+
+            yield return new WaitForSeconds(MenuSettleSeconds);
+
+            var saveLoadManager = SaveLoadManager.main;
+            if (saveLoadManager == null)
+            {
+                Log.LogError("[monde] SaveLoadManager.main est null -> abandon du chargement.");
+                yield break;
+            }
+
+            var slots = saveLoadManager.GetActiveSlotNames();
+            Log.LogInfo(slots == null || slots.Length == 0
+                ? "[monde] GetActiveSlotNames: (aucun)"
+                : $"[monde] GetActiveSlotNames: {slots.Length} -> [{string.Join(", ", slots)}]");
+
+            // Le panneau "Charger" est peuplé à la demande : on l'ouvre comme le ferait un clic.
+            Log.LogInfo("[monde] ouverture du panneau de chargement (OnButtonLoad)...");
+            uGUI_MainMenu.main.OnButtonLoad();
+            yield return new WaitForSeconds(MenuSettleSeconds);
+
+            var buttons = Object.FindObjectsOfType<MainMenuLoadButton>();
+            Log.LogInfo($"[monde] MainMenuLoadButton trouvés: {buttons.Length}");
+
+            MainMenuLoadButton target = null;
+            foreach (var button in buttons)
+            {
+                if (button == null || button.IsEmpty())
+                {
+                    continue;
+                }
+
+                Log.LogInfo(
+                    $"[monde]   slot='{button.saveGame}' session='{button.sessionId}' " +
+                    $"changeSet={button.changeSet} mode={button.gameMode}");
+
+                if (target == null)
+                {
+                    target = button;
+                }
+            }
+
+            if (target == null)
+            {
+                Log.LogWarning("[monde] aucune sauvegarde chargeable trouvée -> l'instance reste au menu.");
+                yield break;
+            }
+
+            Log.LogInfo($"[monde] >>> chargement de la sauvegarde '{target.saveGame}'");
+            target.Load();
+
+            var deadline = Time.realtimeSinceStartup + WorldLoadTimeoutSeconds;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                yield return new WaitForSeconds(2f);
+
+                var scene = SceneManager.GetActiveScene();
+                if (!IsMenuScene(scene.name))
+                {
+                    Log.LogInfo($"[monde] *** MONDE CHARGÉ : scene '{scene.name}' ***");
+                    yield break;
+                }
+            }
+
+            Log.LogWarning("[monde] délai dépassé : le monde ne semble pas s'être chargé.");
+        }
+    }
+}

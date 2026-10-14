@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net472 = runtime réel du jeu (Mono / .NET 4.x). Cible aussi celle des plugins BepInEx 5.
+         Les assemblies de référence sont installées localement, donc aucun restore NuGet requis. -->
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>Coop.Server</AssemblyName>
+    <RootNamespace>Coop.Server</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Les dépendances NuGet (LiteNetLib) et le projet partagé doivent être copiés :
+         BepInEx charge les plugins et leurs dépendances depuis le dossier du plugin. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <DebugType>none</DebugType>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+    <!-- CS1701/CS1702 : simples avertissements de version sur les assemblies Unity du jeu. -->
+    <NoWarn>$(NoWarn);CS1701;CS1702</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExCore)\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Code du jeu : donne accès à SaveLoadManager / uGUI_MainMenu / MainMenuLoadButton. -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(SubnauticaManaged)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Coop.Model\Coop.Model.csproj" />
+    <!-- 1.3.5 : dernière branche 1.x, seule à fournir netstandard2.0 (2.x exige netstandard2.1,
+         incompatible avec le net472 du jeu). -->
+    <PackageReference Include="LiteNetLib" Version="1.3.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\BepInExModList.cs" Link="BepInExModList.cs" />
+    <Compile Include="..\Shared\InstanceLogFile.cs" Link="InstanceLogFile.cs" />
+    <Compile Include="..\Shared\AutoLoadBehaviour.cs" Link="AutoLoadBehaviour.cs" />
+  </ItemGroup>
+
+</Project>
