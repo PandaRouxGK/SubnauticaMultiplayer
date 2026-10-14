@@ -570,27 +570,48 @@ La première version cherchait le menu pause via une méthode utilitaire `FindMe
 (jusqu'à 240 s). La recherche a été repliée dans la coroutine `Start()` avec `yield return
 new WaitForSeconds(2f)`. Un `Thread.Sleep` dans un `MonoBehaviour` est toujours un bug en puissance.
 
-### Preuves mesurées (serveur + client lancés en parallèle, 18:00–18:03)
+### Preuves mesurées
+
+Les mesures viennent de **deux passes distinctes**, volontairement : l'autotest ne tourne qu'à la
+demande, il ne doit donc pas être activé pendant la passe « deux instances dans le monde ». Chaque
+passe est citée avec ses horodatages.
+
+**Passe A — garde de sauvegarde** (client seul, `-coopmode=client -coopdebug=saveguard`) :
 
 | Vérification | Résultat |
 |---|---|
-| Client : part dans le monde | `[Coop Autoload] [monde] *** MONDE CHARGÉ : scene 'Main' ***` |
-| Client : liaison serveur tenue | `handshake ACCEPTÉ (tick serveur=1659)`, **58 pongs**, RTT moy 68–90 ms |
-| Client : garde installée | `[garde] sauvegarde cliente désactivée — patché : IngameMenu.SaveGameAsync()` |
-| **Client : tentative de sauvegarde interceptée** | `[garde] sauvegarde interceptée et bloquée (n°1)` puis `[autotest] RÉSULTAT OK : tentative interceptée (compteur 0 -> 1)` |
-| Serveur : reste dans le monde | `scene='Main'`, **2975 ticks**, taux instantané **20,02–20,12/s** sur 150 s |
-| **Sauvegarde intacte** | **aucun** fichier de `SNAppData/SavedGames` modifié entre 18:00 et 18:10 (dernière écriture : 16:28) |
+| Cible réellement patchée | `[garde] sauvegarde cliente désactivée — patché : IngameMenu.SaveGameAsync()` (20:03:27,876) |
+| Cible **non** patchée côté serveur | `grep -c '[garde]' coop-server.log` = **0** |
+| **Tentative de sauvegarde interceptée** | `[garde] sauvegarde interceptée et bloquée (n°1)` puis `[autotest] RÉSULTAT OK : tentative interceptée (compteur 0 -> 1)` (20:03:50,942) |
+| Aucune exception levée | aucune ligne `Exception`/`NullReference` dans le log client après le déclenchement |
+
+**Passe B — deux instances dans le monde** (serveur puis client, DLL finales, sans autotest) :
+
+| Vérification | Résultat |
+|---|---|
+| Serveur : entre dans le monde | `*** MONDE CHARGÉ : scene 'Main' ***` (20:04:31,491) |
+| Client : entre dans le monde | `*** MONDE CHARGÉ : scene 'Main' ***` (20:05:57,366) |
+| Liaison tenue entre les deux instances | serveur `handshake ACCEPTÉ : 'killi' … 1/10 client(s)` (20:05:38,502), `clients=1` sur 38 heartbeats ; client `handshake ACCEPTÉ (tick serveur=1691)` (20:05:38,603) |
+| Client : boucle de ping stable | `pongs=184 rtt dernier=28ms min=14ms moy=26ms max=43ms` |
+| Serveur : tick tenu, dans le monde | `tick=5479 tauxInstantane=20.00/s simule=273,95s reel=275,00s abandonnes=20 scene='Main'` |
+| **Sauvegarde intacte** | sha1 des **13** fichiers de `SNAppData/SavedGames` **identiques** avant/après les deux passes ; fichier le plus récent daté **16:28**, donc antérieur à tous les runs |
 
 Le compteur d'interceptions est la preuve forte : il ne peut être incrémenté que par un passage réel
 dans `IngameMenu.SaveGameAsync`, c'est-à-dire exactement le point de passage unique identifié par le
-scan IL.
+scan IL. Et il était nécessaire de le mesurer : la fermeture du jeu, elle, **ne tente aucune
+sauvegarde**, donc observer « rien n'a changé » à la fermeture ne disait rien de la garde.
 
 ### Limites
 
-- L'autotest s'est déclenché **0,35 s avant** la ligne `MONDE CHARGÉ` (18:02:42,945 vs 18:02:43,298) :
+- L'autotest s'est déclenché **1,0 s avant** la ligne `MONDE CHARGÉ` (20:03:45,938 vs 20:03:46,941) :
   il prouve le prefix sur le point de passage réel, mais il n'a pas reproduit un clic sur le bouton
-  « Sauvegarder » d'un menu pause ouvert *dans* le monde. Une réexécution plus tardive le ferait ;
-  le chemin de code exercé est le même, la fidélité moindre.
+  « Sauvegarder » d'un menu pause ouvert *dans* le monde. Le chemin de code exercé est identique, la
+  fidélité moindre.
+- L'autotest a dû ouvrir le menu pause (`IngameMenu.main.Open()`) car il le trouve **inactif dans la
+  hiérarchie** menu fermé : `actifDansHierarchie=False, composantActif=True`. `Open()` ne l'a d'ailleurs
+  pas activé (`actifDansHierarchie=False` après coup), et l'appel a malgré tout atteint le point de
+  passage patché — c'est le remplacement du résultat par une coroutine vide (et non `null`) qui rend
+  ce cas sain.
 - **Rien ne prouve que la sauvegarde du serveur fonctionne encore** : le serveur n'a jamais tenté de
   sauvegarder pendant ce run. La garde est censée être purement cliente (elle n'est installée que par
   le plugin client), mais ce n'est pas démontré par une mesure.
