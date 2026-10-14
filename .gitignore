@@ -1,0 +1,19 @@
+# Artefacts de compilation
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Téléchargements et journaux de mise en place (BepInEx, LiteNetLib, sorties de tests manuels) :
+# reproductibles depuis le README, et gros binaires tiers.
+.bepinex_dl/
+
+# Sauvegarde d'une installation Nitrox : contient une copie patchée de Assembly-CSharp.dll
+# (code du jeu, sous copyright), NitroxPatcher.dll (binaire tiers) et une sauvegarde personnelle.
+# Ces contenus n'ont rien à faire dans un dépôt de code source.
+_backup_nitrox/
+
+# Métadonnées d'outillage et exports de conversation
+.freebuff/
+freebuff-chat-*.md

@@ -1,0 +1,15 @@
+<Project>
+
+  <!-- Chemins partagés par tous les projets du depôt.
+       Surchargeable sans toucher au fichier : dotnet build -p:SubnauticaGameDir="D:\...\Subnautica" -->
+  <PropertyGroup>
+    <SubnauticaGameDir Condition="'$(SubnauticaGameDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Subnautica</SubnauticaGameDir>
+    <SubnauticaManaged>$(SubnauticaGameDir)\Subnautica_Data\Managed</SubnauticaManaged>
+    <BepInExCore>$(SubnauticaGameDir)\BepInEx\core</BepInExCore>
+    <BepInExPlugins>$(SubnauticaGameDir)\BepInEx\plugins</BepInExPlugins>
+
+    <!-- Références vers des DLL du jeu : jamais copiées dans la sortie -->
+    <_GameReferencePrivate>false</_GameReferencePrivate>
+  </PropertyGroup>
+
+</Project>
