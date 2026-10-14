@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.0 : consommable par les plugins (net472) ET par les outils (net8.0).
+         Règle du projet : ce projet ne référence NI Unity NI le jeu NI LiteNetLib. -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>Coop.Model</AssemblyName>
+    <RootNamespace>Coop.Model</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+</Project>
