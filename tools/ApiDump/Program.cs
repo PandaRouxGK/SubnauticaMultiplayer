@@ -93,10 +93,13 @@ static int DumpTypes(ModuleDefinition module, string filter)
 
         if (type.HasFields)
         {
-            foreach (var f in type.Fields.Where(f => f.IsPublic || f.IsAssembly))
+            // Les champs prives sont inclus : le modele du joueur, par exemple, n'est expose
+            // ni en public ni en propriete, et c'est justement ce qu'on doit retrouver.
+            foreach (var f in type.Fields)
             {
+                var visibility = f.IsPublic ? "public " : f.IsAssembly ? "internal " : f.IsPrivate ? "prive " : "protege ";
                 var mods = (f.IsStatic ? "static " : "") + (f.IsInitOnly ? "readonly " : "");
-                Console.WriteLine($"  [champ]     {mods}{f.FieldType.Name} {f.Name}");
+                Console.WriteLine($"  [champ]     {visibility}{mods}{f.FieldType.Name} {f.Name}");
             }
         }
 
