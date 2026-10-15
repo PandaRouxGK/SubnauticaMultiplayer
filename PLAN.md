@@ -953,9 +953,10 @@ difficile à reproduire).
 
 ### Le correctif
 
-`RemoteAvatar.MakeCloneDrawable` : tout renderer dont `shadowCastingMode` vaut `ShadowCastingMode.ShadowsOnly`
-est repassé en `On`, et **chaque** correction est journalisée avec le chemin complet de l'objet — pas de
-silence, pour qu'un futur renderer concerné se voie immédiatement dans le journal.
+`RemoteAvatar.AllowRenderingInsteadOfShadowsOnly`, appelée par `MakeCloneDrawable` au même titre que les
+correctifs des §15 et §17 : tout renderer dont `shadowCastingMode` vaut `ShadowCastingMode.ShadowsOnly` est
+repassé en `On`, et **chaque** correction est journalisée avec le chemin complet de l'objet — pas de silence,
+pour qu'un futur renderer concerné se voie immédiatement dans le journal.
 
 ### Preuves mesurées (run du 2026-10-15 12:41, DLL finales)
 
