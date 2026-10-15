@@ -795,6 +795,9 @@ Dans les deux cas, le test ne mesurait plus ce qu'il annonçait.
 
 ### La tête : ce qui est mesuré, et ce qui a été éliminé
 
+> **Résolu au §18** : la cause est `shadowCastingMode = ShadowsOnly`, un état volontaire posé par le jeu.
+> Ce qui suit reste la trace utile des neuf pistes éliminées — et de la dixième, qui était de lire Nitrox.
+
 `diveSuit_head_geo` est **actif dans la hiérarchie** (contrairement aux 21 maillages des autres tenues),
 activé, et son maillage est réel : cuit par Unity (`BakeMesh`), il donne une tête de
 **0,166 x 0,329 x 0,275 m** centrée **0,09 m au-dessus** de l'origine de la copie, c'est-à-dire à
@@ -833,10 +836,9 @@ Deux têtes, deux branches de tenues différentes, même comportement — ce n'e
 
 ### Ce qui reste ouvert (suite de M2.1)
 
-- **La tête** : neuf hypothèses éliminées, et les deux sources évidentes le sont aussi. La suite ne doit
-  plus viser le maillage, le matériau, l'activation, les bornes, les os, le calque ni le renderer, mais
-  **la façon dont le jeu lui-même dessine une tête** — c'est la seule chose qui n'a pas été regardée. Un
-  avatar sans tête est un défaut visible mais qui ne bloque rien : il ne doit pas retarder le réseau.
+- ~~**La tête** : neuf hypothèses éliminées, et les deux sources évidentes le sont aussi.~~ **Résolu en
+  §18** : la dixième voie — regarder comment un autre mod (Nitrox) fait — a donné la réponse. Le renderer
+  de la tête était en `ShadowsOnly`, c'est-à-dire *volontairement* non dessiné par le jeu.
 - ~~L'`Animator` n'est pas piloté : la copie est en pose figée.~~ **Corrigé en §17** : le squelette
   répondait en réalité à **0 paramètre sur 201** avant correction, et à **200 sur 201** après. Le câblage
   « état réseau -> paramètres » reste à faire, mais la partie moteur est prouvée.
@@ -915,4 +917,89 @@ C'est la liste à porter dans `docs/protocol.md` le jour où les paquets joueur 
 - La mesure est faite en posant les paramètres un par un : elle prouve que le squelette répond, pas qu'une
   combinaison donnée produit la pose voulue (marche, nage, immobile). Cette vérification-là viendra avec
   l'état réseau, qui donnera les valeurs réelles.
-- L'avatar reste **sans tête** (cf. §16) : c'est un défaut visible, mais indépendant de la pose.
+- ~~L'avatar reste **sans tête** (cf. §16).~~ **Résolu en §18** : la tête se dessine (962 px mesurés).
+
+---
+
+## 18. M2.1 — la tête, résolue par la lecture de Nitrox (validé le 2026-10-15)
+
+**Verdict : la tête se dessine. La cause n'était pas dans la copie mais dans un état du renderer que le jeu
+pose lui-même — un état que les neuf hypothèses du §16 ne pouvaient pas atteindre, parce qu'aucune ne
+regardait `shadowCastingMode`.**
+
+### La lecture qui a tranché
+
+Source : `SubnauticaNitrox/Nitrox`, commit `7815b4e` (v1.9.0.0), fichier
+`NitroxClient/GameLogic/LocalPlayer.cs`, **ligne 151**. Le mécanisme, cité exactement :
+
+```csharp
+// Cheap fix for showing head, much easier since male_geo contains many different heads
+prototype.GetComponentInParent<Player>().head.shadowCastingMode = ShadowCastingMode.On;
+GameObject clone = Object.Instantiate(prototype, Multiplayer.Main.transform, false);
+prototype.GetComponentInParent<Player>().head.shadowCastingMode = ShadowCastingMode.ShadowsOnly;
+```
+
+Autrement dit : le renderer de la tête du joueur local est laissé en `ShadowsOnly` — **il projette une
+ombre mais n'est jamais dessiné** — parce que la vue première personne montre une tête séparée. Tout ce
+que le §16 décrivait comme un mystère (actif, activé, calque bon, matériau sans effet, géométrie cuite
+correcte avec 39 399 indices, os présents, et **zéro pixel**) en découle directement : ce n'est pas un
+défaut, c'est un choix de rendu, et il est copié avec le reste du corps.
+
+Nitrox contourne le problème en basculant le renderer de la **source** le temps de l'`Instantiate`, puis en
+la remettant en place. Le correctif retenu ici est différent et plus étroit : la copie est déjà détachée,
+donc on se contente de **réactiver les renderers de la copie** après instanciation, sans jamais toucher
+l'objet du joueur local (un mod qui modifie l'état partagé pendant un instant donné est une source de bugs
+difficile à reproduire).
+
+### Le correctif
+
+`RemoteAvatar.MakeCloneDrawable` : tout renderer dont `shadowCastingMode` vaut `ShadowCastingMode.ShadowsOnly`
+est repassé en `On`, et **chaque** correction est journalisée avec le chemin complet de l'objet — pas de
+silence, pour qu'un futur renderer concerné se voie immédiatement dans le journal.
+
+### Preuves mesurées (run du 2026-10-15 12:41, DLL finales)
+
+```
+[avatar] renderer 'Coop.RemoteAvatar/player_view/male_geo/diveSuit/diveSuit_head_geo'
+         était en ShadowsOnly (projette une ombre, jamais dessiné) -> rendu réactivé.
+[sonde] chaque maillage seul : 3/25 se dessinent
+          962 px   28x 48  diveSuit_head_geo, cuit : taille=(0.166, 0.329, 0.275), indices=39399
+[sonde] rendu isolé : 11765/262144 pixels non-fond (4.5 %), étendue du sujet=100x281 px
+[sonde] décision : signal médian=13231 px, bruit médian=293 px -> la copie rend=True
+```
+
+| Mesure | Avant §18 | Après §18 |
+|---|---|---|
+| Renderers en `ShadowsOnly` sur la copie | 1 (la tête, non signalé) | **0** |
+| `diveSuit_head_geo` dessiné seul | 0 px | **962 px (28 x 48)** |
+| Étendue du sujet (rendu isolé) | 100 x 242 px | **100 x 281 px** (+39 px = la tête) |
+| Verdict de rendu | True (9 812 / 383) | True (**13 231 / 293** px) |
+
+L'étendue gagnée, +39 px pour une tête de 0,329 m vue à cette distance, est cohérente avec les 293 px
+qu'annonçait le calcul du §16 pour un corps complet (1,92 m). Le run ne contient aucune exception et
+l'instance a été arrêtée ensuite ; les deux captures sont écrites
+(`coop-avatar-isolated.png`, `coop-avatar-proof.png`).
+
+### Ce que la source Nitrox apprend pour la suite (au-delà de la tête)
+
+- **Les autres tenues ne sont pas cachées, elles sont inactives.** La ligne relevée au §16 — 21 maillages sur
+  25 `actifHierarchie=False` — correspond aux tenues que le joueur ne porte pas : Nitrox pilote la
+  visibilité **par `GameObject.SetActive`** selon l'équipement
+  (`PlayerEquipmentConstants` : `male_geo/diveSuit/diveSuit_body_geo`, `.../stillSuit/...`, casques
+  `radiationSuit_head_geo`, `scuba_head`, palmes, gants, réservoirs). La copie hérite donc de la tenue du
+  joueur local, ce qui suffit pour un premier jalon mais **est faux dès que les joueurs portent des tenues
+  différentes** : il faudra appliquer ces mêmes règles à partir de l'équipement reçu par le réseau.
+- **Le casque est un objet à part**, pas un enfant de la tête : Nitrox a un gestionnaire dédié
+  (`PlayerHeadEquipmentHandler` / `PlayerRadiationHelmetVisibilityHandler`).
+- **Nitrox retire les objets tenus** du modèle distant (le chemin `player_view/<attach1>`), ce qui recoupe
+  la question du PDA restée ouverte au §16.
+
+### Limites de ce qui vient d'être fait
+
+- La tête se **dessine** ; elle ne **suit** pas encore le regard : le pilotage des os de mâchoire et d'yeux
+  (les 5 os relevés) n'est pas câblé, et c'est cosmétique.
+- La tenue reste héritée du joueur local (cf. ci-dessus) : correct pour un jalon, insuffisant pour du jeu
+  réel avec des équipements différents.
+- Le test de rendu ne juge que la présence de pixels : il ne dit pas que la tête est **bien orientée** ni
+  qu'elle est à l'échelle exacte. C'est la mesure du §16 (0,33 m, +0,09 m au-dessus de l'origine) qui
+  l'établit, et elle venait du maillage, pas de l'image.

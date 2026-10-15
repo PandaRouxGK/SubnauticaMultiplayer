@@ -446,7 +446,8 @@ namespace Coop.Client
                     details.Append(
                         $"\n            -  {MeshName(target)} : centre={centre.ToString("F2")}, taille={target.bounds.size.ToString("F2")}, " +
                         $"isVisible={target.isVisible}, actifHierarchie={target.gameObject.activeInHierarchy}, " +
-                        $"shader={ShaderNames(target)}" + BoneExtent(target, clone) + BakedBounds(target) + TestWithPlainMaterial(target, probeCamera, renderTexture));
+                        $"ombres={target.shadowCastingMode}, shader={ShaderNames(target)}" +
+                        BoneExtent(target, clone) + BakedBounds(target) + TestWithPlainMaterial(target, probeCamera, renderTexture));
                 }
 
                 yield return null;

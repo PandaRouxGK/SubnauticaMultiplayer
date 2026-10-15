@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using BepInEx.Logging;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Coop.Client
 {
@@ -188,11 +189,49 @@ namespace Coop.Client
             ForceRenderersEnabled(clone);
             FixSkinnedMeshCulling(clone);
             MakeAnimationIgnoreVisibility(clone);
+            AllowRenderingInsteadOfShadowsOnly(clone);
 
             // Les calques ne sont **pas** touchés ici : le corps du joueur vit sur le calque
             // `Viewmodel`, propre à la vue première personne. Un avatar mondial doit être ailleurs,
             // mais ce choix se mesure (voir AvatarProbeBehaviour) plutôt que de se décider à l'aveugle.
             return clone;
+        }
+
+        /// <summary>
+        /// Redonne un rendu visible aux renderers que le jeu a passés en `ShadowsOnly`.
+        ///
+        /// **C'est la cause de la tête manquante**, et elle est plus vicieuse que les sept hypothèses
+        /// écartées avant elle : `ShadowCastingMode.ShadowsOnly` signifie « projette une ombre, mais n'est
+        /// pas dessiné par les caméras ». Le renderer reste donc actif, activé, avec un maillage valide,
+        /// des bornes justes, des os présents, un matériau opaque, aucun `forceRenderingOff` — et zéro
+        /// pixel. Rien de ce qu'on peut vérifier sur lui ne dit qu'il est masqué.
+        ///
+        /// Le jeu s'en sert pour cacher la tête du joueur en vue première personne, et Nitrox le contourne
+        /// de façon explicite (`NitroxClient/GameLogic/LocalPlayer.cs`, ligne 151, commit `7815b4e`,
+        /// commenté « Cheap fix for showing head ») : il passe `Player.head.shadowCastingMode` à `On`, copie le
+        /// corps, puis remet `ShadowsOnly` sur l'original. On fait ici l'équivalent **sur la copie
+        /// seulement**, sans toucher au joueur local, et on journalise chaque renderer concerné : c'est la
+        /// différence entre réparer et espérer.
+        /// </summary>
+        private static void AllowRenderingInsteadOfShadowsOnly(GameObject clone)
+        {
+            var restored = 0;
+
+            foreach (var renderer in clone.GetComponentsInChildren<Renderer>(true))
+            {
+                if (renderer.shadowCastingMode != ShadowCastingMode.ShadowsOnly)
+                {
+                    continue;
+                }
+
+                renderer.shadowCastingMode = ShadowCastingMode.On;
+                restored++;
+                Log.LogInfo(
+                    $"[avatar] renderer '{Path(renderer.transform)}' était en ShadowsOnly (projette une ombre, " +
+                    "jamais dessiné) -> rendu réactivé.");
+            }
+
+            Log.LogInfo($"[avatar] rendu restauré : {restored} renderer(s) sortis de ShadowsOnly.");
         }
 
         /// <summary>
