@@ -377,6 +377,11 @@ namespace Coop.Client
             // éteint chaque renderer à tour de rôle et on mesure ce qu'on perd.
             yield return MeasurePerRenderer(clone, probeCamera, renderTexture);
 
+            // L'avatar doit pouvoir prendre une pose (nager, marcher, rester immobile) : si l'`Animator`
+            // conservé sur la copie ne répond pas, il faut le savoir maintenant et pas au moment où le
+            // réseau enverra un état.
+            yield return AnimatorPoseTest(clone);
+
             // La copie repasse sur le calque du monde : c'est l'état qu'aurait un vrai avatar distant.
             RemoteAvatarFactory.MoveRenderersToWorldLayer(clone);
 
@@ -664,6 +669,141 @@ namespace Coop.Client
             }
 
             return builder.ToString();
+        }
+
+        /// <summary>
+        /// Vérifie que l'`Animator` de la copie pilote réellement le squelette, et relève les paramètres
+        /// exacts qu'il écoute.
+        ///
+        /// La mesure est directe : on cuit le maillage du corps (les sommets déformés par le skinning) et
+        /// on calcule **le déplacement moyen des sommets** entre deux états. Un `Animator` inerte laisse ce
+        /// chiffre à zéro, quels que soient les paramètres qu'on lui donne ; un `Animator` vivant le fait
+        /// bouger. Relever les noms des paramètres est le deuxième livrable : c'est exactement ce que le
+        /// réseau devra pousser pour donner une pose à un joueur distant.
+        /// </summary>
+        private IEnumerator AnimatorPoseTest(GameObject clone)
+        {
+            var animator = clone.GetComponentInChildren<Animator>();
+            if (animator == null)
+            {
+                Log.LogError("[sonde] aucun Animator dans la copie : la pose ne sera pas pilotable.");
+                yield break;
+            }
+
+            var controller = animator.runtimeAnimatorController;
+            Log.LogInfo(
+                $"[sonde] animator '{animator.name}', controller={(controller == null ? "aucun" : controller.name)}, " +
+                $"{animator.parameters.Length} paramètre(s), mise à jour={(animator.updateMode)}");
+
+            var body = FindBodyRenderer(clone);
+            if (body == null)
+            {
+                Log.LogError("[sonde] aucun maillage de corps cuit : pose non mesurable.");
+                yield break;
+            }
+
+            var reference = BakePose(body);
+            yield return new WaitForSeconds(0.5f);
+            var spontaneous = PoseDistance(reference, BakePose(body));
+
+            Log.LogInfo(
+                spontaneous < 0f
+                    ? "[sonde] pose : mesure impossible (cuisson échouée)."
+                    : $"[sonde] pose spontanée : {spontaneous:F4} m de déplacement moyen des sommets en 0,5 s " +
+                      "(0 = squelette figé, donc animator qui ne tourne pas)");
+
+            var reference2 = BakePose(body);
+            var moved = 0;
+
+            foreach (var parameter in animator.parameters)
+            {
+                switch (parameter.type)
+                {
+                    case AnimatorControllerParameterType.Bool:
+                        animator.SetBool(parameter.name, true);
+                        break;
+                    case AnimatorControllerParameterType.Float:
+                        animator.SetFloat(parameter.name, 1f);
+                        break;
+                    case AnimatorControllerParameterType.Int:
+                        animator.SetInteger(parameter.name, 1);
+                        break;
+                    case AnimatorControllerParameterType.Trigger:
+                        animator.SetTrigger(parameter.name);
+                        break;
+                    default:
+                        continue;
+                }
+
+                animator.Update(0.25f);
+                var distance = PoseDistance(reference2, BakePose(body));
+                moved += distance > 0.002f ? 1 : 0;
+
+                Log.LogInfo($"[sonde]   '{parameter.name}' ({parameter.type}) -> déplacement des sommets {distance:F4} m");
+                yield return null;
+            }
+
+            Log.LogInfo(
+                $"[sonde] pose : {moved}/{animator.parameters.Length} paramètre(s) déplacent réellement le squelette");
+        }
+
+        /// <summary>Le maillage qui porte le corps visible (le plus de sommets), pour mesurer la pose.</summary>
+        private static SkinnedMeshRenderer FindBodyRenderer(GameObject clone)
+        {
+            SkinnedMeshRenderer best = null;
+
+            foreach (var renderer in clone.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (renderer.sharedMesh == null)
+                {
+                    continue;
+                }
+
+                if (best == null || renderer.sharedMesh.vertexCount > best.sharedMesh.vertexCount)
+                {
+                    best = renderer;
+                }
+            }
+
+            return best;
+        }
+
+        /// <summary>Sommets déformés par le skinning, tels qu'Unity les calcule à cet instant.</summary>
+        private static Vector3[] BakePose(SkinnedMeshRenderer renderer)
+        {
+            var baked = new Mesh();
+
+            try
+            {
+                renderer.BakeMesh(baked);
+                return baked.vertices;
+            }
+            catch (System.Exception exception)
+            {
+                Log.LogWarning($"[sonde] cuisson impossible pour la pose : {exception.Message}");
+                return null;
+            }
+            finally
+            {
+                Object.Destroy(baked);
+            }
+        }
+
+        /// <summary>Déplacement moyen des sommets entre deux poses, en mètres.</summary>
+        private static float PoseDistance(Vector3[] a, Vector3[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length)
+            {
+                return -1f;
+            }
+
+            var total = 0f;
+            for (var i = 0; i < a.Length; i++)
+            {
+                total += Vector3.Distance(a[i], b[i]);
+            }
+
+            return total / a.Length;
         }
 
         private static string MeshName(Renderer renderer)

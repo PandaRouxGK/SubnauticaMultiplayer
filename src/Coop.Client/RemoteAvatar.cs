@@ -187,11 +187,46 @@ namespace Coop.Client
             StripNonVisualComponents(clone);
             ForceRenderersEnabled(clone);
             FixSkinnedMeshCulling(clone);
+            MakeAnimationIgnoreVisibility(clone);
 
             // Les calques ne sont **pas** touchés ici : le corps du joueur vit sur le calque
             // `Viewmodel`, propre à la vue première personne. Un avatar mondial doit être ailleurs,
             // mais ce choix se mesure (voir AvatarProbeBehaviour) plutôt que de se décider à l'aveugle.
             return clone;
+        }
+
+        /// <summary>
+        /// Fait tourner l'animation de la copie même quand le moteur ne la « voit » pas.
+        ///
+        /// `Animator.cullingMode` vaut `CullUpdateTransforms` par défaut : Unity cesse alors de mettre à
+        /// jour les os d'un maillage qu'il ne considère pas visible. Sur une copie, ce jugement est faux —
+        /// mesuré : 3 renderers sur 25 « visibles » alors que la copie change 10 000 px à l'écran — et le
+        /// résultat est un squelette **figé** : 0,0000 m de déplacement moyen des sommets en 0,5 s, et
+        /// **201 paramètres d'animation sans le moindre effet** (`move_speed`, `is_underwater`,
+        /// `swimming_fast`, `holding_*`...). `AlwaysAnimate` supprime cette dépendance à la visibilité, qui
+        /// n'a aucun sens pour un avatar qu'on veut précisément voir bouger.
+        /// </summary>
+        private static void MakeAnimationIgnoreVisibility(GameObject clone)
+        {
+            var animators = clone.GetComponentsInChildren<Animator>(true);
+            var changed = 0;
+
+            foreach (var animator in animators)
+            {
+                var previous = animator.cullingMode;
+                if (previous == AnimatorCullingMode.AlwaysAnimate)
+                {
+                    continue;
+                }
+
+                animator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+                changed++;
+                Log.LogInfo(
+                    $"[avatar] animator '{Path(animator.transform)}' : cullingMode {previous} -> AlwaysAnimate " +
+                    "(sinon les os restent figés).");
+            }
+
+            Log.LogInfo($"[avatar] animation : {changed}/{animators.Length} animator(s) mis en AlwaysAnimate.");
         }
 
         /// <summary>
