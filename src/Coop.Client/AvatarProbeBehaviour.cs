@@ -400,8 +400,13 @@ namespace Coop.Client
             var details = new StringBuilder();
             var drawn = 0;
 
-            foreach (var target in renderers)
+            for (var index = 0; index < renderers.Length; index++)
             {
+                var target = renderers[index];
+                if (target == null)
+                {
+                    continue;
+                }
                 target.enabled = true;
 
                 foreach (var other in renderers)
@@ -422,10 +427,13 @@ namespace Coop.Client
                 if (alone > 20)
                 {
                     drawn++;
-                    details.Append($"\n      {alone,6} px  {width,3}x{height,3}  {MeshName(target)}");
+                    details.Append($"\n      {alone,6} px  {width,3}x{height,3}  {MeshName(target)}" + BakedBounds(target));
                 }
                 else
                 {
+                    // Note : recréer le `SkinnedMeshRenderer` pour lever un état interne douteux a été
+                    // essayé, et **fait tomber le jeu** (`NullReferenceException` pendant la remise en
+                    // place). Cette piste est donc fermée, pas seulement infructueuse.
                     // Le détail est indispensable : « 0 pixel » a trois causes très différentes — le
                     // maillage est ailleurs, il est dégénéré, ou le moteur refuse de le dessiner. Sans
                     // ces valeurs on réparerait au hasard (la correction des bornes a déjà été faite
@@ -573,9 +581,27 @@ namespace Coop.Client
 
             var size = baked.bounds.size;
             var center = baked.bounds.center;
+
+            // Le nombre de triangles est décisif : un maillage avec des sommets mais **aucun triangle**
+            // a des bornes justes et ne se dessine jamais, quel que soit son matériau, ses os, son calque
+            // ou son activation. `Mesh.triangles` est interdit sur le maillage du jeu, mais le maillage
+            // cuit est à nous — c'est donc ici, et seulement ici, qu'on peut le compter.
+            var indices = new StringBuilder();
+            var total = 0;
+
+            for (var i = 0; i < baked.subMeshCount; i++)
+            {
+                var count = (int)baked.GetIndexCount(i);
+                total += count;
+                indices.Append(i == 0 ? $" {count}" : $"+{count}");
+            }
+
+            var vertices = baked.vertexCount;
+            var subMeshes = baked.subMeshCount;
             Object.Destroy(baked);
 
-            return $", cuit : centre={center.ToString("F3")}, taille={size.ToString("F3")}";
+            return $", cuit : centre={center.ToString("F3")}, taille={size.ToString("F3")}, " +
+                   $"sommets={vertices}, sous-maillages={subMeshes}, indices={total} ({indices.ToString().Trim()})";
         }
 
         /// <summary>

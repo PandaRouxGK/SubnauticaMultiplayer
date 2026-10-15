@@ -813,18 +813,30 @@ Hypothèses testées puis **falsifiées**, chacune par une mesure :
 | GameObject inactif | `activeInHierarchy` | **True** |
 | `forceRenderingOff` hérité | relevé sur les 25 renderers | **0** renderer concerné |
 | Matériau en cause | matériau neuf, opaque | **0 px** aussi |
+| Géométrie absente | comptage des indices du maillage cuit | **39 399 indices** (13 133 triangles), 7 553 sommets — il y a bien de quoi dessiner |
+| Recréer le renderer | `Destroy` + `AddComponent<SkinnedMeshRenderer>` | `NullReferenceException`, **fait tomber le jeu** — piste fermée, pas seulement infructueuse |
 
-Ce qui reste est donc **le renderer lui-même**, et la piste la plus prometteuse est identifiée : le jeu a
-un **second objet de tête**, `Player/camPivot/camRoot/camOffset/player_head` (`SkinnedMeshRenderer`,
-maillage `scuba_head`, désactivé, calque `Viewmodel`). Il vit **hors de `Player/body`**, donc hors de la
-copie actuelle — c'est le seul autre candidat repéré, et il faudra le copier ou l'attacher au cou de
-l'avatar.
+**Deuxième source de tête essayée et écartée.** Le jeu a un second objet de tête,
+`Player/camPivot/camRoot/player_head` (`SkinnedMeshRenderer`, maillage `scuba_head`), qui vit **hors** de
+`Player/body`. Copié puis rattaché à l'avatar, il donne un maillage cuit **vide** (0 x 0 x 0) alors qu'il
+porte 12 252 indices : ses sommets s'effondrent tous à l'origine, faute d'os dans la copie (son tableau
+d'os est vide, donc « 0 os remappé, 0 non remappé »). Ce n'est pas une source utilisable, et le code qui
+le copiait a été retiré plutôt que laissé derrière un garde-fou : un objet fantôme à 78 m ne doit pas
+rester dans la scène d'un client.
+
+Un **second exemple du même symptôme** a été trouvé au passage : `scubaSuit/scuba_head`, à l'intérieur
+du corps, cuit correctement (0,205 x 0,351 x 0,294 m, 12 252 indices) et ne se dessine pas non plus.
+Deux têtes, deux branches de tenues différentes, même comportement — ce n'est donc pas un défaut propre
+à la tenue portée. À noter que les trois maillages de tête du jeu (les deux ci-dessus et les versions
+`radiationSuit_head_geo` / `diveSuit_head_geo`) partagent la même particularité : **5 os seulement**
+(mâchoire et yeux), là où le corps en a 43 et les mains 36.
 
 ### Ce qui reste ouvert (suite de M2.1)
 
-- **La tête** : à récupérer depuis `player_head`, ou à obtenir en comprenant pourquoi ce renderer n'est
-  pas dessiné. Sept hypothèses ont été éliminées par la mesure ; la suivante doit viser le renderer
-  lui-même (état interne du `SkinnedMeshRenderer`), pas son environnement.
+- **La tête** : neuf hypothèses éliminées, et les deux sources évidentes le sont aussi. La suite ne doit
+  plus viser le maillage, le matériau, l'activation, les bornes, les os, le calque ni le renderer, mais
+  **la façon dont le jeu lui-même dessine une tête** — c'est la seule chose qui n'a pas été regardée. Un
+  avatar sans tête est un défaut visible mais qui ne bloque rien : il ne doit pas retarder le réseau.
 - **L'`Animator` n'est pas piloté** : la copie est en pose figée. Il faudra le piloter (nage, marche,
   immobile) depuis l'état réseau.
 - Le **PDA** fait partie du corps copié et le restera tant que la composition de l'avatar n'est pas

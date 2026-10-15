@@ -258,18 +258,16 @@ namespace Coop.Client
         }
 
         /// <summary>
-        /// Corrige les bornes des maillages squelettiques copiés.
+        /// Assainit l'état de dessin des maillages squelettiques copiés.
         ///
-        /// Unity décide de **dessiner ou non** un `SkinnedMeshRenderer` d'après ses bornes. Sur une
-        /// copie, ces bornes sont celles de l'original : elles ne suivent pas les os de la copie, et
-        /// elles sont visiblement fausses (4,01 m annoncés pour un corps d'1,90 m). Le résultat mesuré
-        /// est sans ambiguïté : **2 maillages sur 25 se dessinent** alors que les 25 sont actifs, et
-        /// `Renderer.isVisible` n'en voit que 3 — un maillage qui n'est pas considéré comme visible
-        /// n'est pas dessiné, quels que soient son mesh, ses matériaux et ses os.
-        ///
-        /// `updateWhenOffscreen` fait recalculer les bornes depuis la pose réelle à chaque image, et on
-        /// repart des bornes du maillage lui-même (`sharedMesh.bounds`, la pose de liaison) plutôt que de
-        /// bornes relevées sur un autre objet.
+        /// **Ce correctif n'a rien changé au rendu, et la raison pour laquelle il a été écrit était
+        /// fausse** : les maillages qui ne se dessinaient pas appartenaient aux tenues que le joueur ne
+        /// porte pas, donc désactivées dans la hiérarchie, pas mal cullées à cause de bornes figées.
+        /// Cela reste écrit ici parce que l'état est réellement douteux après une copie — les bornes
+        /// annonçaient 4,01 m pour un corps d'1,90 m — et parce que le relevé de la cause réelle est une
+        /// leçon : `Renderer.isVisible` et les bornes sont trompeurs sur ces copies, la mesure de pixels
+        /// ne l'est pas. Les deux hypothèses suivantes (occlusion dynamique, ordre de non-dessin hérité)
+        /// ont été mesurées puis écartées de la même façon.
         /// </summary>
         private static void FixSkinnedMeshCulling(GameObject clone)
         {
