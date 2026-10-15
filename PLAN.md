@@ -1004,3 +1004,113 @@ l'instance a été arrêtée ensuite ; les deux captures sont écrites
 - Le test de rendu ne juge que la présence de pixels : il ne dit pas que la tête est **bien orientée** ni
   qu'elle est à l'échelle exacte. C'est la mesure du §16 (0,33 m, +0,09 m au-dessus de l'origine) qui
   l'établit, et elle venait du maillage, pas de l'image.
+
+---
+
+## 19. M2.1 — l'avatar porte la tenue de **son** joueur (validé le 2026-10-15)
+
+**Verdict : la copie ne se contente plus d'hériter de la tenue du joueur local. Les six groupes
+d'équipement du jeu sont pilotés par les règles de Nitrox, transcrites et mesurées : cinq scénarios,
+cinq verdicts vrais, deux exécutions concordantes.**
+
+### Le défaut, qui n'était pas visible en jouant seul
+
+Le corps du joueur contient **toutes** les tenues à la fois, et c'est le jeu qui n'en laisse voir qu'une.
+La copie héritait donc de l'état du joueur local : tant qu'on joue seul avec la même tenue, personne ne le
+voit ; dès que deux joueurs diffèrent, l'avatar est faux. Mesuré au moment de la copie, dans les deux
+exécutions : **7 nœuds étaient visibles à tort** et la remise à zéro les a masqués. C'est exactement la
+superposition que le §15 décrivait comme « à faire pour M2.1 », mais chiffrée : le défaut était réel, pas
+théorique.
+
+### La source, et ce qui a été transcrit
+
+`SubnauticaNitrox/Nitrox`, commit `7815b4e` (v1.9.0.0) — six gestionnaires dans
+`NitroxClient/GameLogic/PlayerLogic/PlayerModel/Equipment/`, plus les chemins de nœuds de
+`PlayerEquipmentConstants.cs` :
+
+| Gestionnaire | Ce qu'il décide | Dépendances croisées, telles quelles |
+|---|---|---|
+| `DiveSuitVisibilityHandler` | corps, tête et mains de base | s'effacent devant anti-radiations / survie / renforcée / casque / détendeur |
+| `FinsVisibilityHandler` | trois paires de palmes, chacune avec sa racine | — |
+| `RadiationSuitVisibilityHandler` | les 8 pièces de l'anti-radiations | gilet si corps **ou** casque ; bouteille si gilet ; tuyaux si bouteille **et** casque |
+| `ReinforcedSuitVisibilityHandler` | corps et gants renforcés | — |
+| `ScubaSuitVisibilityHandler` | détendeur, gilet-bouteille, tuyaux | gilet si bouteille **et pas** anti-radiations ; racine si détendeur **ou** bouteille |
+| `StillSuitVisibilityHandler` | combinaison de survie | — |
+
+Ces règles sont une **fonction pure** de l'équipement vers l'état des nœuds, ce qui a permis de les
+mesurer sans réseau : la sonde appelle exactement la méthode qu'un paquet d'équipement déclenchera.
+
+### Deux écarts assumés par rapport à Nitrox
+
+- **Pas d'objets gestionnaires partagés.** Nitrox construit une liste par joueur distant, et le commentaire
+de `PlayerModelManager` mentionne un bug causé par le partage de cette liste entre joueurs. Ici, une
+fonction pure : rien à partager, rien à réinitialiser, appelable autant de fois qu'on veut.
+- **Un nœud absent n'est jamais fatal.** Nitrox appelle `Transform.Find` sans garde (un nœud renommé par le
+jeu lèverait une `NullReferenceException`). Ici les nœuds introuvables sont **comptés et nommés** dans le
+journal, et un état de nœud a trois valeurs — `actif`, `masqué`, `INTROUVABLE` — parce que confondre
+« masqué » et « introuvable » ferait passer un chemin de travers pour une tenue correcte.
+
+### Preuves mesurées (deux exécutions : 13:03 et 13:07, DLL déployées)
+
+| Scénario | Nœuds actifs | Pixels (run 1 / run 2) | Verdict |
+|---|---|---|---|
+| sans équipement | 3 : tête, corps, mains du scaphandre | 11 190 / **11 188** | True |
+| anti-radiations + casque + gants + bouteille | 8 : dont casque, bouteille, tuyaux, col | 12 973 / **12 972** | True |
+| combinaison de survie | 3 : tête, mains, corps de survie | 11 377 / **11 378** | True |
+| combinaison renforcée + gants | 3 : tête, corps et gants renforcés | 11 377 / **11 377** | True |
+| palmes + détendeur + bouteille | 8 : dont palmes et détendeur | 14 681 / **14 679** | True |
+
+Chaque verdict vérifie deux choses : le nœud attendu **visible** l'est, et celui qui doit disparaître l'est
+aussi (`diveSuit_body_geo` sous l'anti-radiations, `diveSuit_hands_geo` sous la renforcée,
+`diveSuit_head_geo` sous le détendeur). Les écarts entre les deux exécutions sont de 1 à 2 pixels, donc la
+mesure est stable. L'étendue passe de 124x298 à **188x322 px** avec les palmes : la silhouette change, ce
+qui est bien ce qu'on demande à une tenue. Cinq images de tenue sont écrites dans `BepInEx/logs/`
+(`coop-avatar-tenue-*.png`), en plus des deux captures du §18.
+
+Aucune exception, et le correctif de tête du §18 tient toujours : `1 renderer(s) sortis de ShadowsOnly`,
+étendue 100x281 px, rendu isolé 11 769 px (4,5 %), verdict de rendu True (12 839 px de signal contre
+669 px de bruit).
+
+### L'objet tenu : une règle corrigée par la mesure
+
+Le jeu accroche l'outil du joueur sur l'os `attach1`, donc une copie du corps l'emporte — le joueur
+distant brandirait l'outil de quelqu'un d'autre. Le premier jet masquait **tous** les enfants de `attach1`
+et annonçait « 2 objet(s) masqué(s) » : la mesure a montré que ces deux enfants sont `attach1_forward` et
+`attach1_up`, des nœuds d'orientation du jeu qui ne dessinent rien. La règle retenue est donc « un objet
+tenu est **dessinable** » (au moins un `Renderer`), et le journal dit maintenant la vérité :
+`0 objet(s) tenu(s) masqué(s) (rien de dessinable sur attach1), 2 nœud(s) structurel(s) laissé(s) tel quel`.
+
+### Ce que le réseau devra faire (et qui reste à faire)
+
+- **Le sens « reçu »** est prêt : `RemoteAvatarFactory.ApplyEquipment(clone, noms)` prend des **noms** de
+`TechType` et renvoie ceux qu'il n'a pas reconnus. Rien n'est avalé en silence.
+- **Le sens « émis »** ne l'est pas : lire l'équipement du joueur local (`Inventory.main.equipment`) pour
+l'envoyer n'est pas implémenté, et la bonne façon d'énumérer ses emplacements doit être relevée avec
+`tools/ApiDump` plutôt que devinée.
+- Un paquet d'équipement ne transporte aujourd'hui **rien** : la sonde alimente les règles directement.
+
+### Limites, dites franchement
+
+- **Le cas « le joueur tient un outil » n'a pas été exercé** : pendant les deux exécutions, le joueur
+local ne tenait rien. La règle est écrite et mesurée sur son cas vide, pas sur un objet réel.
+- **Six groupes de tenues, pas la totalité du modèle** : le PDA et les maillages hors tenues ne sont pas
+pilotés ici (le PDA est inactif dans la copie, mesuré au §16).
+- **Pas de couleur par joueur** : Nitrox recolore les tenues (`ColorSwap`) pour distinguer les joueurs.
+Rien de tel ici, donc deux joueurs en scaphandre de base restent identiques — c'est le prochain défaut
+visible, après la tenue.
+- Les règles viennent d'une lecture du code de Nitrox, pas d'une documentation officielle : si le jeu
+renomme un nœud, le journal le dira (`nœud(s) INTROUVABLE(S)`), et c'est prévu pour être vu.
+
+### Reproduire ces mesures
+
+```
+dotnet build src/Coop.Client/Coop.Client.csproj
+cp src/Coop.Client/bin/Debug/Coop.Client.dll "<jeu>/BepInEx/plugins/Coop/"
+cd "<jeu>" && echo 264710 > steam_appid.txt
+./Subnautica.exe -coopmode=client -coopdebug=avatar      # les DEUX drapeaux sont nécessaires
+# ~3 min plus tard : BepInEx/logs/coop-client.log
+```
+
+Sans `-coopmode=client`, les deux plugins restent inactifs (`mode=Off`) ; sans `-coopdebug=avatar`, la sonde
+n'est pas attachée. Deux exécutions ont été perdues aujourd'hui pour avoir omis l'un puis l'autre — la
+ligne ci-dessus est là pour que ça n'arrive plus.

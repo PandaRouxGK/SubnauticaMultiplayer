@@ -382,6 +382,11 @@ namespace Coop.Client
             // réseau enverra un état.
             yield return AnimatorPoseTest(clone);
 
+            // La copie doit pouvoir porter **la** tenue de son joueur et pas celle du joueur local :
+            // c'est la différence la plus visible entre deux joueurs, et elle se mesure (silhouette,
+            // pixels) au lieu de se croire.
+            yield return MeasureEquipmentScenarios(clone, probeCamera, renderTexture);
+
             // La copie repasse sur le calque du monde : c'est l'état qu'aurait un vrai avatar distant.
             RemoteAvatarFactory.MoveRenderersToWorldLayer(clone);
 
@@ -389,6 +394,103 @@ namespace Coop.Client
             Destroy(cameraObject);
             renderTexture.Release();
             Destroy(renderTexture);
+        }
+
+        /// <summary>
+        /// Mesure la tenue de l'avatar sous plusieurs équipements, en appliquant les règles du jeu.
+        ///
+        /// Ce que ce test doit établir, et qu'aucune capture ne montrerait seule :
+        ///
+        /// - la tenue **change** de composition selon l'équipement reçu (nombre de nœuds actifs, pixels) ;
+        /// - un nœud piloté qui doit être masqué l'est **vraiment**, et un nœud attendu visible l'est
+        ///   aussi — un verdict explicite par scénario, pas une impression de capture ;
+        /// - rien ne lève d'exception sur ces chemins-là, y compris pour un nœud absent.
+        ///
+        /// C'est aussi la répétition générale de ce que le réseau fera : chaque scénario appelle la même
+        /// méthode que celle qu'un paquet d'équipement déclenchera.
+        /// </summary>
+        private IEnumerator MeasureEquipmentScenarios(GameObject clone, Camera probeCamera, RenderTexture renderTexture)
+        {
+            Log.LogInfo("[sonde] --- tenue : la copie doit porter l'équipement de son joueur ---");
+
+            var scenarios = new (string Key, TechType[] Equipment, string Visible, string Hidden)[]
+            {
+                ("sans-equipement", new TechType[0],
+                    RemoteAvatarEquipment.DiveSuitBody, RemoteAvatarEquipment.RadiationSuit),
+                ("combinaison-anti-radiations",
+                    new[] { TechType.RadiationSuit, TechType.RadiationHelmet, TechType.RadiationGloves, TechType.Tank },
+                    RemoteAvatarEquipment.RadiationSuit, RemoteAvatarEquipment.DiveSuitBody),
+                ("combinaison-de-survie",
+                    new[] { TechType.WaterFiltrationSuit },
+                    RemoteAvatarEquipment.StillSuit, RemoteAvatarEquipment.DiveSuitBody),
+                ("combinaison-renforcee",
+                    new[] { TechType.ReinforcedDiveSuit, TechType.ReinforcedGloves },
+                    RemoteAvatarEquipment.ReinforcedSuit, RemoteAvatarEquipment.DiveSuitHands),
+                ("palmes-detendeur-bouteille",
+                    new[] { TechType.Fins, TechType.Rebreather, TechType.Tank },
+                    RemoteAvatarEquipment.Fins, RemoteAvatarEquipment.DiveSuitHead),
+            };
+
+            foreach (var scenario in scenarios)
+            {
+                RemoteAvatarEquipment.Apply(clone, scenario.Equipment);
+
+                // Une frame au moins : les bornes des maillages squelettiques sont recalculées depuis la
+                // pose réelle, et une tenue qu'on vient de montrer n'est dessinable qu'après.
+                yield return new WaitForEndOfFrame();
+
+                probeCamera.Render();
+                var coverage = ReadCoverage(renderTexture, out var texture, out var luminance, out var width, out var height);
+
+                var expectedVisible = RemoteAvatarEquipment.NodeActive(clone, scenario.Visible);
+                var expectedHidden = RemoteAvatarEquipment.NodeActive(clone, scenario.Hidden);
+                var active = RemoteAvatarEquipment.ActiveGovernedNodes(clone);
+
+                // `null` (nœud introuvable) n'est pas `false` : on refuse de compter un chemin perdu
+                // comme une tenue correcte.
+                var verdict = expectedVisible == true && expectedHidden == false;
+
+                Log.LogInfo(
+                    $"[sonde] tenue '{scenario.Key}' : {coverage} px ({width}x{height} px sur " +
+                    $"{renderTexture.width}x{renderTexture.height}, luminance {luminance:F0}/255), " +
+                    $"{active.Count} nœud(s) actif(s) : {string.Join(", ", active)}");
+                Log.LogInfo(
+                    $"[sonde] tenue '{scenario.Key}' : attendu visible '{Leaf(scenario.Visible)}'=" +
+                    $"{Format(expectedVisible)}, attendu masqué '{Leaf(scenario.Hidden)}'={Format(expectedHidden)} " +
+                    $"-> verdict={verdict}");
+
+                if (!verdict)
+                {
+                    Log.LogError($"[sonde] tenue '{scenario.Key}' : composition incorrecte après application des règles.");
+                }
+
+                if (texture != null)
+                {
+                    var path = EquipmentProofPath(scenario.Key);
+                    File.WriteAllBytes(path, texture.EncodeToPNG());
+                    Log.LogInfo($"[sonde] tenue '{scenario.Key}' : image écrite -> {path}");
+                    Destroy(texture);
+                }
+            }
+
+            // On laisse l'avatar dans l'état par défaut : la dernière tenue mesurée ne doit pas rester
+            // affichée comme si elle avait été décidée par le réseau.
+            RemoteAvatarEquipment.Apply(clone, new TechType[0]);
+            yield return new WaitForEndOfFrame();
+
+            // Les nœuds gouvernés hors `male_geo` (l'objet tenu) ont leur propre relevé, plus haut.
+            Log.LogInfo($"[sonde] tenue : règles appliquées sans exception sur {scenarios.Length} scénario(s).");
+        }
+
+        /// <summary>Rend lisible un état de nœud à trois valeurs, en gardant `introuvable` distinct.</summary>
+        private static string Format(bool? active) =>
+            active == null ? "INTROUVABLE" : active.Value ? "actif" : "masqué";
+
+        /// <summary>Dernier segment d'un chemin de nœud : les journaux restent lisibles.</summary>
+        private static string Leaf(string path)
+        {
+            var separator = path.LastIndexOf('/');
+            return separator < 0 ? path : path.Substring(separator + 1);
         }
 
         /// <summary>
@@ -1125,5 +1227,9 @@ namespace Coop.Client
         /// <summary>Image de la copie seule, sur fond magenta, prise par notre propre caméra.</summary>
         private static string IsolatedProofPath() =>
             Path.GetFullPath(Path.Combine(Application.dataPath, "..", "BepInEx", "logs", "coop-avatar-isolated.png"));
+
+        /// <summary>Une image par tenue mesurée : quatre silhouettes différentes valent mieux qu'une.</summary>
+        private static string EquipmentProofPath(string key) =>
+            Path.GetFullPath(Path.Combine(Application.dataPath, "..", "BepInEx", "logs", $"coop-avatar-tenue-{key}.png"));
     }
 }

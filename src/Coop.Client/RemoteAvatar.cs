@@ -191,10 +191,53 @@ namespace Coop.Client
             MakeAnimationIgnoreVisibility(clone);
             AllowRenderingInsteadOfShadowsOnly(clone);
 
+            // La copie hérite de la tenue **du joueur local** : on la remet d'abord dans l'état d'un
+            // joueur sans équipement, puis c'est le réseau qui dira ce que porte le joueur distant.
+            // Sans cette remise à zéro, deux joueurs en tenues différentes se ressembleraient.
+            RemoteAvatarEquipment.HideAttachedItems(clone);
+            RemoteAvatarEquipment.Apply(clone, Array.Empty<TechType>());
+
             // Les calques ne sont **pas** touchés ici : le corps du joueur vit sur le calque
             // `Viewmodel`, propre à la vue première personne. Un avatar mondial doit être ailleurs,
             // mais ce choix se mesure (voir AvatarProbeBehaviour) plutôt que de se décider à l'aveugle.
             return clone;
+        }
+
+        /// <summary>
+        /// Applique l'équipement d'un joueur distant à sa copie — le point d'entrée que le réseau
+        /// appellera quand l'équipement d'un joueur changera.
+        ///
+        /// Prend des **noms** de `TechType` : c'est la forme la plus stable pour transporter une pièce
+        /// d'équipement (une valeur numérique d'énumération peut bouger d'une version du jeu à l'autre),
+        /// et les noms non reconnus sont renvoyés au lieu d'être avalés.
+        /// </summary>
+        public static IReadOnlyList<string> ApplyEquipment(GameObject clone, IEnumerable<string> techTypeNames)
+        {
+            EnsureCloneBelongsToUs(clone);
+            return RemoteAvatarEquipment.ApplyNames(clone, techTypeNames);
+        }
+
+        /// <summary>
+        /// Refuse d'agir sur autre chose que nos copies.
+        ///
+        /// Ces méthodes sont publiques et prendront des objets venus de l'extérieur : les appliquer au
+        /// corps du joueur local désactiverait ses propres maillages, et il disparaîtrait de sa propre
+        /// vue. Un garde-fou qui nomme l'objet fautif vaut mieux qu'un commentaire qui demande de faire
+        /// attention.
+        /// </summary>
+        private static void EnsureCloneBelongsToUs(GameObject clone)
+        {
+            if (clone == null)
+            {
+                throw new ArgumentNullException(nameof(clone));
+            }
+
+            if (!clone.name.StartsWith(CloneName, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    $"'{Path(clone.transform)}' n'est pas une copie d'avatar ('{CloneName}') : la modifier " +
+                    "désactiverait les maillages du joueur local.", nameof(clone));
+            }
         }
 
         /// <summary>
