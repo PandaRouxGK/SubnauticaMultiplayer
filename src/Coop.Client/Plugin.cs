@@ -76,6 +76,12 @@ namespace Coop.Client
                 go.AddComponent<SaveGuardSelfTestBehaviour>();
             }
 
+            if (IsDebugFlagSet("avatar"))
+            {
+                Log.LogWarning("[boot] sonde d'avatar activée (-coopdebug=avatar).");
+                go.AddComponent<AvatarProbeBehaviour>();
+            }
+
             Log.LogInfo($"[boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde={saveGuardInstalled}).");
         }
 

@@ -41,6 +41,31 @@
       <HintPath>$(SubnauticaManaged)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Unity 2019.4 éclate UnityEngine en modules : ces types sont "forwardés" depuis
+         UnityEngine.dll et ne se résolvent qu'avec le module qui les porte réellement.
+         AnimationModule = Animator, PhysicsModule = Collider/Rigidbody,
+         AudioModule = AudioListener, ScreenCaptureModule = ScreenCapture. -->
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ScreenCaptureModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.ScreenCaptureModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- ImageConversionModule : Texture2D.EncodeToPNG, pour écrire les images de preuve. -->
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>
