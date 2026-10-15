@@ -152,15 +152,23 @@ namespace Coop.Client
             // verdict basculait d'un run à l'autre sans que rien ne change dans le rendu (bruit 456 px
             // dans un run, 2111 px dans l'autre, pour un signal stable autour de 11 000 px). Un test qui
             // change de réponse sans que le monde change ne teste rien.
-            var shots = new Texture2D[5];
+            // Masquée x4 puis visible x4, à une frame d'intervalle : le bruit se mesure entre deux
+            // clichés du **même** état, le signal entre deux états différents.
+            //
+            // Quatre échantillons de chaque, et on compare les **médianes**, parce que le bruit de la
+            // scène est erratique : une vague ou une lueur de HUD fait changer 2 381 px sur une frame
+            // isolée, contre 214 px sur une autre. Comparer un signal à un unique pire cas de bruit
+            // faisait échouer un avatar qui rend (9 198 px de signal contre un seuil de 9 524 px calculé
+            // sur cette frame-là). La médiane ignore l'échantillon aberrant, des deux côtés.
+            // Deux paires de chaque état : [masquée, masquée], [visible, visible], et on recommence.
+            // Le bruit se mesure **dans** une paire, le signal **entre** deux paires, toujours à une frame
+            // d'écart. Un premier motif « quatre d'un état puis quatre de l'autre » ne laissait qu'un seul
+            // vrai changement d'état : les trois autres « signaux » étaient des paires du même état
+            // (426, 295, 272 px), et leur médiane ne mesurait plus rien du tout.
+            var shots = new Texture2D[8];
             for (var i = 0; i < shots.Length; i++)
             {
-                // Masquée, masquée, visible, visible, masquée : le bruit se mesure entre deux clichés du
-                // **même** état, et le signal entre deux clichés d'états différents. Alterner à chaque
-                // frame — l'erreur de la version précédente — met l'avatar dans chaque écart : les
-                // quatre mesures disent alors la même chose (11 346, 11 797, 11 505, 11 434 px), et le
-                // « bruit » annoncé est en réalité le signal, ce qui faisait échouer un avatar qui rend.
-                clone.SetActive(i == 2 || i == 3);
+                clone.SetActive(i % 4 >= 2);
                 yield return new WaitForEndOfFrame();
                 shots[i] = Capture();
             }
@@ -169,27 +177,38 @@ namespace Coop.Client
 
             // Signal : on prend le plus faible des deux (conservateur).
             // Bruit : on prend le plus fort des deux (conservateur aussi).
-            var noise1 = PixelDifference(shots[0], shots[1]);   // masquée -> masquée
-            var signal1 = PixelDifference(shots[1], shots[2]);  // masquée -> visible
-            var noise2 = PixelDifference(shots[2], shots[3]);   // visible -> visible
-            var signal2 = PixelDifference(shots[3], shots[4]);  // visible -> masquée
+            var noiseSamples = new[]
+            {
+                PixelDifference(shots[0], shots[1]),   // masquée -> masquée
+                PixelDifference(shots[2], shots[3]),   // visible -> visible
+                PixelDifference(shots[4], shots[5]),   // masquée -> masquée
+                PixelDifference(shots[6], shots[7]),   // visible -> visible
+            };
 
-            var signal = System.Math.Min(signal1, signal2);
-            var noise = System.Math.Max(noise1, noise2);
+            var signalSamples = new[]
+            {
+                PixelDifference(shots[1], shots[2]),   // masquée -> visible
+                PixelDifference(shots[3], shots[4]),   // visible -> masquée
+                PixelDifference(shots[5], shots[6]),   // masquée -> visible
+            };
+
+            var noise = Median(noiseSamples);
+            var signal = Median(signalSamples);
             var pixels = shots[0].width * shots[0].height;
 
             Log.LogInfo(
-                $"[sonde] pixels de l'écran={pixels} — signal (changement d'état, une frame d'écart)={signal1} et {signal2} px, " +
-                $"bruit (même état, même écart d'une frame)={noise1} et {noise2} px");
+                $"[sonde] pixels de l'écran={pixels} — signal (changement d'état, une frame d'écart) : " +
+                $"{string.Join(", ", signalSamples)} px -> médiane {signal:F0} ; bruit (même état, même écart) : " +
+                $"{string.Join(", ", noiseSamples)} px -> médiane {noise:F0}");
 
             // Deux exigences : un rapport franc au bruit **et** un plancher absolu (un avatar ne peut pas
             // tenir dans une poignée de pixels, même à distance).
-            var threshold = System.Math.Max(noise * 4, 2000);
+            var threshold = System.Math.Max(noise * 3, 2000);
             var renders = signal > threshold;
 
             Log.LogInfo(
-                $"[sonde] décision : signal retenu={signal} px, bruit retenu={noise} px, seuil={threshold} px " +
-                $"(4x le bruit, plancher 2000) -> la copie rend={renders}");
+                $"[sonde] décision : signal médian={signal:F0} px, bruit médian={noise:F0} px, seuil={threshold:F0} px " +
+                $"(3x le bruit, plancher 2000) -> la copie rend={renders}");
 
             if (!renders)
             {
@@ -356,7 +375,7 @@ namespace Coop.Client
             // Une couverture globale ne dit pas **ce qui** la produit : le corps entier vu petit, ou
             // trois maillages sur vingt-quatre. Les deux cas n'appellent pas le même travail, donc on
             // éteint chaque renderer à tour de rôle et on mesure ce qu'on perd.
-            yield return MeasurePerRenderer(clone, probeCamera, renderTexture, coverage);
+            yield return MeasurePerRenderer(clone, probeCamera, renderTexture);
 
             // La copie repasse sur le calque du monde : c'est l'état qu'aurait un vrai avatar distant.
             RemoteAvatarFactory.MoveRenderersToWorldLayer(clone);
@@ -368,51 +387,65 @@ namespace Coop.Client
         }
 
         /// <summary>
-        /// Contribution de chaque renderer à l'image : on l'éteint, on redessine, on mesure la perte.
+        /// Dessine **chaque maillage tout seul**, l'un après l'autre, et relève ce qu'il donne.
         ///
-        /// C'est le seul moyen de savoir ce que « le corps rend » recouvre réellement. La boîte
-        /// englobante de la copie mesure 5 m pour un corps de moins de 2 m, ce qui trahit des maillages
-        /// qui partent à la dérive : il faut savoir combien dessinent vraiment, et lesquels.
+        /// Mesurer la contribution d'un maillage dans la pile ne dit pas s'il se dessine : un maillage
+        /// peut être caché par celui qui est devant. Ici, rien d'autre n'est dessiné, donc « 0 pixel »
+        /// veut dire « ne se dessine pas », sans ambiguïté — et c'est exactement la question, puisque le
+        /// corps rendu s'arrête au cou : les maillages de la tête sont-ils absents ou cachés ?
         /// </summary>
-        private IEnumerator MeasurePerRenderer(GameObject clone, Camera probeCamera, RenderTexture renderTexture, long fullCoverage)
+        private IEnumerator MeasurePerRenderer(GameObject clone, Camera probeCamera, RenderTexture renderTexture)
         {
             var renderers = clone.GetComponentsInChildren<Renderer>(true);
             var details = new StringBuilder();
-            var contributing = 0;
+            var drawn = 0;
 
-            foreach (var renderer in renderers)
+            foreach (var target in renderers)
             {
-                if (!renderer.enabled)
+                target.enabled = true;
+
+                foreach (var other in renderers)
                 {
-                    continue;
+                    other.enabled = other == target;
                 }
 
-                renderer.enabled = false;
                 probeCamera.Render();
-                var withoutIt = ReadCoverage(renderTexture, out var texture, out _, out _, out _);
-                renderer.enabled = true;
+                var alone = ReadCoverage(renderTexture, out var texture, out _, out var width, out var height);
 
                 if (texture != null)
                 {
                     Destroy(texture);
                 }
 
-                var contribution = fullCoverage - withoutIt;
-                if (contribution <= 50)
+                var centre = target.bounds.center - clone.transform.position;
+
+                if (alone > 20)
                 {
-                    continue;
+                    drawn++;
+                    details.Append($"\n      {alone,6} px  {width,3}x{height,3}  {MeshName(target)}");
+                }
+                else
+                {
+                    // Le détail est indispensable : « 0 pixel » a trois causes très différentes — le
+                    // maillage est ailleurs, il est dégénéré, ou le moteur refuse de le dessiner. Sans
+                    // ces valeurs on réparerait au hasard (la correction des bornes a déjà été faite
+                    // pour rien, sur une hypothèse qui n'a pas survécu à la mesure).
+                    details.Append(
+                        $"\n            -  {MeshName(target)} : centre={centre.ToString("F2")}, taille={target.bounds.size.ToString("F2")}, " +
+                        $"isVisible={target.isVisible}, actifHierarchie={target.gameObject.activeInHierarchy}, " +
+                        $"shader={ShaderNames(target)}" + BoneExtent(target, clone) + BakedBounds(target) + TestWithPlainMaterial(target, probeCamera, renderTexture));
                 }
 
-                contributing++;
-                details.Append($"\n      {contribution,6} px  {MeshName(renderer)}");
-
-                // Redessiner sans laisser la copie dans un état incohérent si une exception survient.
                 yield return null;
             }
 
+            foreach (var renderer in renderers)
+            {
+                renderer.enabled = true;
+            }
+
             Log.LogInfo(
-                $"[sonde] maillages contribuant à l'image : {contributing}/{renderers.Length} " +
-                $"(contribution > 50 px)" + details);
+                $"[sonde] chaque maillage seul : {drawn}/{renderers.Length} se dessinent" + details);
         }
 
         /// <summary>
@@ -458,6 +491,153 @@ namespace Coop.Client
 
                 Log.LogInfo(line);
             }
+        }
+
+        /// <summary>
+        /// Redessine le maillage **avec un matériau simple**, et dit s'il apparaît.
+        ///
+        /// Dernier recours quand tout le reste est en règle : le maillage est bon (vérifié en le faisant
+        /// cuire), le renderer est actif, ses bornes sont saines, son calque est dans le masque de la
+        /// caméra — et il ne donne rien. Il ne reste alors que la façon dont il est dessiné. Si le
+        /// maillage apparaît avec un matériau neuf, le problème est dans le matériau d'origine ; s'il
+        /// n'apparaît pas non plus, c'est le renderer lui-même, et il faut chercher ailleurs.
+        /// </summary>
+        private static string TestWithPlainMaterial(Renderer renderer, Camera probeCamera, RenderTexture renderTexture)
+        {
+            var shader = Shader.Find("Unlit/Color") ?? Shader.Find("Standard");
+            if (shader == null)
+            {
+                return ", matériau de test impossible (aucun shader simple trouvé)";
+            }
+
+            var saved = renderer.sharedMaterials;
+            var plain = new Material(shader) { color = Color.green };
+            var count = 1;
+
+            if (saved != null && saved.Length > 1)
+            {
+                count = saved.Length;
+            }
+
+            var replacement = new Material[count];
+            for (var i = 0; i < count; i++)
+            {
+                replacement[i] = plain;
+            }
+
+            try
+            {
+                renderer.sharedMaterials = replacement;
+                probeCamera.Render();
+                var withPlain = ReadCoverage(renderTexture, out var texture, out _, out _, out _);
+
+                if (texture != null)
+                {
+                    Destroy(texture);
+                }
+
+                return $", avec un matériau simple : {withPlain} px";
+            }
+            finally
+            {
+                renderer.sharedMaterials = saved;
+                Destroy(plain);
+            }
+        }
+
+        /// <summary>
+        /// Ce que le skinning produit réellement, en demandant à Unity de cuire le maillage.
+        ///
+        /// Les bornes déclarées mesurent ce que le moteur *croit*, `BakeMesh` mesure ce qu'il *calcule*.
+        /// Un maillage dont les sommets cuits se réduisent à un point ne se dessinera jamais, quels que
+        /// soient ses bornes, son matériau ou son activation : c'est la seule mesure qui sépare
+        /// « dégénéré » de « dessiné ailleurs ».
+        /// </summary>
+        private static string BakedBounds(Renderer renderer)
+        {
+            if (!(renderer is SkinnedMeshRenderer skinned) || skinned.sharedMesh == null)
+            {
+                return string.Empty;
+            }
+
+            var baked = new Mesh();
+            try
+            {
+                skinned.BakeMesh(baked);
+            }
+            catch (System.Exception exception)
+            {
+                Object.Destroy(baked);
+                return $", cuisson impossible ({exception.GetType().Name})";
+            }
+
+            var size = baked.bounds.size;
+            var center = baked.bounds.center;
+            Object.Destroy(baked);
+
+            return $", cuit : centre={center.ToString("F3")}, taille={size.ToString("F3")}";
+        }
+
+        /// <summary>
+        /// Où sont les os d'un maillage, et sur quelle étendue.
+        ///
+        /// Un maillage squelettique dont les os sont tous au même point se réduit à rien : il est
+        /// actif, il a un maillage, un matériau, des bornes correctes, et il ne dessine aucun pixel.
+        /// C'est la seule différence mesurable entre « il ne peut pas se dessiner » et « il est
+        /// dessiné ailleurs ».
+        /// </summary>
+        private static string BoneExtent(Renderer renderer, GameObject clone)
+        {
+            if (!(renderer is SkinnedMeshRenderer skinned) || skinned.bones == null || skinned.bones.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var min = new Vector3(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
+            var max = new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity);
+            var count = 0;
+
+            foreach (var bone in skinned.bones)
+            {
+                if (bone == null)
+                {
+                    continue;
+                }
+
+                var local = bone.position - clone.transform.position;
+                min = Vector3.Min(min, local);
+                max = Vector3.Max(max, local);
+                count++;
+            }
+
+            if (count == 0)
+            {
+                return ", aucun os valide";
+            }
+
+            return $", {count} os de {min.ToString("F2")} à {max.ToString("F2")}, étendue={(max - min).ToString("F2")}";
+        }
+
+        private static string ShaderNames(Renderer renderer)
+        {
+            var materials = renderer.sharedMaterials;
+            if (materials == null || materials.Length == 0)
+            {
+                return "aucun materiau";
+            }
+
+            var builder = new StringBuilder();
+            foreach (var material in materials)
+            {
+                if (builder.Length > 0)
+                {
+                    builder.Append("/");
+                }
+
+                builder.Append(material == null ? "null" : (material.shader == null ? "sans shader" : material.shader.name));
+            }
+
+            return builder.ToString();
         }
 
         private static string MeshName(Renderer renderer)
@@ -586,6 +766,18 @@ namespace Coop.Client
         }
 
         private static Texture2D Capture() => ScreenCapture.CaptureScreenshotAsTexture();
+
+        /// <summary>Médiane : robuste à un échantillon aberrant, contrairement à la moyenne et au maximum.</summary>
+        private static double Median(long[] values)
+        {
+            var sorted = (long[])values.Clone();
+            System.Array.Sort(sorted);
+
+            var middle = sorted.Length / 2;
+            return sorted.Length % 2 == 1
+                ? sorted[middle]
+                : (sorted[middle - 1] + sorted[middle]) / 2.0;
+        }
 
         /// <summary>Nombre de pixels dont la couleur a changé au-delà du seuil.</summary>
         private static long PixelDifference(Texture2D a, Texture2D b)

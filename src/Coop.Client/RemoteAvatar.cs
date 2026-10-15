@@ -186,6 +186,7 @@ namespace Coop.Client
             clone.name = CloneName;
             StripNonVisualComponents(clone);
             ForceRenderersEnabled(clone);
+            FixSkinnedMeshCulling(clone);
 
             // Les calques ne sont **pas** touchés ici : le corps du joueur vit sur le calque
             // `Viewmodel`, propre à la vue première personne. Un avatar mondial doit être ailleurs,
@@ -256,10 +257,66 @@ namespace Coop.Client
                   (remaining.Count == 0 ? ", 0 restant" : $", restants : {string.Join(", ", remaining)}"));
         }
 
+        /// <summary>
+        /// Corrige les bornes des maillages squelettiques copiés.
+        ///
+        /// Unity décide de **dessiner ou non** un `SkinnedMeshRenderer` d'après ses bornes. Sur une
+        /// copie, ces bornes sont celles de l'original : elles ne suivent pas les os de la copie, et
+        /// elles sont visiblement fausses (4,01 m annoncés pour un corps d'1,90 m). Le résultat mesuré
+        /// est sans ambiguïté : **2 maillages sur 25 se dessinent** alors que les 25 sont actifs, et
+        /// `Renderer.isVisible` n'en voit que 3 — un maillage qui n'est pas considéré comme visible
+        /// n'est pas dessiné, quels que soient son mesh, ses matériaux et ses os.
+        ///
+        /// `updateWhenOffscreen` fait recalculer les bornes depuis la pose réelle à chaque image, et on
+        /// repart des bornes du maillage lui-même (`sharedMesh.bounds`, la pose de liaison) plutôt que de
+        /// bornes relevées sur un autre objet.
+        /// </summary>
+        private static void FixSkinnedMeshCulling(GameObject clone)
+        {
+            var fixedCount = 0;
+
+            foreach (var renderer in clone.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (renderer.sharedMesh == null)
+                {
+                    continue;
+                }
+
+                renderer.updateWhenOffscreen = true;
+                renderer.localBounds = renderer.sharedMesh.bounds;
+
+                // `forceRenderingOff` se copie avec le reste : le jeu peut avoir demandé à ne pas dessiner
+                // un morceau du corps (sa tête, par exemple, invisible en vue première personne) et la
+                // copie hérite silencieusement de cet ordre. C'est un état qui ne se voit nulle part : le
+                // renderer reste actif, avec son maillage, son matériau et des bornes justes.
+
+                // L'occlusion dynamique est un candidat sérieux : elle se décide d'après des données de
+                // visibilité cuites pour la scène, et une copie posée à un endroit imprévu peut être
+                // déclarée cachée sans que rien ne le signale. Sur un avatar, elle n'apporte rien.
+                renderer.allowOcclusionWhenDynamic = false;
+                fixedCount++;
+            }
+
+            Log.LogInfo(
+                $"[avatar] bornes recalculées pour {fixedCount} SkinnedMeshRenderer " +
+                "(updateWhenOffscreen + bornes du maillage, au lieu de bornes figées de l'original).");
+        }
+
         private static void ForceRenderersEnabled(GameObject clone)
         {
+            var forcedOff = 0;
+
             foreach (var renderer in clone.GetComponentsInChildren<Renderer>(true))
             {
+                if (renderer.forceRenderingOff)
+                {
+                    forcedOff++;
+                    Log.LogWarning(
+                        $"[avatar] renderer '{Path(renderer.transform)}' était en forceRenderingOff " +
+                        "(ordre hérité de l'original) -> dessin réautorisé.");
+                    renderer.forceRenderingOff = false;
+                }
+
                 if (!renderer.enabled)
                 {
                     Log.LogInfo($"[avatar] renderer '{Path(renderer.transform)}' était désactivé -> réactivé.");
@@ -276,6 +333,8 @@ namespace Coop.Client
                     Log.LogWarning($"[avatar] renderer '{Path(renderer.transform)}' sans matériau : rendra en magenta ou rien.");
                 }
             }
+
+            Log.LogInfo($"[avatar] ordres de non-dessin hérités : {forcedOff} renderer(s) réautorisé(s).");
         }
 
         /// <summary>
