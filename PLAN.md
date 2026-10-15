@@ -1080,13 +1080,47 @@ et annonçait « 2 objet(s) masqué(s) » : la mesure a montré que ces deux enf
 tenu est **dessinable** » (au moins un `Renderer`), et le journal dit maintenant la vérité :
 `0 objet(s) tenu(s) masqué(s) (rien de dessinable sur attach1), 2 nœud(s) structurel(s) laissé(s) tel quel`.
 
+### L'aller-retour, et la question qu'il a ouverte (13:13)
+
+Le seul test qui vérifie les deux moitiés ensemble : **lire** l'équipement du joueur local, le passer en
+noms, l'appliquer à la copie, puis comparer la copie à l'original.
+
+```
+[avatar] équipement local : rien de porté.
+[sonde] aller-retour : 0 pièce(s) lue(s), 10 nœud(s) actif(s) chez le joueur local contre 3 sur la copie
+[sonde] aller-retour : 7 nœud(s) manquant(s) [flippers_basic_geo, flippers_basic_geo, flippers_basic_geo,
+        scuba_head, scuba_vest, scuba_breatherTubes, radiationSuit_tubes_geo 1], 0 en trop -> verdict=False
+```
+
+**La lecture est juste** (rien n'est porté, et c'est bien ce qu'elle renvoie). Ce que ce relevé apprend
+est plus intéressant : le modèle du joueur local garde actifs les **porteurs** des palmes, du détendeur, de
+la bouteille et des tuyaux anti-radiations **alors qu'il ne porte rien**. L'état d'activation des nœuds du
+modèle n'est donc **pas** une fonction pure de l'équipement : le jeu en pilote une partie par d'autres
+moyens (`ConditionRules`, `ArmsController` — les composants qu'on retire de la copie).
+
+Deux conséquences, et une question à trancher plus tard :
+
+- **Le test n'est pas une preuve d'exactitude**, et il ne doit pas être lu comme un échec des règles : les
+règles reproduisent le résultat de Nitrox, et les cinq scénarios du dessus restent valides. Comparer à
+l'état brut du modèle local était une mauvaise référence ; le journal le dit maintenant au lieu de le
+cacher.
+- **La question ouverte** : un joueur distant qui ne porte pas de palmes doit-il en montrer ? Réponse
+attendue : non — mais on ne peut pas la tirer du modèle local, qui les laisse actifs. Une référence
+fiable serait le modèle **vu de l'extérieur**, et cette machine n'en a pas : il faudra la fabriquer avec un
+second joueur, ou en lisant comment le jeu construit le modèle tiers.
+- Détail cohérent avec le §16 : ces mêmes nœuds étaient `actifHierarchie=False` lors du run de 11:37 et
+actifs à 13:13, sans que rien de notre code ne les touche. L'état du modèle local **change en cours de
+partie** — raison de plus pour ne pas s'en servir comme référence.
+
 ### Ce que le réseau devra faire (et qui reste à faire)
 
 - **Le sens « reçu »** est prêt : `RemoteAvatarFactory.ApplyEquipment(clone, noms)` prend des **noms** de
 `TechType` et renvoie ceux qu'il n'a pas reconnus. Rien n'est avalé en silence.
-- **Le sens « émis »** ne l'est pas : lire l'équipement du joueur local (`Inventory.main.equipment`) pour
-l'envoyer n'est pas implémenté, et la bonne façon d'énumérer ses emplacements doit être relevée avec
-`tools/ApiDump` plutôt que devinée.
+- ~~**Le sens « émis »** ne l'est pas.~~ **Fait** : `RemoteAvatarEquipment.ReadLocalEquipment()` lit
+`Inventory.main.equipment` et rend des noms de `TechType`. L'API a été **relevée** avec `tools/ApiDump`
+(`Inventory.main` champ statique, `Inventory.equipment` propriété, `Equipment.GetEquipment()` — un
+énumérateur de `Dictionary` qui se parcourt par `MoveNext()`/`Current`, ce que le compilateur a confirmé —
+et `Pickupable.GetTechType()`), pas devinée. Il reste à le mettre dans un paquet.
 - Un paquet d'équipement ne transporte aujourd'hui **rien** : la sonde alimente les règles directement.
 
 ### Limites, dites franchement

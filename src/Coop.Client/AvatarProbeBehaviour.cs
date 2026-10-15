@@ -1,5 +1,6 @@
 using System.Collections;
 using System.IO;
+using System.Linq;
 using System.Text;
 using BepInEx.Logging;
 using UnityEngine;
@@ -387,6 +388,10 @@ namespace Coop.Client
             // pixels) au lieu de se croire.
             yield return MeasureEquipmentScenarios(clone, probeCamera, renderTexture);
 
+            // L'aller-retour complet : lire l'équipement local, le transmettre sous forme de noms, puis
+            // l'appliquer à la copie — et comparer le résultat à ce que le joueur local porte vraiment.
+            yield return MeasureLocalEquipmentRoundTrip(clone);
+
             // La copie repasse sur le calque du monde : c'est l'état qu'aurait un vrai avatar distant.
             RemoteAvatarFactory.MoveRenderersToWorldLayer(clone);
 
@@ -394,6 +399,68 @@ namespace Coop.Client
             Destroy(cameraObject);
             renderTexture.Release();
             Destroy(renderTexture);
+        }
+
+        /// <summary>
+        /// Fait le tour complet du chemin que le réseau empruntera : **lire** l'équipement du joueur
+        /// local, le passer en noms, l'appliquer à la copie, puis **comparer** la copie à l'original.
+        ///
+        /// C'est le seul test qui vérifie les deux moitiés ensemble. Un scénario écrit à la main
+        /// (celui du dessus) prouve que les règles marchent pour l'équipement qu'on leur donne ;
+        /// celui-ci prouve que l'équipement qu'on leur donnera **est bien celui du joueur**. Si les
+        /// deux compositions diffèrent, l'écart est nommé nœud par nœud : c'est le genre d'écart qui
+        /// produirait un avatar subtilement faux, et il vaut mieux le lire ici que le découvrir en jeu.
+        /// </summary>
+        private IEnumerator MeasureLocalEquipmentRoundTrip(GameObject clone)
+        {
+            if (Player.main == null || Player.mainObject == null)
+            {
+                Log.LogWarning("[sonde] aller-retour d'équipement impossible : joueur local absent.");
+                yield break;
+            }
+
+            var sourceBody = RemoteAvatarFactory.FindBodyRoot(Player.mainObject.transform);
+            if (sourceBody == null)
+            {
+                Log.LogWarning("[sonde] aller-retour d'équipement impossible : corps du joueur local introuvable.");
+                yield break;
+            }
+
+            var sourceNodes = RemoteAvatarEquipment.ActiveGovernedNodes(sourceBody.gameObject);
+            var names = RemoteAvatarEquipment.ReadLocalEquipment(out var failure);
+            if (failure != null)
+            {
+                Log.LogWarning($"[sonde] aller-retour d'équipement : lecture impossible ({failure}).");
+            }
+
+            RemoteAvatarEquipment.ApplyNames(clone, names);
+            yield return new WaitForEndOfFrame();
+
+            var cloneNodes = RemoteAvatarEquipment.ActiveGovernedNodes(clone);
+            var missing = sourceNodes.Where(node => !cloneNodes.Contains(node)).ToList();
+            var extra = cloneNodes.Where(node => !sourceNodes.Contains(node)).ToList();
+            var verdict = missing.Count == 0 && extra.Count == 0;
+
+            Log.LogInfo(
+                $"[sonde] aller-retour d'équipement : {names.Count} pièce(s) lue(s), " +
+                $"{sourceNodes.Count} nœud(s) actif(s) chez le joueur local contre {cloneNodes.Count} sur la copie");
+            Log.LogInfo(
+                $"[sonde] aller-retour d'équipement : {missing.Count} nœud(s) manquant(s)" +
+                (missing.Count == 0 ? string.Empty : $" [{string.Join(", ", missing)}]") +
+                $", {extra.Count} en trop" +
+                (extra.Count == 0 ? string.Empty : $" [{string.Join(", ", extra)}]") +
+                $" -> verdict={verdict}");
+
+            if (!verdict)
+            {
+                // Ce n'est pas forcément une faute de notre part : si le jeu active un nœud pour une
+                // raison qui n'est pas l'équipement (ou l'inverse), l'écart le dit.
+                Log.LogWarning(
+                    "[sonde] aller-retour d'équipement : la copie ne reproduit pas exactement l'état du joueur local.");
+            }
+
+            RemoteAvatarEquipment.Apply(clone, new TechType[0]);
+            yield return new WaitForEndOfFrame();
         }
 
         /// <summary>

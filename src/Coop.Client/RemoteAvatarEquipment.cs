@@ -303,6 +303,64 @@ namespace Coop.Client
             return report;
         }
 
+        /// <summary>
+        /// Lit l'équipement du **joueur local**, sous forme de noms de `TechType` — c'est la moitié
+        /// « émission » du travail : ce que le client devra mettre dans un paquet pour que les autres
+        /// affichent la bonne tenue.
+        ///
+        /// L'API n'est pas devinée, elle a été relevée dans `Assembly-CSharp.dll` par `tools/ApiDump` :
+        /// `Inventory.main` (champ statique public), `Inventory.equipment` (propriété),
+        /// `Equipment.GetEquipment()` (énumérateur de `Dictionary<string, InventoryItem>`) et
+        /// `Pickupable.GetTechType()`. C'est aussi ce que fait Nitrox (`EquipmentHelper` :
+        /// `o.IsLocalPlayer ? Inventory.main.equipment : null`).
+        ///
+        /// Renvoie une liste vide et <paramref name="failure"/> renseigné si l'équipement n'est pas
+        /// lisible : mieux vaut un paquet sans équipement qu'une exception dans la boucle réseau.
+        /// </summary>
+        public static IReadOnlyList<string> ReadLocalEquipment(out string failure)
+        {
+            failure = null;
+            var names = new List<string>();
+
+            var inventory = Inventory.main;
+            var equipment = inventory != null ? inventory.equipment : null;
+            if (equipment == null)
+            {
+                failure = inventory == null ? "Inventory.main absent" : "Inventory.equipment absent";
+                Log.LogWarning($"[avatar] équipement local illisible ({failure}) : rien à envoyer.");
+                return names;
+            }
+
+            try
+            {
+                // `GetEquipment()` renvoie l'énumérateur d'un `Dictionary`, pas une collection : il se
+                // parcourt avec `MoveNext()`/`Current`, ce que la mesure a montré (le `foreach` direct
+                // ne compile pas, et c'est une bonne chose : la différence est explicite).
+                var slots = equipment.GetEquipment();
+                while (slots.MoveNext())
+                {
+                    var item = slots.Current.Value;
+                    var pickupable = item != null ? item.item : null;
+                    if (pickupable == null)
+                    {
+                        continue;
+                    }
+
+                    names.Add(pickupable.GetTechType().ToString());
+                }
+            }
+            catch (Exception exception)
+            {
+                failure = $"{exception.GetType().Name} pendant l'énumération de Equipment";
+                Log.LogError($"[avatar] équipement local : énumération interrompue ({exception.Message}).");
+            }
+
+            Log.LogInfo(names.Count == 0
+                ? "[avatar] équipement local : rien de porté."
+                : $"[avatar] équipement local : {names.Count} pièce(s) : {string.Join(", ", names)}");
+            return names;
+        }
+
         /// <summary>Les nœuds que ces règles pilotent, dans l'ordre des gestionnaires ci-dessus.</summary>
         public static IEnumerable<string> GovernedNodes => Governed;
 
