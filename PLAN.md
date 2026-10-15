@@ -837,9 +837,82 @@ Deux têtes, deux branches de tenues différentes, même comportement — ce n'e
   plus viser le maillage, le matériau, l'activation, les bornes, les os, le calque ni le renderer, mais
   **la façon dont le jeu lui-même dessine une tête** — c'est la seule chose qui n'a pas été regardée. Un
   avatar sans tête est un défaut visible mais qui ne bloque rien : il ne doit pas retarder le réseau.
-- **L'`Animator` n'est pas piloté** : la copie est en pose figée. Il faudra le piloter (nage, marche,
-  immobile) depuis l'état réseau.
-- Le **PDA** fait partie du corps copié et le restera tant que la composition de l'avatar n'est pas
-  décidée pièce par pièce.
+- ~~L'`Animator` n'est pas piloté : la copie est en pose figée.~~ **Corrigé en §17** : le squelette
+  répondait en réalité à **0 paramètre sur 201** avant correction, et à **200 sur 201** après. Le câblage
+  « état réseau -> paramètres » reste à faire, mais la partie moteur est prouvée.
+- Le **PDA** fait partie du corps copié ; dans la copie il est **inactif dans la hiérarchie** et ne se
+  dessine pas (mesuré), donc il ne gêne pas. À retirer seulement si la composition de l'avatar est décidée
+  pièce par pièce.
 - Aucun paquet réseau n'a encore transporté la moindre position : c'est le travail de M2.1 proprement dit,
-  et il n'est pas bloqué par la tête.
+  et il n'est bloqué ni par la tête ni par la pose.
+
+---
+
+## 17. M2.1 — l'avatar peut prendre une pose (validé le 2026-10-15)
+
+**Verdict : l'`Animator` conservé sur la copie pilote réellement le squelette — après un correctif — et
+les 201 paramètres qu'il écoute sont relevés.**
+
+### Le problème, mesuré avant toute correction
+
+L'animator était présent, alimenté, et **silencieusement inerte** :
+
+- `pose spontanée : 0,0000 m` de déplacement moyen des sommets en 0,5 s (mesure par `BakeMesh`, qui donne
+  les sommets réellement déformés par le skinning) ;
+- et **aucun** des 201 paramètres testés un par un ne déplaçait le squelette : 0 sur 201.
+
+Un `Animator` qui répond à rien est plus traître qu'un animator absent : rien ne le signale, et on ne le
+découvre qu'au moment où un joueur distant devrait bouger.
+
+### La cause
+
+`Animator.cullingMode` vaut **`CullUpdateTransforms`** par défaut : Unity cesse alors de mettre à jour les
+os d'un maillage qu'il ne considère pas visible. Ce jugement est **faux sur une copie** — mesuré :
+3 renderers sur 25 déclarés « visibles » alors que la copie change 10 000 px à l'écran (cf. §15 et §16, où
+la même méfiance s'applique déjà aux bornes et à `Renderer.isVisible`). Le squelette restait donc figé.
+
+### Le correctif
+
+`AlwaysAnimate`, appliqué dans la fabrique (`MakeAnimationIgnoreVisibility`) : l'animation ne dépend plus
+d'un jugement de visibilité, qui n'a aucun sens pour un avatar qu'on veut précisément voir bouger.
+
+### Preuves mesurées (run du 2026-10-15 12:33, DLL finales)
+
+| Vérification | Avant | Après |
+|---|---|---|
+| `cullingMode` appliqué | `CullUpdateTransforms` | `AlwaysAnimate` (1 animator sur 1) |
+| Pose spontanée (0,5 s) | 0,0000 m | **0,0017 m** |
+| Paramètres qui déplacent le squelette | **0/201** | **200/201** |
+| Exemples de déplacement | — | `vr_active` 0,2259 m, `move_speed_x` 0,0974 m, `move_speed_y` 0,0962 m, `using_pda` 0,0583 m |
+| Signal de rendu | 9 812 px | **15 451 px** (l'avatar bouge, donc plus de pixels changent) |
+| Bruit de scène | 383 px | 326 px |
+
+Le signal de rendu qui augmente est un effet attendu du correctif, pas une coincidence : un squelette qui
+bouge change plus de pixels qu'un squelette figé. Un seul paramètre sur 201 reste sans effet ; il n'a pas
+été identifié, et c'est écrit ici plutôt que passé sous silence.
+
+### Ce que le réseau devra pousser (relevé sur le vrai contrôleur)
+
+Le contrôleur est `player_view_controller`, et les paramètres utiles pour un joueur distant sont déjà
+nommés comme le gameplay — il n'y a donc **pas de nomenclature à inventer** :
+
+```
+move_speed, move_speed_x, move_speed_y, move_speed_z,
+is_underwater, on_surface, swimming_fast, can_exit,
+in_seamoth, in_exosuit, using_pda, using_tool, using_tool_first, using_tool_alt,
+suit_first_use, pda_distance, vr_active,
+holding_* (19 paramètres : knife, flashlight, constructor, seaglide, stasisrifle, ...)
+```
+
+C'est la liste à porter dans `docs/protocol.md` le jour où les paquets joueur sont écrits.
+
+### Limites
+
+- **La pose n'est pas encore pilotée par un état de jeu** : la sonde pose les paramètres à la main pour
+  mesurer. Le câblage « état reçu -> paramètres » appartient au netcode, et c'est le prochain travail.
+- `vr_active` déplace le squelette de 0,23 m : c'est un paramètre à ne **jamais** activer par accident sur
+  un avatar (le jeu a son propre avion, et il n'est pas là pour ça).
+- La mesure est faite en posant les paramètres un par un : elle prouve que le squelette répond, pas qu'une
+  combinaison donnée produit la pose voulue (marche, nage, immobile). Cette vérification-là viendra avec
+  l'état réseau, qui donnera les valeurs réelles.
+- L'avatar reste **sans tête** (cf. §16) : c'est un défaut visible, mais indépendant de la pose.
