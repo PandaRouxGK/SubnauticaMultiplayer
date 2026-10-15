@@ -741,10 +741,9 @@ d'1,90 m). Aucun culling ne devra être bâti là-dessus : la mesure de pixels e
 
 ### Limites (le programme de M2.1)
 
-- **La tenue affichée n'est pas encore choisie.** Les huit branches de tenues sont actives et se
-  recouvrent ; seule la plus externe (`diveSuit`) est visible. L'avatar portera donc une combinaison de
-  plongée quel que soit l'équipement du joueur qu'il représente. La visibilité doit venir de
-  l'équipement.
+- ~~La tenue affichée n'est pas encore choisie.~~ **Cette limite était fausse, corrigée en §16** : les
+  tenues ne sont pas actives simultanément. La visibilité se fait par activation de GameObject, donc la
+  copie hérite de la tenue réellement portée, sans travail supplémentaire.
 - **L'`Animator` est conservé mais pas piloté** : la copie est en pose figée. Il faudra le piloter
   (nage, marche, immobile) depuis l'état réseau.
 - Le **PDA** (`PlayerPDA/Mesh`) fait partie du corps et se retrouve dans la copie.
@@ -756,3 +755,79 @@ d'1,90 m). Aucun culling ne devra être bâti là-dessus : la mesure de pixels e
   des corps du jeu (et le modèle féminin, s'il existe) n'a pas été explorée.
 - L'autotest reste un autotest : il prouve qu'une copie se dessine, **pas** qu'un avatar distant se
   déplace correctement — c'est M2.1, et aucun paquet réseau n'a encore transporté de position.
+
+---
+
+## 16. M2.1 — la copie se dessine, la tenue suit, la tête manque (2026-10-15)
+
+**Verdict : le corps d'avatar se dessine (mesuré), la tenue portée est respectée sans travail
+supplémentaire, et la tête est absente — c'est le seul point ouvert, et il est caractérisé.**
+
+### Correction d'une affirmation du §15
+
+Le §15 annonçait que « les huit branches de tenues sont actives et se recouvrent ». **C'est faux**, et la
+mesure le dit clairement : la visibilité des tenues se fait par **activation de GameObject**, pas par
+`Renderer.enabled`. Sur les 23 maillages qui ne se dessinent pas, 21 ont `activeInHierarchy=False` —
+ils appartiennent aux tenues que le joueur ne porte pas. Conséquence heureuse : **la copie hérite
+automatiquement de la tenue portée**, il n'y a rien à choisir ni à câbler pour M2.1. Le « 2 maillages
+sur 25 » mesuré au §15 s'explique entièrement par là : seuls les maillages de la tenue portée sont
+candidats, et deux d'entre eux se dessinent.
+
+### Le test de rendu, rendu robuste
+
+Le verdict du §15 changeait de réponse sans que le rendu change, parce que le bruit de la scène est
+erratique (une vague, une lueur de HUD : 2 381 px sur une frame isolée contre 214 px sur une autre). Le
+test échantillonne maintenant **par paires du même état** — `[masquée, masquée]`, `[visible, visible]`,
+puis on recommence — et compare des **médianes** : quatre échantillons de bruit, trois de signal, tous à
+une frame d'écart.
+
+| Mesure | Valeurs |
+|---|---|
+| Signal (changement d'état, une frame) | 10 656, 10 872, 10 869 px -> **médiane 10 869** |
+| Bruit (même état, même écart) | 285, 212, 410, 300 px -> **médiane 293** |
+| Décision | seuil 2 000 px (3x le bruit, plancher) -> **la copie rend** |
+
+Deux erreurs de motif ont été corrigées avant d'y arriver, et elles se ressemblent : un motif
+« quatre masquées puis quatre visibles » ne laisse **qu'un seul** vrai changement d'état, les trois
+autres « signaux » étant des paires du même état (426, 295, 272 px) ; et un motif alterné à chaque
+frame met l'avatar dans **chaque** écart, si bien que le « bruit » mesuré était le signal lui-même.
+Dans les deux cas, le test ne mesurait plus ce qu'il annonçait.
+
+### La tête : ce qui est mesuré, et ce qui a été éliminé
+
+`diveSuit_head_geo` est **actif dans la hiérarchie** (contrairement aux 21 maillages des autres tenues),
+activé, et son maillage est réel : cuit par Unity (`BakeMesh`), il donne une tête de
+**0,166 x 0,329 x 0,275 m** centrée **0,09 m au-dessus** de l'origine de la copie, c'est-à-dire à
+hauteur de tête. Et il produit **0 pixel** — dessiné seul, ou même avec un **matériau neuf**. L'étendue
+du corps visible (100 x 242 px, soit environ 1,59 m) est exactement celle d'un corps sans tête
+(1,59 m + 0,33 m = 1,92 m, soit les 293 px attendus avec la tête).
+
+Hypothèses testées puis **falsifiées**, chacune par une mesure :
+
+| Hypothèse | Test | Résultat |
+|---|---|---|
+| Bornes de culling figées sur l'original | `updateWhenOffscreen` + bornes du maillage | 2/25 avant, **2/25 après** |
+| Occlusion dynamique | `allowOcclusionWhenDynamic = false` | aucun changement |
+| Maillage dégénéré | `BakeMesh` | tête correcte, à sa place |
+| Os absents de la copie | comptage des os | **5/5 dans la copie** (os de mâchoire/yeux, étendue 13 cm) |
+| GameObject inactif | `activeInHierarchy` | **True** |
+| `forceRenderingOff` hérité | relevé sur les 25 renderers | **0** renderer concerné |
+| Matériau en cause | matériau neuf, opaque | **0 px** aussi |
+
+Ce qui reste est donc **le renderer lui-même**, et la piste la plus prometteuse est identifiée : le jeu a
+un **second objet de tête**, `Player/camPivot/camRoot/camOffset/player_head` (`SkinnedMeshRenderer`,
+maillage `scuba_head`, désactivé, calque `Viewmodel`). Il vit **hors de `Player/body`**, donc hors de la
+copie actuelle — c'est le seul autre candidat repéré, et il faudra le copier ou l'attacher au cou de
+l'avatar.
+
+### Ce qui reste ouvert (suite de M2.1)
+
+- **La tête** : à récupérer depuis `player_head`, ou à obtenir en comprenant pourquoi ce renderer n'est
+  pas dessiné. Sept hypothèses ont été éliminées par la mesure ; la suivante doit viser le renderer
+  lui-même (état interne du `SkinnedMeshRenderer`), pas son environnement.
+- **L'`Animator` n'est pas piloté** : la copie est en pose figée. Il faudra le piloter (nage, marche,
+  immobile) depuis l'état réseau.
+- Le **PDA** fait partie du corps copié et le restera tant que la composition de l'avatar n'est pas
+  décidée pièce par pièce.
+- Aucun paquet réseau n'a encore transporté la moindre position : c'est le travail de M2.1 proprement dit,
+  et il n'est pas bloqué par la tête.
