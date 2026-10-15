@@ -623,3 +623,136 @@ sauvegarde**, donc observer « rien n'a changé » à la fermeture ne disait rie
   C'est un choix assumé pour un test en local sur une seule machine ; un vrai serveur aura son propre
   dossier de jeu.
 - Le chargement cible toujours le **premier** slot trouvé (limite héritée de M0.5, cf. §10).
+
+---
+
+## 15. M2.0 — un second corps de joueur : fabriqué, et rendu (validé le 2026-10-15)
+
+**Verdict : le client sait fabriquer un second corps de joueur, et il se dessine — mesuré, pas regardé.**
+
+M2 (présence des joueurs) suppose de voir bouger un autre joueur. Or **rien dans l'API n'expose de
+prefab de joueur** : `tools/ApiDump`, champs privés compris, ne trouve sur `Player` ni propriété ni
+champ de modèle. Le corps n'existe qu'à l'exécution, construit par le jeu dans la hiérarchie de
+`Player.mainObject`. Écrire la synchronisation des joueurs avant de savoir si un second corps **peut
+exister** et **s'afficher**, c'est risquer de jeter le travail : ces deux questions sont donc traitées
+seules, avant M2 proprement dit.
+
+### Fichiers ajoutés
+
+```
+src/Coop.Client/RemoteAvatar.cs            fabrique : choix du corps, refus si dangereux, copie, nettoyage
+src/Coop.Client/AvatarProbeBehaviour.cs    sonde -coopdebug=avatar : relevés, mesures, images
+tools/ApiDump/Program.cs                   inclut désormais les champs privés (c'est là qu'était l'information)
+src/Coop.Client/Coop.Client.csproj         + AnimationModule, PhysicsModule, AudioModule,
+                                           ScreenCaptureModule, ImageConversionModule
+```
+
+Le dernier point mérite d'être noté : **Unity 2019.4 éclate `UnityEngine` en modules**, et `Animator`,
+`Collider`, `Rigidbody`, `AudioListener`, `ScreenCapture`, `EncodeToPNG` sont *forwardés* depuis
+`UnityEngine.dll`. Sans ces références, rien de tout cela ne compile — le message d'erreur ne le dit
+pas, il renvoie seulement vers l'assembly à ajouter.
+
+### La hiérarchie réelle du joueur (relevée, pas supposée)
+
+```
+Player                       [calque Player] Player, GroundMotor, LiveMixin, PlayerController,
+                                              UnderwaterMotor, Collider, CharacterController, ...
+├─ body                      [calque Default]   <- le corps visible
+│  └─ player_view            [calque Viewmodel] Animator player_view_controller, ArmsController, ...
+│     ├─ export_skeleton                          (squelette)
+│     └─ male_geo                                 diveSuit, radiationSuit, reinforcedSuit,
+│                                                 scubaSuit, stillSuit, palmes, bouteilles...
+├─ camPivot/camRoot          MainCamera, MainCameraControl
+├─ Inventory Storage / Equipment Storage / Pending Items
+└─ SpawnPlayerSounds, SpawnPlayerWorldArrows, acidLoopingSound, ...
+```
+
+Deux faits utiles : **tout ce qui est visible tient sous un seul nœud (`Player/body`)** — un seul point
+d'entrée suffit — et **ce nœud est sur le calque `Viewmodel`**, celui que le jeu réserve à la vue
+première personne. C'est la première chose que la sonde a apprise, et elle a coûté une mesure.
+
+### Le point de copie, choisi sur des faits
+
+La copie part de `Player/body`, jamais de `Player` : le composant `Player` est un singleton statique
+(`Player.main`), donc instancier le root exécuterait l'`Awake` d'un second joueur. La fabrique
+**refuse** de copier un sous-arbre contenant `Player`, `Camera`, `AudioListener`, `PlayerMotor`,
+`GroundMotor` ou `LiveMixin` — chacun de ces composants détournerait l'autorité, le rendu ou l'audio.
+
+Sur la copie, tout ce qui n'est pas visuel est retiré (`Transform`, `Renderer`, `MeshFilter`,
+`Animator` sont conservés), et **chaque type retiré est journalisé**.
+
+### Ce que la sonde mesure, et pourquoi l'œil ne suffit pas
+
+« Ça a l'air de rendre » ne vaut rien : un objet peut être parfaitement construit et n'apparaître
+nulle part (calque hors `cullingMask`, renderer désactivé, maillage nul, position dans une paroi).
+Trois instruments, dans cet ordre :
+
+1. **Différence de pixels en jeu, avec témoin.** Cinq clichés à une frame d'intervalle : masquée,
+   masquée, visible, visible, masquée. Le bruit se mesure entre deux clichés du **même** état, le
+   signal entre deux états différents — **même intervalle**, donc comparaison honnête.
+2. **Rendu isolé.** Notre propre caméra, sur un calque libre (`25`) et un fond magenta : rien ne peut
+   occulter la copie, et un maillage sombre reste comptable (noir sur noir ne se mesure pas). L'image
+   est écrite en PNG, et l'**étendue du sujet** est relevée : la couverture seule ne distingue pas
+   « tout le corps, petit » de « un morceau de corps, grand ».
+3. **Contribution par maillage.** Chaque renderer est éteint à tour de rôle : on sait ce qui dessine
+   réellement, au lieu de le déduire d'un total.
+
+### Preuves mesurées (run du 2026-10-15 11:37, DLL finales)
+
+| Vérification | Résultat |
+|---|---|
+| Corps identifié | `Player/body`, **24 SkinnedMeshRenderer**, 88 526 sommets, 37 matériaux |
+| Composants de gameplay retirés | **16 détectés -> 16 retirés, 0 restant** (vérifié en relisant la copie) |
+| Aucun composant dangereux copié | ni `Player`, ni `Camera`, ni `AudioListener` : la garde n'a jamais eu à refuser un candidat |
+| **La copie se dessine en jeu** | signal **15 781** et **16 043** px (une frame d'écart, changement d'état) contre un bruit de **399** et **364** px (même état, même écart) -> **rend = vrai**, rapport 40x |
+| Calques : objet du monde | les 24 renderers basculés sur `Default` rendent autant que sur `Viewmodel` (mesures précédentes : 13 164 vs 13 423 px ; 10 274 vs 10 660 px) : **le calque est un choix, pas une contrainte de rendu** |
+| **Rendu isolé** | 10 868/262 144 px non-fond (4,1 %), **étendue du sujet 100 x 242 px** sur 512x512 — la forme attendue d'un corps d'1,90 m vu à 3,6 m (environ 290 px de haut), donc le corps est là en entier, pas un fragment |
+| Images produites | `coop-avatar-isolated.png` (30 677 o, corps seul sur fond magenta) et `coop-avatar-proof.png` (1 080 613 o, vue en jeu) |
+| Maillages contribuant visiblement | **2/25** : `diveSuit_body_geo` (9 528 px) et `diveSuit_hands_geo` (678 px) — les autres sont *derrière* la combinaison la plus externe, pas absents (voir limites) |
+
+### Cinq défauts de méthode corrigés en route (tous instructifs)
+
+1. **Compter les triangles ne marche pas** : `mesh.triangles` est interdit sur un maillage non lisible
+   (tous ceux du jeu), Unity ne renvoie que des erreurs et un zéro trompeur. Compter `vertexCount`.
+2. **Retirer des composants en une passe ne suffit pas** : Unity refuse de retirer un composant dont un
+   autre dépend (`Can't remove ConditionRules because ArmsController depends on it`). La première
+   version annonçait « 16 retirés » alors que `ConditionRules` restait. Deux passes, et le compte rendu
+   est établi **en relisant la copie** — ce qui est écrit correspond à ce qui reste.
+3. **La capture d'écran n'existe pas au moment où on la cherche** : Unity l'écrit en fin de frame,
+   plus tard que deux frames. Le premier test l'a déclarée absente alors qu'elle est arrivée. Il faut
+   attendre le fichier.
+4. **Comparer un signal de 3 frames à un bruit de 7 frames n'a pas de sens** : le verdict basculait
+   d'un run à l'autre sans que le rendu change (bruit 456 px ici, 2 111 px là, signal stable à
+   11 000 px). Toutes les mesures se font maintenant sur le **même** intervalle.
+5. **Alterner l'état à chaque frame met l'avatar dans chaque écart** : les quatre mesures donnaient
+   11 346, 11 797, 11 505 et 11 434 px — quatre fois le même signal, dont un étiqueté « bruit », ce qui
+   faisait échouer un avatar qui rendait. Le bruit se mesure entre deux clichés **du même état**.
+
+### Le placement, lui aussi, a dû être mesuré
+
+Premier essai : la copie 3 m devant `Player.main`. Résultat sans ambiguïté — **3 renderers sur 25 dans
+le frustum des caméras, aucun pixel changé** : le joueur est à l'intérieur du module de survie, et 3 m
+"devant lui", c'est dans la coque. La sonde place donc la copie devant la **caméra**, avec un produit
+scalaire de 1,000 par rapport à son axe pour que le placement soit vérifiable et non approximatif.
+
+Au passage, `Renderer.isVisible` a été disqualifié : **3/25 alors que 15 781 px changent**. Sur ces
+maillages squelettiques copiés, il est faux, comme la boîte englobante (4,01 m annoncés pour un corps
+d'1,90 m). Aucun culling ne devra être bâti là-dessus : la mesure de pixels est l'instrument fiable.
+
+### Limites (le programme de M2.1)
+
+- **La tenue affichée n'est pas encore choisie.** Les huit branches de tenues sont actives et se
+  recouvrent ; seule la plus externe (`diveSuit`) est visible. L'avatar portera donc une combinaison de
+  plongée quel que soit l'équipement du joueur qu'il représente. La visibilité doit venir de
+  l'équipement.
+- **L'`Animator` est conservé mais pas piloté** : la copie est en pose figée. Il faudra le piloter
+  (nage, marche, immobile) depuis l'état réseau.
+- Le **PDA** (`PlayerPDA/Mesh`) fait partie du corps et se retrouve dans la copie.
+- L'isolement se fait sur un calque marqué « libre » (ni nommé, ni dans le `cullingMask` du jeu) ;
+  l'hypothèse « aucun autre objet ne l'utilise » n'est pas vérifiée par une mesure.
+- La luminance du rendu isolé est faible (22/255) : sur ce calque, aucune lumière du jeu n'éclaire la
+  copie. Cela ne gêne pas la mesure (fond magenta) mais l'image de preuve est sombre.
+- **Le rendu n'a été vérifié que sur une seule instance et un seul modèle** (`male_geo`) : la variété
+  des corps du jeu (et le modèle féminin, s'il existe) n'a pas été explorée.
+- L'autotest reste un autotest : il prouve qu'une copie se dessine, **pas** qu'un avatar distant se
+  déplace correctement — c'est M2.1, et aucun paquet réseau n'a encore transporté de position.
