@@ -120,9 +120,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKL,]*)
+    *[!ABCDEFGHIJKLM,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -470,6 +470,27 @@ assert_k() {
     expect K "$c2" '\[sonde\] véhicule client : verdict=True' "client 2 : l'interpolation conclut True"
 }
 
+assert_m() {
+    local server="$WORK_DIR/M/coop-server.log"
+    local c1="$WORK_DIR/M/coop-client.log"
+    local c2="$WORK_DIR/M/coop-client-2.log"
+
+    # La **prise de main** et le **refus**, tous deux nommés côté serveur.
+    expect M "$server" "conduite : clé=0x[0-9a-f]+ — prise par 'killi'#1" \
+        "le serveur attribue la conduite au premier client, et le nomme"
+    expect M "$server" 'conduite : clé=0x[0-9a-f]+ réclamée par .* -> REFUSÉE \(déjà conduite par' \
+        "le serveur refuse la conduite au second, en nommant le conducteur"
+
+    expect M "$c1" '\[conduite\] résultat : .* accordée=True' \
+        "client 1 : le serveur lui accorde la conduite"
+    expect M "$c1" '\[sonde\] conduite : verdict=True' "client 1 : la sonde conclut True"
+    expect M "$c1" 'états envoyés=[1-9][0-9]*' "client 1 : l'état du véhicule est réellement parti"
+
+    expect M "$c2" '\[conduite\] résultat : .* accordée=False' \
+        "client 2 : le serveur lui refuse la conduite"
+    expect M "$c2" '\[sonde\] conduite : verdict=True' "client 2 : la sonde conclut True"
+}
+
 assert_l() {
     local server="$WORK_DIR/L/coop-server.log"
     local c1="$WORK_DIR/L/coop-client.log"
@@ -564,9 +585,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M}"
 fi
 
 if wanted A "$ONLY"; then
@@ -761,10 +782,22 @@ if wanted J "$ONLY"; then
     step J "véhicule : diffusion serveur à 10 Hz et interpolation cliente mesurée image par image" assert_j "${args[@]}"
 fi
 
+if wanted M "$ONLY"; then
+    # M4 / v9 : un client **conduit** le Seamoth de la sauvegarde, l'autre tente de le lui prendre. Le
+    # premier garde la main ; le second reçoit un refus nommé (`VehicleControlResult`).
+    args=(--clients=2 --together --timeout=240
+        "--host-args=-coopmode=server"
+        "--client-args=-coopmode=client -coopdebug=drive"
+        "--client-marker=\\[sonde\\] conduite : verdict=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step M "conduite autoritaire : un client conduit, l'autre se voit refuser le volant" assert_m "${args[@]}"
+fi
+
 if wanted L "$ONLY"; then
-    # M5 : deux clients réclament la **même** clé synthétique. L'ordre est déterministe par identifiant
-    # (le client 1 réclame à 10 s, le client 2 à 22 s de sa propre connexion), puis le second envoie une
-    # réclamation sous l'id 1 pour vérifier que l'attribution vient de la session.
+    # M5 : deux clients réclament le **même objet réel**. Le premier est accordé, le second refusé ; le
+    # second envoie ensuite une clé inventée et une réclamation sous l'id 1, puis ramasse pour de vrai.
     args=(--clients=2 --together --timeout=240
         "--host-args=-coopmode=server"
         "--client-args=-coopmode=client -coopdebug=pickup"

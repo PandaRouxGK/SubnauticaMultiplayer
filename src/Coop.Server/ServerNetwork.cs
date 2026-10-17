@@ -200,6 +200,30 @@ namespace Coop.Server
         /// <summary>Réclamations refusées faute de position connue pour le joueur.</summary>
         public int PickupRefusedNoPosition { get; private set; }
 
+        // — Conduite autoritaire (v9, M4) ——————————————————————————————————————
+
+        /// <summary>Véhicule → joueur qui le conduit. Le premier qui prend la main la garde jusqu'à sa déconnexion.</summary>
+        private readonly Dictionary<long, ushort> _vehicleDrivers = new Dictionary<long, ushort>();
+
+        /// <summary>Index clé → véhicule du monde serveur, reconstruit au plus une fois par seconde.</summary>
+        private Dictionary<long, Vehicle> _vehicleIndex;
+
+        private float _vehicleIndexBuiltAt = -1f;
+        private int _vehicleIndexCount;
+
+        /// <summary>Refus déjà journalisés (une fois par clé) : à 10 Hz, un refus répété noierait le journal.</summary>
+        private readonly HashSet<long> _controlRefusalsLogged = new HashSet<long>();
+
+        private readonly Dictionary<long, float> _lastControlReplyAt = new Dictionary<long, float>();
+
+        public int VehicleControlApplied { get; private set; }
+        public int VehicleControlRefusedUnknown { get; private set; }
+        public int VehicleControlRefusedRange { get; private set; }
+        public int VehicleControlRefusedTaken { get; private set; }
+
+        /// <summary>Conduites dont le <c>PlayerId</c> annoncé n'était pas celui de la session.</summary>
+        public int ForgedVehicleIds { get; private set; }
+
         /// <summary>
         /// Index clé → position des objets ramassables du monde, reconstruit **au plus une fois par
         /// seconde** : un ramassage est rare, mais un index refait à chaque réclamation coûterait un
@@ -550,6 +574,10 @@ namespace Coop.Server
 
                 case MessageType.PickupClaim:
                     HandlePickupClaim(peer, session, PickupClaimMessage.Read(reader));
+                    break;
+
+                case MessageType.VehicleControl:
+                    HandleVehicleControl(peer, session, VehicleControlMessage.Read(reader));
                     break;
 
                 default:
@@ -1086,6 +1114,185 @@ namespace Coop.Server
                 HolderId = holder,
                 ClaimedBy = msg.PlayerId,
             }.Write, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>
+        /// Conduite d'un véhicule (v9, M4). Le client pilote : il envoie la position et l'orientation de
+        /// **son** véhicule à 10 Hz, et le serveur les applique à **son** exemplaire du même véhicule, puis
+        /// les rediffuse par le flux `VehicleSnapshot` déjà en place.
+        ///
+        /// Ce que le serveur ne croit pas sur parole, et qui est compté : la clé doit désigner un véhicule
+        /// de **son** monde, le joueur doit être à moins de `MaxVehicleControlRangeMeters`, et un véhicule
+        /// déjà conduit par un autre joueur n'est pas volé en silence — le refus est renvoyé au demandeur
+        /// (`VehicleControlResult`) pour qu'il sache qu'il ne conduit pas.
+        /// </summary>
+        private void HandleVehicleControl(NetPeer peer, ClientSession session, VehicleControlMessage msg)
+        {
+            if (!session.Accepted)
+            {
+                _log.LogWarning($"[net] conduite avant handshake ignorée de {peer}");
+                return;
+            }
+
+            if (msg.PlayerId != 0 && msg.PlayerId != session.PlayerId)
+            {
+                ForgedVehicleIds++;
+                if (ForgedVehicleIds <= 3)
+                {
+                    _log.LogWarning(
+                        $"[net] PlayerId falsifié sur une conduite : '{session.Username}' a annoncé l'id " +
+                        $"{msg.PlayerId} (le sien est {session.PlayerId}) — la conduite est attribuée à la session.");
+                }
+            }
+
+            if (!TryResolveVehicle(msg.VehicleKey, out var vehicle, out var indexed))
+            {
+                VehicleControlRefusedUnknown++;
+                LogControlRefusal(msg.VehicleKey, session, $"véhicule inconnu du serveur ({indexed} véhicule(s) indexé(s))");
+                ReplyControl(peer, msg.VehicleKey, false, 0);
+                return;
+            }
+
+            var vehiclePosition = vehicle.transform != null
+                ? vehicle.transform.position
+                : UnityEngine.Vector3.zero;
+
+            var distance = session.PositionsReceived == 0
+                ? float.MaxValue
+                : UnityEngine.Vector3.Distance(
+                    new UnityEngine.Vector3(session.X, session.Y, session.Z), vehiclePosition);
+
+            if (distance > Protocol.MaxVehicleControlRangeMeters)
+            {
+                VehicleControlRefusedRange++;
+                LogControlRefusal(
+                    msg.VehicleKey,
+                    session,
+                    $"hors portée : {distance:F1} m > {Protocol.MaxVehicleControlRangeMeters:F1} m");
+                ReplyControl(peer, msg.VehicleKey, false, 0);
+                return;
+            }
+
+            if (_vehicleDrivers.TryGetValue(msg.VehicleKey, out var driver) && driver != session.PlayerId)
+            {
+                VehicleControlRefusedTaken++;
+                LogControlRefusal(
+                    msg.VehicleKey,
+                    session,
+                    $"déjà conduite par {DescribeHolder(driver)}");
+                ReplyControl(peer, msg.VehicleKey, false, driver);
+                return;
+            }
+
+            var first = !_vehicleDrivers.ContainsKey(msg.VehicleKey);
+            _vehicleDrivers[msg.VehicleKey] = session.PlayerId;
+
+            ApplyVehicleControl(vehicle, msg);
+            VehicleControlApplied++;
+
+            if (first)
+            {
+                _log.LogInfo(
+                    $"[net] conduite : clé=0x{msg.VehicleKey:x16} — prise par '{session.Username}'#{session.PlayerId} " +
+                    $"({VehicleIdentity.Describe(vehicle)}, joueur à {distance:F1} m), état appliqué et rediffusé.");
+
+                ReplyControl(peer, msg.VehicleKey, true, session.PlayerId);
+            }
+        }
+
+        /// <summary>Refus journalisé **une fois par clé** : à 10 Hz, un refus répété noierait le journal.</summary>
+        private void LogControlRefusal(long key, ClientSession session, string reason)
+        {
+            if (!_controlRefusalsLogged.Add(key))
+            {
+                return;
+            }
+
+            _log.LogInfo(
+                $"[net] conduite : clé=0x{key:x16} réclamée par '{session.Username}'#{session.PlayerId} " +
+                $"-> REFUSÉE ({reason})");
+        }
+
+        /// <summary>
+        /// Réponse au demandeur : sur un accord, toujours ; sur un refus, au plus une fois par seconde et
+        /// par clé (le client envoie 10 états par seconde, il n'a pas besoin de 10 refus).
+        /// </summary>
+        private void ReplyControl(NetPeer peer, long key, bool granted, ushort driverId)
+        {
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            if (!granted && _lastControlReplyAt.TryGetValue(key, out var last) && now - last < 1f)
+            {
+                return;
+            }
+
+            _lastControlReplyAt[key] = now;
+
+            Send(peer, new VehicleControlResultMessage
+            {
+                VehicleKey = key,
+                Granted = granted,
+                DriverId = driverId,
+            }.Write, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>Applique l'état du conducteur au véhicule du serveur (c'est lui qui est rediffusé).</summary>
+        private static void ApplyVehicleControl(Vehicle vehicle, VehicleControlMessage msg)
+        {
+            var transform = vehicle.transform;
+            if (transform != null)
+            {
+                transform.position = new UnityEngine.Vector3(msg.X, msg.Y, msg.Z);
+                transform.rotation = new UnityEngine.Quaternion(msg.RotX, msg.RotY, msg.RotZ, msg.RotW);
+            }
+
+            // Le transform est posé à chaque état : laisser la physique accélérer le Rigidbody ferait
+            // osciller le véhicule entre deux corrections. On annule donc sa vitesse, comme pour les
+            // créatures suivies.
+            var body = vehicle.GetComponent<UnityEngine.Rigidbody>();
+            if (body != null && !body.isKinematic)
+            {
+                body.velocity = UnityEngine.Vector3.zero;
+                body.angularVelocity = UnityEngine.Vector3.zero;
+            }
+        }
+
+        /// <summary>
+        /// Vrai si la clé désigne un **véhicule du monde serveur**. Index reconstruit au plus une fois par
+        /// seconde : un état de conduite arrive 10 fois par seconde, un parcours complet à chaque état
+        /// coûterait cher pour rien.
+        /// </summary>
+        private bool TryResolveVehicle(long key, out Vehicle vehicle, out int indexed)
+        {
+            var now = UnityEngine.Time.realtimeSinceStartup;
+
+            if (_vehicleIndex == null || now - _vehicleIndexBuiltAt > 1f)
+            {
+                var index = new Dictionary<long, Vehicle>();
+                var all = UnityEngine.Resources.FindObjectsOfTypeAll<Vehicle>();
+                var count = 0;
+
+                foreach (var candidate in all)
+                {
+                    if (candidate == null || candidate.gameObject == null || !candidate.gameObject.scene.IsValid())
+                    {
+                        continue;
+                    }
+
+                    count++;
+                    var candidateKey = VehicleIdentity.KeyOf(candidate, out _);
+                    if (candidateKey != 0L)
+                    {
+                        index[candidateKey] = candidate;
+                    }
+                }
+
+                _vehicleIndex = index;
+                _vehicleIndexBuiltAt = now;
+                _vehicleIndexCount = count;
+            }
+
+            indexed = _vehicleIndexCount;
+            return _vehicleIndex.TryGetValue(key, out vehicle);
         }
 
         /// <summary>

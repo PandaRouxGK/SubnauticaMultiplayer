@@ -8,6 +8,9 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **9** : ajout de la **conduite autoritaire** d'un véhicule (`VehicleControl` /
+        /// `VehicleControlResult`, M4). Un client v8 ne saurait pas envoyer son état de conduite : le
+        /// serveur garderait le véhicule immobile chez les autres pendant que son conducteur le simule.
         /// **8** : ajout de la réclamation autoritaire d'un objet (`PickupClaim` / `PickupResult`, M5).
         /// Un client v7 refuserait de lire l'opcode 15 comme un message connu — le handshake le refuse
         /// avant, mais la version est la seule chose qui empêche un mélange silencieux.
@@ -15,13 +18,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 8;
+        public const int Version = 9;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v8";
+        public const string ConnectionKey = "coop-subnautica-v9";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -41,6 +44,21 @@ namespace Coop.Model
         /// protocole : c'est une règle du serveur, donc la v8 n'est pas rouverte.
         /// </summary>
         public const float MaxPickupRangeMeters = 6f;
+
+        /// <summary>
+        /// Portée maximale (m) à laquelle un client peut **conduire** un véhicule (M4, v9).
+        ///
+        /// Le serveur compare la dernière position reçue du joueur à celle du véhicule. 10 m couvre la
+        /// montée/décente et le retard d'un message de position, sans permettre de piloter un Seamoth
+        /// depuis l'autre bout de la carte.
+        /// </summary>
+        public const float MaxVehicleControlRangeMeters = 10f;
+
+        /// <summary>
+        /// Cadence d'envoi de l'état de conduite : c'est aussi la cadence de diffusion des véhicules
+        /// (`VehicleSnapshot`), inutile de faire plus vite que ce que le serveur rediffuse.
+        /// </summary>
+        public const int VehicleControlIntervalMs = 100;
 
         /// <summary>Intervalle de vérification des changements d'équipement local côté client, en millisecondes.</summary>
         public const int EquipmentCheckIntervalMs = 250;
@@ -251,6 +269,12 @@ namespace Coop.Model
 
         /// <summary>Décision du serveur sur une réclamation, envoyée au seul demandeur (ReliableOrdered, v8).</summary>
         PickupResult = 16,
+
+        /// <summary>État de conduite d'un véhicule, émis par le client qui le pilote (v9, M4).</summary>
+        VehicleControl = 17,
+
+        /// <summary>Décision du serveur sur une conduite, envoyée au seul demandeur (ReliableOrdered, v9).</summary>
+        VehicleControlResult = 18,
     }
 
     /// <summary>

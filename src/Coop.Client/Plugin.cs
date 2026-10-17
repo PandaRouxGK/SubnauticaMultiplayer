@@ -68,6 +68,10 @@ namespace Coop.Client
             var behaviour = go.AddComponent<ClientNetworkBehaviour>();
             behaviour.Configure(host.Value, port.Value, username.Value);
 
+            // Conduite autoritaire (v9) : la boucle qui envoie l'état du véhicule piloté. Elle ne fait
+            // rien tant que le joueur ne pilote pas, donc elle vit avec le client et pas avec une sonde.
+            go.AddComponent<VehicleDriverBehaviour>();
+
             if (saveGuardInstalled)
             {
                 // Même composant que côté serveur (src/Shared) : le client entre dans le monde.
@@ -121,6 +125,13 @@ namespace Coop.Client
                 // active la sonde de l'hôte : c'est le couple qui produit la preuve de bout en bout.
                 Log.LogWarning("[boot] sonde de véhicule cliente activée (-coopdebug=vehicle).");
                 go.AddComponent<VehicleClientProbeBehaviour>();
+            }
+
+            if (IsDebugFlagSet("drive"))
+            {
+                // M4 / v9 : un client conduit le véhicule, l'autre tente de le lui prendre.
+                Log.LogWarning("[boot] sonde de conduite activée (-coopdebug=drive).");
+                go.AddComponent<VehicleDriveProbeBehaviour>();
             }
 
             if (IsDebugFlagSet("pickup"))
@@ -229,6 +240,50 @@ namespace Coop.Client
         /// arriver la couleur avant l'avatar, donc cette branche ne s'exécuterait jamais autrement.
         /// </summary>
         internal RemotePlayerManager Remotes => _remotes;
+
+        // — Conduite autoritaire (v9, M4) : l'état du véhicule que ce client pilote ————————
+        private int _vehicleControlSequence;
+        private int _vehicleControlSent;
+        private int _vehicleControlGranted;
+        private int _vehicleControlRefused;
+
+        internal int VehicleControlSent => _vehicleControlSent;
+        internal int VehicleControlGranted => _vehicleControlGranted;
+        internal int VehicleControlRefused => _vehicleControlRefused;
+
+        /// <summary>
+        /// Envoie l'état du véhicule piloté (v9). Unreliable : un état perdu est remplacé par le suivant
+        /// 100 ms plus tard, et le serveur ne décide rien de durable avec.
+        /// </summary>
+        internal bool SendVehicleControl(long vehicleKey, Vector3 position, Quaternion rotation, Vector3 speed)
+        {
+            if (_server == null || _server.ConnectionState != ConnectionState.Connected)
+            {
+                return false;
+            }
+
+            _writer.Reset();
+            new VehicleControlMessage
+            {
+                PlayerId = _assignedPlayerId,
+                VehicleKey = vehicleKey,
+                Sequence = ++_vehicleControlSequence,
+                X = position.x,
+                Y = position.y,
+                Z = position.z,
+                RotX = rotation.x,
+                RotY = rotation.y,
+                RotZ = rotation.z,
+                RotW = rotation.w,
+                SpeedX = speed.x,
+                SpeedY = speed.y,
+                SpeedZ = speed.z,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.Unreliable);
+            _vehicleControlSent++;
+            return true;
+        }
 
         /// <summary>Id que le serveur a assigné à ce joueur (0 avant le handshake) — pour les sondes.</summary>
         internal ushort AssignedPlayerIdForProbe => _assignedPlayerId;
@@ -960,6 +1015,26 @@ namespace Coop.Client
                     _vehicleSnapshotsReceived++;
                     _vehicleStatesReceived += vehicles.Vehicles != null ? vehicles.Vehicles.Length : 0;
                     _vehicles?.OnSnapshot(vehicles);
+                    break;
+                }
+
+                case MessageType.VehicleControlResult:
+                {
+                    var result = VehicleControlResultMessage.Read(reader);
+                    if (result.Granted)
+                    {
+                        _vehicleControlGranted++;
+                    }
+                    else
+                    {
+                        _vehicleControlRefused++;
+                    }
+
+                    CoopClientPlugin.Log.LogInfo(
+                        $"[conduite] résultat : clé=0x{result.VehicleKey:x16} accordée={result.Granted} " +
+                        $"conduite par {result.DriverId}");
+
+                    VehicleDriverBehaviour.OnControlResult(result);
                     break;
                 }
 

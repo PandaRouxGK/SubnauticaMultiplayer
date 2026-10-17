@@ -12,8 +12,8 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `8` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v8` | `Protocol.ConnectionKey` |
+| Version du protocole | `9` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v9` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
 | Encodage | little-endian, tampons réutilisables, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
@@ -53,6 +53,8 @@ et encodé en UTF-8.
 | 14 | `VehicleSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet, puis par véhicule : `Key` long, position (3), quaternion (4) |
 | 15 | `PickupClaim` | client → serveur | ReliableOrdered | `PlayerId` ushort (revendiqué, falsifiable), `ItemKey` long, `TechTypeName` string |
 | 16 | `PickupResult` | serveur → demandeur | ReliableOrdered | `ItemKey` long, `TechTypeName` string, `Granted` bool, `HolderId` ushort, `ClaimedBy` ushort |
+| 17 | `VehicleControl` | client → serveur | Unreliable (10 Hz) | `PlayerId` ushort (revendiqué, falsifiable), `VehicleKey` long, `Sequence` int, position et rotation (7 floats), vitesse (3 floats) |
+| 18 | `VehicleControlResult` | serveur → demandeur | ReliableOrdered | `VehicleKey` long, `Granted` bool, `DriverId` ushort |
 
 Quatre points de contrat que ces messages portent :
 
@@ -225,12 +227,15 @@ arrivée aux autres (`ServerNetwork.HandleHandshake`).
 
 Dit franchement, pour que ce document ne laisse pas croire à un contrat plus large qu'il n'est :
 
-- **Véhicules : position seulement.** Le flux #14 transporte la position et l'orientation des véhicules du
-  serveur, et le client les interpole (`PLAN.md` §33). Ne sont **pas** transportés : l'énergie, les modules,
-  les dégâts, et surtout **la conduite** — rien ne remonte du client vers le serveur, donc un client qui
-  pilote simule localement et le serveur ne le sait pas. La synchronisation suppose aussi un véhicule
-  **présent dans la sauvegarde des deux côtés** : la création d'entité n'est pas dans le protocole (même
-  famille de limite que M6).
+- **Véhicules : position et conduite, rien d'autre.** Le flux #14 transporte la position et l'orientation
+  des véhicules du serveur, le client les interpole (`PLAN.md` §33), et depuis la v9 le **conducteur**
+  envoie son état (#17) : le serveur vérifie que la clé désigne un de ses véhicules, que le joueur est à
+  moins de `10 m`, et qu'aucun autre joueur ne conduisait déjà, puis applique et rediffuse (#18 rend la
+  décision au demandeur). Ne sont **pas** transportés : l'énergie, les modules, les dégâts — un client qui
+  conduit et un serveur qui ne simule pas le véhicule ne peuvent pas décider d'une panne. Il n'y a **pas
+  de libération** du véhicule : le conducteur garde la main jusqu'à sa déconnexion (`PLAN.md` §40). La
+  synchronisation suppose aussi un véhicule **présent dans la sauvegarde des deux côtés** : la création
+  d'entité n'est pas dans le protocole (même famille de limite que M6).
 - **Le ramassage est autoritaire, mais son effet sur le monde ne l'est pas** : depuis la v8 et la fin de
   M5, le serveur accorde ou refuse une clé **d'un objet réel** (il la résout dans son propre monde, et
   refuse ce qu'il ne trouve pas ou qui est à plus de `6 m` du joueur), et le client **bloque** le geste de
@@ -240,5 +245,5 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   à tort, et les objets **sans clé** ne sont pas arbitrés. Les collisions de clé sont comptées, pas
   résolues. Aucun autre arbitrage de ressource (récolte, craft, dégâts) n'existe.
 - **Aucun transport de contenu** : pas d'AssetBundle, pas de définition d'objet envoyée au client (M6).
-- **Version 8** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
+- **Version 9** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
   tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

@@ -2961,3 +2961,54 @@ client 2 verdict=True — clé partagée refusée tenue par 1 ; clé inventée r
 - **Le retour arrière n'est exercé par aucune mesure** : l'étape L vérifie le blocage **avant** l'inventaire
   (chemin 2), pas le retrait après coup (chemin 3), qui demanderait de provoquer un refus en pleine course
   — un objet déjà réclamé et ramassé pendant l'aller-retour.
+
+---
+
+## 40. M4 (b) : la conduite est autoritaire — un seul conducteur, et le refus est rendu au demandeur (2026-10-17)
+
+### Le choix, dit franchement
+
+Le véhicule est conduit par le joueur, avec les entrées du joueur et la physique locale du jeu. Le faire
+simuler par le serveur demanderait de transporter les entrées (gaz, barre, tangage) et de rejouer le moteur
+du jeu côté serveur. On fait donc l'inverse : **le client conduit et envoie son état**, et le serveur garde
+ce qui compte — **le droit** de conduire, une portée, et un refus opposable. C'est un transfert d'autorité
+sur une entité du monde, pas une simulation serveur.
+
+### Ce qui est en place (protocole v9)
+
+- **`VehicleControl` (#17, client → serveur, Unreliable, 10 Hz)** : clé du véhicule, position, rotation,
+  vitesse, numéro d'ordre. `PlayerId` est **revendiqué** et falsifiable, comme pour la réclamation d'objet ;
+  le serveur prend l'identité de la session et compte l'écart (`ForgedVehicleIds`).
+- **`VehicleControlResult` (#18, serveur → demandeur, ReliableOrdered)** : accordé / refusé, et le
+  conducteur **effectif**. Sans lui, un second joueur enverrait son état dans le vide et son véhicule local
+  divergerait sans un mot. Réponse à chaque accord ; pour un refus, au plus une fois par seconde et par
+  clé (le client envoie 10 états par seconde, il n'a pas besoin de 10 refus).
+- **Serveur** : la clé doit désigner un véhicule **de son monde** (index reconstruit au plus une fois par
+  seconde), le joueur doit être à moins de `MaxVehicleControlRangeMeters` (10 m), et un véhicule déjà
+  conduit par un autre joueur n'est pas volé : le refus est journalisé **une fois par clé** (à 10 Hz, un
+  refus répété noierait le journal). L'état accepté est appliqué au transform du véhicule serveur, sa
+  vitesse physique annulée, puis **rediffusé** par le flux `VehicleSnapshot` déjà en place.
+- **Client** : `VehicleDriverBehaviour` lit `Player.main.currentMountedVehicle` et envoie à 10 Hz ; la sonde
+  emprunte **la même boucle**, seule la source du véhicule est forcée (`ProbeTarget`).
+
+### La mesure (étape M de `tools/verify.sh`, 2026-10-17 01:03)
+
+```
+serveur  conduite : clé=0xe16d82d1f441441c — prise par 'killi'#1 ('SeaMoth(Clone)' (SeaMoth) pos=(-120.7, -21.9, -64.5) clé=e16d82d1f441441c (identifiant), joueur à 2.5 m), état appliqué et rediffusé.
+         conduite : clé=0xe16d82d1f441441c réclamée par 'killi'#2 -> REFUSÉE (déjà conduite par 'killi'#1)
+client 1 prise en main : clé=… (identifiant) — envoi à 10 Hz ; résultat : accordée=True conduite par 1 ; verdict=True (77 états en 8 s, accords=1, refus=0)
+client 2 résultat : accordée=False conduite par 1 ; verdict=True (refus=2, accords=0)
+```
+
+`étape M : OK (93s)`, `VERDICT GLOBAL : tout est vert`.
+
+### Ce que la conduite ne fait pas encore
+
+- **Aucune libération** : le conducteur garde la main jusqu'à sa déconnexion, même après être descendu. Un
+  second joueur ne peut donc pas reprendre un Seamoth que le premier a laissé — il faut un message de
+  libération (ou l'expiration d'un silence de N secondes), et c'est le prochain pas de M4.
+- **Le joueur n'est pas monté pour de vrai** : la sonde force la source du véhicule. Ce qui n'est pas
+  exercé est la lecture `currentMountedVehicle` elle-même — un champ public, mais non mesuré.
+- **Rien n'est transporté d'autre** : ni énergie, ni modules, ni dégâts (M4 « le reste », §2 de
+  `docs/authority.md`). Un client qui conduit et un serveur qui ne simule pas le véhicule ne peuvent pas
+  décider d'une panne de batterie.

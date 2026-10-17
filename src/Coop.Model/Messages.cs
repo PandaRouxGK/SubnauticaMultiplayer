@@ -874,6 +874,108 @@ namespace Coop.Model
         }
     }
 
+    /// <summary>
+    /// État de conduite d'un véhicule (Unreliable, 10 Hz, protocole v9, M4) : « ce véhicule-là est conduit
+    /// par moi, et voici où il est ».
+    ///
+    /// C'est la première fois qu'un client ne se contente pas d'annoncer sa position : il annonce celle
+    /// d'une **entité du monde**. Le serveur ne le croit pas sur parole — il vérifie que la clé désigne un
+    /// de **ses** véhicules, que le joueur est à moins de `MaxVehicleControlRangeMeters`, et qu'aucun autre
+    /// joueur ne conduisait déjà ce véhicule.
+    ///
+    /// `PlayerId` est **revendiqué** et falsifiable, comme pour la réclamation d'objet : le serveur prend
+    /// l'identité de la session et compte l'écart.
+    /// </summary>
+    public sealed class VehicleControlMessage
+    {
+        public ushort PlayerId;
+        public long VehicleKey;
+
+        /// <summary>Numéro d'ordre, croissant : il ne sert qu'à repérer un état arrivé dans le désordre.</summary>
+        public int Sequence;
+
+        public float X, Y, Z;
+        public float RotX, RotY, RotZ, RotW;
+        public float SpeedX, SpeedY, SpeedZ;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteByte((byte)MessageType.VehicleControl);
+            writer.WriteUInt16(PlayerId);
+            writer.WriteLong(VehicleKey);
+            writer.WriteInt(Sequence);
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteFloat(RotX);
+            writer.WriteFloat(RotY);
+            writer.WriteFloat(RotZ);
+            writer.WriteFloat(RotW);
+            writer.WriteFloat(SpeedX);
+            writer.WriteFloat(SpeedY);
+            writer.WriteFloat(SpeedZ);
+        }
+
+        public static VehicleControlMessage Read(PacketReader reader)
+        {
+            var msg = new VehicleControlMessage
+            {
+                PlayerId = reader.ReadUInt16(),
+                VehicleKey = reader.ReadLong(),
+                Sequence = reader.ReadInt(),
+                X = reader.ReadFloat(),
+                Y = reader.ReadFloat(),
+                Z = reader.ReadFloat(),
+                RotX = reader.ReadFloat(),
+                RotY = reader.ReadFloat(),
+                RotZ = reader.ReadFloat(),
+                RotW = reader.ReadFloat(),
+                SpeedX = reader.ReadFloat(),
+                SpeedY = reader.ReadFloat(),
+                SpeedZ = reader.ReadFloat(),
+            };
+
+            PlayerPositionMessage.EnsureFinite(
+                msg.X, msg.Y, msg.Z,
+                msg.RotX, msg.RotY, msg.RotZ, msg.RotW,
+                msg.SpeedX, msg.SpeedY, msg.SpeedZ);
+
+            return msg;
+        }
+    }
+
+    /// <summary>
+    /// Décision du serveur sur une conduite (ReliableOrdered, v9), envoyée au seul demandeur.
+    ///
+    /// Elle existe pour que le client **sache** qu'il ne conduit pas : sans elle, un second joueur
+    /// enverrait son état dans le vide et son véhicule local divergerait sans un mot. `DriverId` est le
+    /// conducteur **effectif**, jamais celui que le message revendiquait.
+    /// </summary>
+    public sealed class VehicleControlResultMessage
+    {
+        public long VehicleKey;
+        public bool Granted;
+        public ushort DriverId;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteByte((byte)MessageType.VehicleControlResult);
+            writer.WriteLong(VehicleKey);
+            writer.WriteBool(Granted);
+            writer.WriteUInt16(DriverId);
+        }
+
+        public static VehicleControlResultMessage Read(PacketReader reader)
+        {
+            return new VehicleControlResultMessage
+            {
+                VehicleKey = reader.ReadLong(),
+                Granted = reader.ReadBool(),
+                DriverId = reader.ReadUInt16(),
+            };
+        }
+    }
+
     public static class MessageCodec
     {
         public static byte[] Encode(Action<PacketWriter> write, PacketWriter reusable = null)
