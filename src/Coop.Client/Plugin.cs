@@ -53,6 +53,11 @@ namespace Coop.Client
             // met en pause est gênant, une garde de sauvegarde absente est dangereuse.
             var pauseGuardInstalled = ClientPauseGuard.Install(Log);
 
+            // M5 : le ramassage d'un objet du monde demande l'accord du serveur. Non bloquant : si la
+            // cible n'existe pas dans cette version du jeu, le joueur ramasse encore localement, et le
+            // journal le dit — un ramassage non arbitré n'abîme rien.
+            var pickupGuardInstalled = PickupGuard.Install(Log);
+
             var host = Config.Bind("Reseau", "Hote", "127.0.0.1", "Adresse du serveur.");
             var port = Config.Bind("Reseau", "Port", Protocol.DefaultPort, "Port UDP du serveur.");
             var username = Config.Bind("Joueur", "Pseudo", Environment.UserName, "Pseudo envoyé au serveur.");
@@ -128,7 +133,8 @@ namespace Coop.Client
 
             Log.LogInfo(
                 $"[boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde={saveGuardInstalled}, " +
-                $"pauseCliente={(pauseGuardInstalled ? "désactivée" : "NON patchée")}).");
+                $"pauseCliente={(pauseGuardInstalled ? "désactivée" : "NON patchée")}, " +
+                $"ramassage={(pickupGuardInstalled ? "arbitré" : "NON patché")}).");
         }
 
         /// <summary>
@@ -334,6 +340,14 @@ namespace Coop.Client
                 $"{claimedPlayerId} (le mien est {_assignedPlayerId})");
             return true;
         }
+
+        /// <summary>
+        /// Réclame un objet **réel** au serveur (M5), sous l'identité de ce client. Le chemin est le
+        /// même que <see cref="ProbeSendPickupClaim"/> : seule l'identité revendiquée change, et c'est
+        /// justement ce que la sonde falsifie.
+        /// </summary>
+        internal bool SendPickupClaim(long itemKey, string techType) =>
+            ProbeSendPickupClaim(itemKey, techType, _assignedPlayerId);
 
         /// <summary>Résultat reçu du serveur pour une clé, ou <c>false</c> si la décision n'est pas encore arrivée.</summary>
         internal bool TryGetPickupResult(long itemKey, out PickupResultMessage result) =>
@@ -966,6 +980,10 @@ namespace Coop.Client
                         $"[pickup] résultat : clé=0x{result.ItemKey:x16} '{result.TechTypeName}' " +
                         $"accordée={result.Granted} tenue par {result.HolderId} " +
                         $"(revendiquée sous l'id {result.ClaimedBy})");
+
+                    // Le refus est **appliqué** ici : un objet ramassé optimistement repart dans le
+                    // monde. Sans cet appel, la décision du serveur ne serait qu'un message.
+                    PickupGuard.OnResult(result);
                     break;
                 }
 

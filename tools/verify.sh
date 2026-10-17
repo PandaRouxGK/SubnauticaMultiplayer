@@ -397,8 +397,14 @@ assert_c() {
 assert_g() {
     local log="$WORK_DIR/G/coop-server.log"
 
-    expect G "$log" 'aucun véhicule dans le monde' "le relevé dit que la sauvegarde n'en contient aucun (point de départ)"
-    expect G "$log" "commande console « spawn Seamoth »" "le Seamoth est fabriqué par la commande du jeu, pas par la sonde"
+    # Le point de départ dépend de la **sauvegarde**, pas du code : la préparation de K écrit un Seamoth
+    # dans la partie et cette écriture est désormais permanente (la fixture est stable, pas vierge).
+    # Les deux chemins sont donc acceptés **nommément** — monde vide, ou véhicule déjà présent — et
+    # c'est la ligne de journal qui est assertion, pas une supposition sur l'état du monde.
+    expect G "$log" 'aucun véhicule dans le monde|déjà présent à [0-9.]+ m de l.hôte' \
+        "le point de départ est dit (monde vide, ou véhicule déjà présent et repris tel quel)"
+    expect G "$log" 'commande console « spawn Seamoth »|retenu \(déjà dans le monde\)' \
+        "le Seamoth vient de la commande du jeu, ou du monde déjà chargé — la sonde dit lequel"
     expect G "$log" 'pas entre deux annonces — à 10 Hz' "la répartition des pas entre annonces est mesurée"
     expect G "$log" 'bande ≥2 m à 10 Hz=[1-9][0-9]*' "la bande ≥2 m par annonce est peuplée — celle que les créatures n'ont jamais atteinte"
     expect G "$log" '\[sonde\] véhicule : verdict=True' "la sonde de véhicule conclut True"
@@ -469,22 +475,33 @@ assert_l() {
     local c1="$WORK_DIR/L/coop-client.log"
     local c2="$WORK_DIR/L/coop-client-2.log"
 
-    # La **décision** du serveur : un accord nommé, un refus nommé, et la réécriture de l'id.
-    expect L "$server" 'pickup : clé=0x[0-9a-f]+ .* -> ACCORDÉE \(premier claim\)' \
-        "le serveur accorde la première réclamation"
+    # La **décision** du serveur, sur un objet réel : un accord nommé (avec la distance), un refus nommé,
+    # et le refus d'une clé qui ne désigne rien — c'est la valeur falsifiée.
+    expect L "$server" 'pickup : clé=0x[0-9a-f]+ .* -> ACCORDÉE \(premier claim, objet à [0-9.]+\.?[0-9]* m\)' \
+        "le serveur accorde la première réclamation, et dit à quelle distance était l'objet"
     expect L "$server" 'pickup : clé=0x[0-9a-f]+ .* -> REFUSÉE \(déjà tenue par' \
         "le serveur refuse la seconde réclamation en nommant le détenteur"
+    expect L "$server" 'pickup : clé=0x[0-9a-f]+ .* -> REFUSÉE \(objet inconnu du serveur' \
+        "le serveur refuse une clé qui ne désigne aucun objet de son monde"
     expect L "$server" 'vérification PlayerId \(pickup\) : .* effectif=2 -> verdict=True' \
         "l'id revendiqué est comparé à l'id de session"
 
     expect L "$c1" '\[pickup\] résultat : .* accordée=True tenue par 1' \
         "client 1 : sa réclamation est accordée"
+    expect L "$c1" 'objet dans l.inventaire=True' \
+        "client 1 : le geste de ramassage a bien pris l'objet accordé"
     expect L "$c1" '\[sonde\] ramassage : verdict=True' "client 1 : la sonde conclut True"
 
     expect L "$c2" '\[pickup\] résultat : .* accordée=False tenue par 1' \
         "client 2 : la même clé lui est refusée"
-    expect L "$c2" '\[pickup\] résultat : .* accordée=True tenue par 2 .*revendiquée sous l.id 1' \
-        "client 2 : l'id falsifié est réécrit, l'objet lui revient"
+    expect L "$c2" 'clé inventée 0x[0-9a-f]+ reçue=True accordée=False' \
+        "client 2 : la clé inventée est refusée par le serveur"
+    expect L "$c2" 'id falsifié 0x[0-9a-f]+ reçue=True accordée=True tenue par 2 revendiquée sous l.id 1' \
+        "client 2 : l'id falsifié est réécrit, un objet réel lui revient"
+    expect L "$c2" 'garde=blocage \(blocages [0-9]+->[1-9][0-9]*' \
+        "client 2 : la garde a réellement bloqué le geste de ramassage"
+    expect L "$c2" 'objet dans l.inventaire=False' \
+        "client 2 : l'objet refusé n'est pas entré dans son inventaire"
     expect L "$c2" '\[sonde\] ramassage : verdict=True' "client 2 : la sonde conclut True"
 }
 

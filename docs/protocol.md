@@ -231,12 +231,14 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   pilote simule localement et le serveur ne le sait pas. La synchronisation suppose aussi un véhicule
   **présent dans la sauvegarde des deux côtés** : la création d'entité n'est pas dans le protocole (même
   famille de limite que M6).
-- **Le ramassage n'est pas encore autoritaire** : la **décision** l'est depuis la v8 (messages #15/#16 : la
-  première réclamation d'une clé gagne, les suivantes sont refusées avec le détenteur nommé, et l'id
-  revendiqué est remplacé par celui de la session), mais rien ne la branche sur le monde — le client
-  ramasse toujours localement, sans demander la permission, et le serveur ne vérifie ni que l'objet existe
-  ni que le joueur est à portée. La clé vient d'une sonde (`PLAN.md` §38). Aucun autre arbitrage de
-  ressource (récolte, craft, dégâts) n'existe.
+- **Le ramassage est autoritaire, mais son effet sur le monde ne l'est pas** : depuis la v8 et la fin de
+  M5, le serveur accorde ou refuse une clé **d'un objet réel** (il la résout dans son propre monde, et
+  refuse ce qu'il ne trouve pas ou qui est à plus de `6 m` du joueur), et le client **bloque** le geste de
+  ramassage (`Pickupable.OnHandClick`) quand la réponse est un refus, avec retour arrière si le refus arrive
+  après un ramassage optimiste (`PLAN.md` §39). Ce qui manque : **le monde du serveur garde l'objet** —
+  aucun message ne dit « cet objet n'existe plus » —, les objets **mobiles** peuvent être jugés hors portée
+  à tort, et les objets **sans clé** ne sont pas arbitrés. Les collisions de clé sont comptées, pas
+  résolues. Aucun autre arbitrage de ressource (récolte, craft, dégâts) n'existe.
 - **Aucun transport de contenu** : pas d'AssetBundle, pas de définition d'objet envoyée au client (M6).
 - **Version 8** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
   tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

@@ -32,6 +32,16 @@ namespace Coop.Model
         /// <summary>Longueur maximale d'un nom de <c>TechType</c> dans <see cref="PlayerEquipmentMessage"/>.</summary>
         public const int MaxTechTypeNameLength = 64;
 
+        /// <summary>
+        /// Portée maximale (m) à laquelle une réclamation de ramassage est acceptée (M5).
+        ///
+        /// Le serveur compare la **dernière position reçue** du joueur (20 Hz) à celle de l'objet. 6 m
+        /// couvre la portée d'interaction du jeu (de l'ordre de 3 m) et le retard d'un ou deux messages de
+        /// position pendant une nage, sans autoriser un ramassage à distance. Ce n'est pas un champ du
+        /// protocole : c'est une règle du serveur, donc la v8 n'est pas rouverte.
+        /// </summary>
+        public const float MaxPickupRangeMeters = 6f;
+
         /// <summary>Intervalle de vérification des changements d'équipement local côté client, en millisecondes.</summary>
         public const int EquipmentCheckIntervalMs = 250;
 

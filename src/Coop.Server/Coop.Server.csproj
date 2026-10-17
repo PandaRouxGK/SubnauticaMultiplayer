@@ -72,6 +72,7 @@
     <Compile Include="..\Shared\AutoLoadBehaviour.cs" Link="AutoLoadBehaviour.cs" />
     <Compile Include="..\Shared\CreatureIdentity.cs" Link="CreatureIdentity.cs" />
     <Compile Include="..\Shared\VehicleIdentity.cs" Link="VehicleIdentity.cs" />
+    <Compile Include="..\Shared\ItemIdentity.cs" Link="ItemIdentity.cs" />
     <Compile Include="..\Shared\ViewDirection.cs" Link="ViewDirection.cs" />
   </ItemGroup>
 

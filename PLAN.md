@@ -2818,6 +2818,36 @@ la copie). Une restauration qui échoue est un échec de l'étape, pas un averti
 position laissés par les premiers runs de K. Pour repartir d'un état connu, il faut recharger une sauvegarde
 manuelle ; K la préservera ensuite telle quelle.
 
+### 37.3 Le calendrier de nage se refermait sur lui-même, et G supposait un monde vide
+
+Deux causes distinctes, trouvées en rejouant la batterie complète le 2026-10-17 (11 étapes vertes, B et G
+rouges) :
+
+- **B** : chaque client sortait de la phase de nage dès qu'il avait vu **10 avancées** de l'autre, puis
+  jugeait son arrêt. Le client 2 sortait donc après `1 s` — il nageait `3 m` — et le client 1, qui n'avait
+  vu que `7` avancées de ces `3 m`, restait à nager `60 s`. Chacun produisait juste assez de mouvement pour
+  faire sortir l'autre, pas assez pour être mesuré par lui : `déplacement 2,27 m`, `avancées vues=7`,
+  `verdict=False`. Le calendrier était **circulaire**. Correction : une durée de nage **minimale** de `6 s`
+  avant de pouvoir conclure « l'autre me voit », et une fenêtre d'arrêt portée de `10` à `20 s` (les deux
+  ne s'arrêtent jamais à la même seconde). Les seuils de mesure (`10` avancées, `0,5 m`, `1,5 s`) ne sont
+  pas touchés.
+- **B (seconde moitié)** : l'arrêt de l'avatar était jugé pendant que le nageur **local** bougeait encore.
+  Le critère est désormais ancré sur l'arrêt du joueur : les deux horloges sont mesurées séparément et
+  journalisées (`écart local après l'arrêt`, `arrêt local confirmé`), pour qu'un échec dise lequel des deux
+  a manqué.
+- **B (mise à l'eau)** : un cap sur quatre plaçait le joueur dans le décor (déplacement local `2,93 m` en
+  `60 s`). La sonde essaie maintenant chaque cap quelques secondes et ne retient que celui qui **déplace**
+  le joueur (`déplacement local d'essai=2,15 m en 4s -> retenu`).
+- **G** : l'assertion exigeait `aucun véhicule dans le monde` et la commande `spawn Seamoth`. Depuis que K
+  écrit un Seamoth dans la sauvegarde (fixture stable, pas vierge), la sonde le trouve déjà là
+  (`'SeaMoth(Clone)' déjà présent à 8.0 m de l'hôte — déplacé tel quel`, `retenu (déjà dans le monde)`).
+  Les deux chemins sont maintenant acceptés **nommément** dans `tools/verify.sh` : c'est la ligne de
+  journal qui est assertion, pas une supposition sur l'état du monde.
+
+**Mesure** : `étape B : OK (110s)` dans la batterie complète, puis deux runs isolés verts
+(`déplacement 11,51 m` / `11,44 m`, `avancées vues=54`, `écart à l'arrêt max=0,10 m` / `0,16 m`) — contre
+`2,27 m / 7 avancées` et `0,63 m` avant. `étape G : OK (42s)` avec le Seamoth déjà présent.
+
 ---
 
 ## 38. M5 (a) : la première décision autoritaire — un objet réclamé deux fois n'est accordé qu'une (2026-10-17)
@@ -2857,7 +2887,10 @@ serveur  — pickup : clé=0x… -> ACCORDÉE (premier claim)
 `étape L : OK (97s)`. Les assertions portent sur les trois lignes du serveur et sur les deux verdicts
 clients — le refus n'est pas déduit d'un compteur, il est **nommé** avec son détenteur.
 
-### Ce que M5 (a) ne fait pas — la moitié qui reste
+### Ce que M5 (a) ne faisait pas — la moitié qui reste
+
+**Fermée le 2026-10-17 : voir §39.** Les trois limites ci-dessous (clé synthétique, ramassage local sans
+permission, ni existence ni portée vérifiées) sont traitées ; lire cette liste comme l'état d'avant.
 
 - **Le ramassage réel n'est pas branché** : la clé vient de la sonde, pas d'un objet du monde. Le client
   ramasse encore localement (le jeu ne demande pas la permission), et rien ne remet l'objet en place quand
@@ -2869,3 +2902,62 @@ clients — le refus n'est pas déduit d'un compteur, il est **nommé** avec son
 - **Pas de persistance** : la carte des réclamations vit avec la session serveur. Après un redémarrage,
   les objets déjà ramassés ne sont plus réclamés — c'est cohérent tant que la sauvegarde, elle, les a bien
   retirés.
+
+---
+
+## 39. M5 (b) : le ramassage réel passe par la décision, et un geste refusé est bloqué (2026-10-17)
+
+### Ce qui est en place
+
+Trois pièces, et chacune répond à une limite nommée du §38 :
+
+1. **`Shared/ItemIdentity.cs`** — la clé d'un objet **réel**, calculée des deux côtés et compilée dans les
+   deux plugins : `UniqueIdentifier.Id` d'abord (`identifiant`), position d'ancrage quantifiée à 5 cm +
+   prefab + `TechType` en repli (`position d'ancrage (repli)`), `0` si aucun des deux. Les objets **dans un
+   inventaire** sont exclus de la collecte : sinon le serveur croirait encore dans le monde un objet déjà
+   ramassé.
+2. **`Coop.Client/PickupGuard.cs`** — patch Harmony de `Pickupable.OnHandClick` (le geste du joueur, celui
+   que le jeu appelle quand on clique sur l'objet) : objet **accordé** → passe ; **refusé** → bloqué avant
+   l'inventaire ; **sans décision** → réclamation envoyée et ramassage **optimiste**, puis **retour
+   arrière** si le refus arrive (retrait de l'inventaire + `Drop()`). Les objets **sans clé** passent et
+   sont comptés (`sans clé=`) : c'est une limite, pas un refus silencieux.
+3. **`ServerNetwork.TryResolveWorldItem` + `Protocol.MaxPickupRangeMeters`** — le serveur résout la clé dans
+   **son** monde (index reconstruit au plus une fois par seconde, 449 objets) et refuse ce qu'il ne sait pas
+   résoudre (`objet inconnu du serveur`) ou ce qui est trop loin (portée `6,0 m`, mesurée avec la dernière
+   position reçue de la session, 20 Hz). Aucun champ ajouté au message : la v8 n'est pas rouverte.
+
+La sonde (`-coopdebug=pickup`) ne réclame plus une clé inventée : elle choisit un **objet réel immobile**
+(le plus proche du point d'apparition, hors créatures — un `Pickupable` porté par un poisson a une clé
+stable mais une position qui nage, mesuré : refus `hors portée : 6,8 m > 6,0 m` pour un joueur pourtant à
+`1,74 m`), s'y place, réclame, **ramasse** pour de vrai, et lit séparément le compteur de la garde et le
+contenu de l'inventaire.
+
+### La mesure (étape L, 2026-10-17 00:51)
+
+```
+serveur  pickup : clé=0x10ee181a0699267d 'PowerCell' réclamée par 'killi'#1 -> ACCORDÉE (premier claim, objet à 2.2 m)
+         pickup : clé=0xbd613fd07fc6fef1 'AcidMushroom' réclamée par 'killi'#2 -> ACCORDÉE (premier claim, objet à 1.7 m)
+         pickup : clé=0x10ee181a0699267d 'PowerCell' réclamée par 'killi'#2 -> REFUSÉE (déjà tenue par 'killi'#1)
+         pickup : clé=0x5049434b55503232 'CléFalsifiée' réclamée par 'killi'#2 -> REFUSÉE (objet inconnu du serveur (449 objet(s) indexé(s)))
+client 1 verdict=True — objet 'PowerCell(Clone)' clé=10ee181a0699267d (identifiant) ; garde=accord (accords 0->1), objet dans l'inventaire=True
+client 2 verdict=True — clé partagée refusée tenue par 1 ; clé inventée refusée ; id falsifié accordé tenue par 2 revendiquée sous l'id 1 ;
+         garde=blocage (blocages 0->1), objet dans l'inventaire=False
+```
+
+`étape L : OK (97s)`, puis `--only=B,L` : `B : OK (107s)`, `L : OK (96s)`, `VERDICT GLOBAL : tout est vert`.
+
+### Ce que M5 (b) ne fait pas encore
+
+- **Le monde du serveur garde l'objet.** Le client le retire du sien (son inventaire), mais aucun message
+  ne dit « cet objet n'existe plus » : un troisième joueur qui le réclame après coup reçoit un accord, et
+  ne verra rien. Il manque un `ItemRemoved` (ou la conséquence serveur d'un ramassage accordé), et c'est
+  le prochain pas de M5.
+- **Les objets mobiles** (butin porté par une créature, objet lancé) ont une clé stable mais une position
+  qui change : la portée mesurée peut être fausse. La sonde les évite explicitement ; le jeu, lui, n'a pas
+  cette politesse.
+- **Les collisions de clé** sont comptées, pas résolues : l'index serveur signale `5 clé(s) d'objet
+  partagée(s)` sur la sauvegarde de test (le repli par position confond des objets posés au même endroit).
+  La décision porte alors sur le dernier indexé.
+- **Le retour arrière n'est exercé par aucune mesure** : l'étape L vérifie le blocage **avant** l'inventaire
+  (chemin 2), pas le retrait après coup (chemin 3), qui demanderait de provoquer un refus en pleine course
+  — un objet déjà réclamé et ramassé pendant l'aller-retour.

@@ -101,8 +101,27 @@ namespace Coop.Client
         /// </summary>
         private const float SwimSeconds = 60f;
 
-        /// <summary>Durée (s) d'arrêt observée après la nage.</summary>
-        private const float StopSeconds = 10f;
+        /// <summary>
+        /// Durée (s) d'arrêt observée après la nage.
+        ///
+        /// Portée de 10 à 20 s le 2026-10-17 : les deux nageurs ne s'arrêtent pas à la même seconde (chacun
+        /// sort de la nage quand il a vu l'autre bouger, et l'observation a 20 Hz un retard variable). Dix
+        /// secondes suffisaient quand la nage était symétrique ; mesuré, un client jugeait l'arrêt pendant que
+        /// l'autre nageait encore, ce qui donnait `arrêt local confirmé=True` mais un `écart à l'arrêt` de
+        /// `0,63 m` — un faux échec de synchronisation.
+        /// </summary>
+        private const float StopSeconds = 20f;
+
+        /// <summary>
+        /// Durée (s) de nage **minimale** avant de pouvoir conclure « l'autre me voit ».
+        ///
+        /// Sans elle le calendrier se referme sur lui-même : mesuré le 2026-10-17, le client 2 sortait de la
+        /// nage après `1 s` (il avait vu 10 avancées du client 1), nageait donc `3 m`, et le client 1 — qui
+        /// n'avait vu que `7` avancées de ces `3 m` — restait à nager `60 s`. Chaque client produisait alors
+        /// juste assez de mouvement pour faire sortir l'autre, mais pas assez pour être mesuré par lui. Une
+        /// nage de 6 s à 2,6 m/s donne ~15 m et ~120 échantillons : largement au-dessus des 10 exigés.
+        /// </summary>
+        private const float SwimMinDurationSeconds = 6f;
 
         /// <summary>Vitesse (m/s) imposée au moteur pendant la nage.</summary>
         private const float SwimSpeed = 2.6f;
@@ -118,6 +137,21 @@ namespace Coop.Client
         /// seul échantillon ne distingue pas une nage d'une correction de position.
         /// </summary>
         private const int SwimConfirmSamples = 10;
+
+        /// <summary>
+        /// Déplacement local (m) minimal que le **nageur lui-même** doit produire pour que son cap soit
+        /// retenu.
+        ///
+        /// Pourquoi cette garde : mesuré le 2026-10-17 (étape B), un cap sur quatre plaçait le joueur dans le
+        /// décor — déplacement local `2,93 m` en 60 s de poussée — et l'autre client, qui voyait
+        /// consciencieusement ces 2,30 m, manquait le critère `avancées vues=7` (10 exigées). Le verdict
+        /// tombait alors sur la **mise à l'eau**, pas sur la synchronisation : c'est exactement la confusion
+        /// que cette sonde doit éviter. Un cap qui nage donne des dizaines de mètres ; le seuil est donc bas.
+        /// </summary>
+        private const float SwimCapMinLocalMeters = 2f;
+
+        /// <summary>Durée (s) de poussée accordée à un cap pour prouver qu'il déplace le joueur.</summary>
+        private const float SwimCapProbeSeconds = 4f;
 
         /// <summary>Avance minimale (m) d'un échantillon à l'autre pour compter comme un pas de nage.</summary>
         private const float PositionAdvanceMeters = 0.01f;
@@ -859,7 +893,38 @@ namespace Coop.Client
                 yield return new WaitForSeconds(0.4f);
 
                 current = candidate;
-                if (Player.main.IsUnderwater())
+                if (!Player.main.IsUnderwater())
+                {
+                    Log.LogInfo(
+                        $"[sonde] présence : cap ({candidate.x:F0}, {candidate.z:F0}) écarté — le joueur n'y est " +
+                        "pas sous l'eau.");
+                    continue;
+                }
+
+                // Le cap doit **déplacer le joueur**, pas seulement le mettre à l'eau. Un cap dans le décor
+                // laisse le moteur pousser dans le vide : le pair voit alors une avancée réelle mais trop
+                // courte pour le critère, et l'échec accuserait la synchronisation à tort (mesuré :
+                // `avancées vues=7` pour un déplacement local de `2,93 m` en 60 s).
+                var capOrigin = Player.mainObject.transform.position;
+                var capForward = Player.mainObject.transform.forward;
+                var capDeadline = Time.realtimeSinceStartup + SwimCapProbeSeconds;
+                while (Time.realtimeSinceStartup < capDeadline &&
+                       Vector3.Distance(capOrigin, Player.mainObject.transform.position) < SwimCapMinLocalMeters)
+                {
+                    yield return new WaitForFixedUpdate();
+                    if (Player.main != null && Player.main.rigidBody != null)
+                    {
+                        Player.main.rigidBody.velocity = capForward * SwimSpeed;
+                    }
+                }
+
+                var capMoved = Vector3.Distance(capOrigin, Player.mainObject.transform.position);
+                Log.LogInfo(
+                    $"[sonde] présence : cap ({candidate.x:F0}, {candidate.z:F0}) — sous l'eau=True, " +
+                    $"déplacement local d'essai={capMoved:F2} m en {SwimCapProbeSeconds:F0}s " +
+                    $"(min {SwimCapMinLocalMeters:F1}) -> {(capMoved >= SwimCapMinLocalMeters ? "retenu" : "écarté")}");
+
+                if (capMoved >= SwimCapMinLocalMeters)
                 {
                     break;
                 }
@@ -893,7 +958,8 @@ namespace Coop.Client
             // au même instant (mesuré : 8 s d'écart), et le premier arrivé nageait puis s'arrêtait pendant que
             // le second lisait encore des zéros. Ici chaque client nage tant que l'autre ne le voit pas, et
             // s'arrête sur la preuve — le décalage ne change plus le résultat, il coûte seulement du temps.
-            var swimDeadline = Time.realtimeSinceStartup + SwimSeconds;
+            var swimStart = Time.realtimeSinceStartup;
+            var swimDeadline = swimStart + SwimSeconds;
             while (Time.realtimeSinceStartup < swimDeadline)
             {
                 // Attendre la **fin des FixedUpdate** avant d'imposer la vitesse : le `PlayerMotor` du jeu y
@@ -941,7 +1007,7 @@ namespace Coop.Client
                                  && maxSpeed >= SwimMinSpeed;
                 }
 
-                if (peerMoving)
+                if (peerMoving && Time.realtimeSinceStartup - swimStart >= SwimMinDurationSeconds)
                 {
                     break;
                 }
@@ -959,11 +1025,38 @@ namespace Coop.Client
             var stopAnchor = lastPosition;
             var stopClock = Time.realtimeSinceStartup;
             var stopDeadline = Time.realtimeSinceStartup + StopSeconds;
+
+            // L'arrêt du **joueur lui-même**, mesuré en parallèle de celui de l'avatar.
+            //
+            // Sans cette moitié, le critère de l'avatar juge un nageur qui dérive encore : mesuré le
+            // 2026-10-17 (étape B), un client lisait `écart à l'arrêt max=0,63 m` en observant un joueur
+            // qui venait de parcourir `106 m` — l'avatar suivait son joueur, et c'est le nageur qui
+            // n'était pas arrivé. Les deux horloges sont donc ancrées sur l'arrêt **local**, et les deux
+            // chiffres sont journalisés séparément pour que l'échec dise lequel des deux a manqué.
+            var ownAnchor = Player.mainObject != null ? Player.mainObject.transform.position : Vector3.zero;
+            var ownClock = Time.realtimeSinceStartup;
+            var ownDrift = 0f;
+            var localSettled = false;
+
             while (Time.realtimeSinceStartup < stopDeadline)
             {
                 if (Player.main != null && Player.main.rigidBody != null)
                 {
                     Player.main.rigidBody.velocity = Vector3.zero;
+                }
+
+                if (Player.mainObject != null)
+                {
+                    var ownPosition = Player.mainObject.transform.position;
+                    var own = Vector3.Distance(ownAnchor, ownPosition);
+                    ownDrift = Mathf.Max(ownDrift, own);
+                    if (own > StopRadiusMeters)
+                    {
+                        ownAnchor = ownPosition;
+                        ownClock = Time.realtimeSinceStartup;
+                    }
+
+                    localSettled = Time.realtimeSinceStartup - ownClock >= StopConfirmSeconds;
                 }
 
                 if (remotes.TryGetMotionForProbe(remoteId, out var speed, out var position, out _))
@@ -976,14 +1069,19 @@ namespace Coop.Client
                     // qu'un vrai glissement se voie au lieu d'être absorbé par le rayon.
                     var drift = Vector3.Distance(position, stopAnchor);
                     stopDrift = Mathf.Max(stopDrift, drift);
-                    if (drift > StopRadiusMeters)
+
+                    if (drift > StopRadiusMeters || !localSettled)
                     {
+                        // Le second cas n'est **pas** un écart de l'avatar : le joueur avance encore, donc
+                        // son avatar doit avancer. L'ancre et l'horloge repartent, et le maximum d'écart
+                        // garde la valeur mesurée — il n'est pas remis à zéro, il reste le diagnostic.
                         stopAnchor = position;
                         stopClock = Time.realtimeSinceStartup;
                     }
 
                     lastPosition = position;
-                    stopped = peerMoving && Time.realtimeSinceStartup - stopClock >= StopConfirmSeconds;
+                    stopped = peerMoving && localSettled &&
+                              Time.realtimeSinceStartup - stopClock >= StopConfirmSeconds;
                     if (stopped)
                     {
                         break;
@@ -1019,13 +1117,20 @@ namespace Coop.Client
                 $"(observée, hors critère ; vitesse minimale vue {restSpeed:F2}), avancées vues={advancing}, " +
                 $"écart à l'arrêt max={stopDrift:F2} m (critère : < {StopRadiusMeters:F1} m), arrêt tenu " +
                 $"{StopConfirmSeconds:F1}s sur {SwimSeconds:F0}s de nage puis {StopSeconds:F0}s d'arrêt " +
-                $"(déplacement local du nageur : {localMoved:F2} m) -> verdict={ok}");
+                $"(déplacement local du nageur : {localMoved:F2} m, écart local après l'arrêt {ownDrift:F2} m, " +
+                $"arrêt local confirmé={localSettled}) -> verdict={ok}");
 
             if (!ok)
             {
                 Log.LogError(
-                    "[sonde] présence : le déplacement du joueur n'est pas arrivé chez l'autre client, ou il ne " +
-                    "s'est pas arrêté — un joueur verrait un avatar immobile ou qui glisse.");
+                    !movedOk
+                        ? "[sonde] présence : le déplacement du joueur n'est pas arrivé chez l'autre client — un " +
+                          "joueur verrait un avatar immobile."
+                        : !localSettled
+                            ? "[sonde] présence : l'arrêt n'a pas pu être jugé — le nageur lui-même ne s'est pas " +
+                              "arrêté localement (il dérive encore), ce n'est pas l'avatar distant qui est en cause."
+                            : "[sonde] présence : l'avatar a continué de glisser après l'arrêt du joueur — un " +
+                              "joueur le verrait avancer sans commande.");
             }
 
             _motionOk = ok;

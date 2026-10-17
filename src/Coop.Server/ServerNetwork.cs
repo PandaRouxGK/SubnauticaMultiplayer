@@ -191,6 +191,26 @@ namespace Coop.Server
         /// <summary>Réclamations dont le <c>PlayerId</c> annoncé n'était pas celui de la session.</summary>
         public int ForgedPickupIds { get; private set; }
 
+        /// <summary>Réclamations refusées parce que la clé ne correspond à aucun objet du monde serveur.</summary>
+        public int PickupRefusedUnknown { get; private set; }
+
+        /// <summary>Réclamations refusées parce que le joueur est trop loin de l'objet.</summary>
+        public int PickupRefusedRange { get; private set; }
+
+        /// <summary>Réclamations refusées faute de position connue pour le joueur.</summary>
+        public int PickupRefusedNoPosition { get; private set; }
+
+        /// <summary>
+        /// Index clé → position des objets ramassables du monde, reconstruit **au plus une fois par
+        /// seconde** : un ramassage est rare, mais un index refait à chaque réclamation coûterait un
+        /// parcours complet du monde par clic.
+        /// </summary>
+        private Dictionary<long, UnityEngine.Vector3> _itemIndex;
+
+        private float _itemIndexBuiltAt = -1f;
+        private int _itemIndexObjects;
+        private int _itemIndexSharedKeys;
+
         private string[] _lastHostEquipment;
         private string _lastHostEquipmentSignature;
         private string _lastHostHeldItemSignature;
@@ -965,6 +985,58 @@ namespace Coop.Server
                     $"{msg.PlayerId}, effectif={session.PlayerId} -> verdict=True");
             }
 
+            // — L'objet doit exister **chez le serveur**, et le joueur doit être à portée.
+            //
+            // Ce sont les deux gardes qui manquaient à la décision seule : une clé inconnue était
+            // accordée, et un joueur pouvait réclamer un objet à l'autre bout de la carte. La portée se
+            // mesure avec la **dernière position reçue** de la session (20 Hz), sans nouveau champ dans
+            // le message : le format de la v8 suffit.
+            UnityEngine.Vector3 itemPosition = UnityEngine.Vector3.zero;
+            var distance = 0f;
+            string refusal = null;
+
+            if (!TryResolveWorldItem(msg.ItemKey, out itemPosition, out var indexedKeys))
+            {
+                PickupRefusedUnknown++;
+                refusal = $"objet inconnu du serveur ({indexedKeys} objet(s) indexé(s)) — la clé ne désigne " +
+                          "rien dans le monde simulé";
+            }
+            else if (session.PositionsReceived == 0)
+            {
+                PickupRefusedNoPosition++;
+                refusal = "position du joueur inconnue (aucune position reçue) — la portée n'est pas vérifiable";
+            }
+            else
+            {
+                distance = UnityEngine.Vector3.Distance(
+                    new UnityEngine.Vector3(session.X, session.Y, session.Z), itemPosition);
+
+                if (distance > Protocol.MaxPickupRangeMeters)
+                {
+                    PickupRefusedRange++;
+                    refusal = $"hors portée : {distance:F1} m > {Protocol.MaxPickupRangeMeters:F1} m";
+                }
+            }
+
+            if (refusal != null)
+            {
+                PickupClaimsRefused++;
+                _log.LogInfo(
+                    $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
+                    $"'{session.Username}'#{session.PlayerId} -> REFUSÉE ({refusal})");
+
+                Send(peer, new PickupResultMessage
+                {
+                    ItemKey = msg.ItemKey,
+                    TechTypeName = tech,
+                    Granted = false,
+                    HolderId = 0,
+                    ClaimedBy = msg.PlayerId,
+                }.Write, DeliveryMethod.ReliableOrdered);
+
+                return;
+            }
+
             var granted = false;
             var holder = session.PlayerId;
 
@@ -984,7 +1056,8 @@ namespace Coop.Server
                     PickupClaimsGranted++;
                     _log.LogInfo(
                         $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
-                        $"'{session.Username}'#{session.PlayerId} -> ACCORDÉE (déjà tenue par le même joueur)");
+                        $"'{session.Username}'#{session.PlayerId} -> ACCORDÉE (déjà tenue par le même joueur, " +
+                        $"objet à {distance:F1} m)");
                 }
                 else
                 {
@@ -1002,7 +1075,7 @@ namespace Coop.Server
                 PickupClaimsGranted++;
                 _log.LogInfo(
                     $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
-                    $"'{session.Username}'#{session.PlayerId} -> ACCORDÉE (premier claim)");
+                    $"'{session.Username}'#{session.PlayerId} -> ACCORDÉE (premier claim, objet à {distance:F1} m)");
             }
 
             Send(peer, new PickupResultMessage
@@ -1013,6 +1086,61 @@ namespace Coop.Server
                 HolderId = holder,
                 ClaimedBy = msg.PlayerId,
             }.Write, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>
+        /// Vrai si la clé désigne un objet **du monde simulé**, et où il se trouve.
+        ///
+        /// Pourquoi le serveur doit résoudre la clé lui-même : sans cela, il accorderait n'importe quelle
+        /// valeur — un client pourrait « réclamer » une clé inventée pour bloquer un objet qu'un autre
+        /// client réclamerait ensuite. L'index est reconstruit au plus une fois par seconde, avec la
+        /// **même** fonction de clé que le client (<see cref="ItemIdentity"/>, compilé dans les deux
+        /// plugins) ; les clés partagées sont comptées et signalées plutôt que silencieuses.
+        /// </summary>
+        private bool TryResolveWorldItem(long key, out UnityEngine.Vector3 position, out int indexedKeys)
+        {
+            var now = UnityEngine.Time.realtimeSinceStartup;
+
+            if (_itemIndex == null || now - _itemIndexBuiltAt > 1f)
+            {
+                var index = new Dictionary<long, UnityEngine.Vector3>();
+                var items = ItemIdentity.CollectWorldItems();
+                var shared = 0;
+                var sharedKey = 0L;
+
+                foreach (var item in items)
+                {
+                    var itemKey = ItemIdentity.KeyOf(item, out _);
+                    if (itemKey == 0L)
+                    {
+                        continue;
+                    }
+
+                    if (index.ContainsKey(itemKey))
+                    {
+                        shared++;
+                        sharedKey = itemKey;
+                    }
+
+                    index[itemKey] = item.transform != null ? item.transform.position : UnityEngine.Vector3.zero;
+                }
+
+                _itemIndex = index;
+                _itemIndexBuiltAt = now;
+                _itemIndexObjects = items.Count;
+
+                if (shared != _itemIndexSharedKeys)
+                {
+                    _itemIndexSharedKeys = shared;
+                    _log.LogWarning(
+                        $"[net] pickup : {shared} clé(s) d'objet partagée(s) dans l'index (ex. 0x{sharedKey:x16}) " +
+                        "— deux objets du monde se confondent, la décision portera sur le dernier indexé. " +
+                        "C'est une limite du repli par position, pas un refus.");
+                }
+            }
+
+            indexedKeys = _itemIndex.Count;
+            return _itemIndex.TryGetValue(key, out position);
         }
 
         /// <summary>Nom lisible du détenteur, pour que le refus dise **qui** détient l'objet.</summary>
