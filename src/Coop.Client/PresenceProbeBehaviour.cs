@@ -129,11 +129,19 @@ namespace Coop.Client
         private const float StopConfirmSeconds = 1.5f;
 
         /// <summary>
-        /// Vitesse (m/s) en dessous de laquelle l'arrêt est considéré comme acquis **si** la position a aussi
-        /// cessé d'avancer. La position est le critère (la vitesse annoncée repasse par zéro en cours de nage) ;
-        /// la vitesse reste une observation, et c'est elle qui est journalisée après l'arrêt.
+        /// Rayon (m) dans lequel la position du pair doit rester pendant <see cref="StopConfirmSeconds"/> pour
+        /// conclure qu'il s'est arrêté.
+        ///
+        /// Pourquoi ce n'est pas « aucun échantillon n'avance de plus de 1 cm » : c'est ce que faisait la
+        /// première version, avec <see cref="PositionAdvanceMeters"/>, et un avatar interpolé tremble de plus
+        /// d'un centimètre même immobile — l'arrêt n'était alors jamais confirmé (mesuré : deux runs de
+        /// l'étape B échoués, `arrêt tenu` jamais atteint alors que la vitesse observée valait `0,00 m/s`).
+        /// Pourquoi ce n'est pas la vitesse annoncée seule : elle repasse par zéro **pendant** la nage et peut
+        /// rester bloquée à sa dernière valeur **après** l'arrêt (mesuré : `2,60 m/s` dix secondes après
+        /// l'arrêt). Le critère est donc un **déplacement borné** — `0,5 m`, la limite de visibilité retenue
+        /// pour un avatar — sur une fenêtre de 1,5 s. La vitesse reste une observation journalisée.
         /// </summary>
-        private const float StopMaxSpeed = 0.5f;
+        private const float StopRadiusMeters = 0.5f;
 
         /// <summary>
         /// Écart minimal (0-255) entre deux teintes relues pour les compter comme différentes.
@@ -877,7 +885,6 @@ namespace Coop.Client
             var peerMoving = false;
             var advancing = 0;
             var lastPosition = Vector3.zero;
-            var lastAdvance = Time.realtimeSinceStartup;
             var swimOrigin = Player.mainObject.transform.position;
 
             // Phase 1 — nager **jusqu'à ce que l'autre client le voie bouger**, pas pendant une durée fixe.
@@ -922,12 +929,10 @@ namespace Coop.Client
                     if (advancing > 0 && Vector3.Distance(position, lastPosition) > PositionAdvanceMeters)
                     {
                         advancing++;
-                        lastAdvance = Time.realtimeSinceStartup;
                     }
                     else if (advancing == 0 && maxDistance >= SwimMinDistanceMeters)
                     {
                         advancing = 1;
-                        lastAdvance = Time.realtimeSinceStartup;
                     }
 
                     lastPosition = position;
@@ -943,11 +948,16 @@ namespace Coop.Client
             }
 
             // Phase 2 — l'arrêt : c'est la moitié qui manquait au §22 (la trajectoire s'arrêtait sans que la
-            // pose soit revérifiée après). Même critère que le mouvement, en miroir : la position du pair cesse
-            // d'avancer pendant `StopConfirmSeconds`. On garde la vitesse annoncée comme observation.
+            // pose soit revérifiée après). Le critère est un **déplacement borné** : la position du pair doit
+            // rester dans un rayon de `StopRadiusMeters` autour du point d'arrêt pendant `StopConfirmSeconds`.
+            // Ni le pas de 1 cm par échantillon (un avatar interpolé tremble), ni la vitesse annoncée (elle
+            // repasse par zéro et peut rester figée) ne conviennent — les deux ont été mesurés en échec.
             var finalSpeed = maxSpeed;
             var restSpeed = float.MaxValue;
             var stopped = false;
+            var stopDrift = 0f;
+            var stopAnchor = lastPosition;
+            var stopClock = Time.realtimeSinceStartup;
             var stopDeadline = Time.realtimeSinceStartup + StopSeconds;
             while (Time.realtimeSinceStartup < stopDeadline)
             {
@@ -961,15 +971,19 @@ namespace Coop.Client
                     finalSpeed = speed;
                     restSpeed = Mathf.Min(restSpeed, speed);
 
-                    if (Vector3.Distance(position, lastPosition) > PositionAdvanceMeters)
+                    // Tant que le pair reste dans le rayon, il ne bouge pas ; s'il en sort, il avance encore
+                    // et l'ancre repart de sa nouvelle position — le maximum d'écart reste journalisé, pour
+                    // qu'un vrai glissement se voie au lieu d'être absorbé par le rayon.
+                    var drift = Vector3.Distance(position, stopAnchor);
+                    stopDrift = Mathf.Max(stopDrift, drift);
+                    if (drift > StopRadiusMeters)
                     {
-                        lastAdvance = Time.realtimeSinceStartup;
+                        stopAnchor = position;
+                        stopClock = Time.realtimeSinceStartup;
                     }
 
                     lastPosition = position;
-                    stopped = peerMoving
-                              && Time.realtimeSinceStartup - lastAdvance >= StopConfirmSeconds
-                              && speed <= StopMaxSpeed;
+                    stopped = peerMoving && Time.realtimeSinceStartup - stopClock >= StopConfirmSeconds;
                     if (stopped)
                     {
                         break;
@@ -1002,7 +1016,8 @@ namespace Coop.Client
                 $"[sonde] présence : nage puis arrêt vus par '{remoteName}' (id={remoteId}) — vitesse max " +
                 $"{maxSpeed:F2} m/s (min {SwimMinSpeed:F1}), déplacement {maxDistance:F2} m (min " +
                 $"{SwimMinDistanceMeters:F1}), sous l'eau={sawUnderwater}, vitesse après arrêt {finalSpeed:F2} m/s " +
-                $"(max {StopMaxSpeed:F1}, minimale observée {restSpeed:F2}), avancées vues={advancing}, arrêt tenu " +
+                $"(observée, hors critère ; vitesse minimale vue {restSpeed:F2}), avancées vues={advancing}, " +
+                $"écart à l'arrêt max={stopDrift:F2} m (critère : < {StopRadiusMeters:F1} m), arrêt tenu " +
                 $"{StopConfirmSeconds:F1}s sur {SwimSeconds:F0}s de nage puis {StopSeconds:F0}s d'arrêt " +
                 $"(déplacement local du nageur : {localMoved:F2} m) -> verdict={ok}");
 

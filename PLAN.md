@@ -2766,3 +2766,54 @@ cas les plus rapides), donc ce n'est pas un ralenti : c'est le même mouvement, 
   d'un intervalle (c'est le prix du glissement, le même que pour les véhicules).
 - Preuve portée sur **un type de scène** (la sauvegarde de test), **64 créatures par client** au plus, et
   **deux clients** ; aucun test d'interaction véhicule/créature.
+
+---
+
+## 37. L'étape B jugeait l'arrêt avec un seuil de 1 cm, et K modifiait la sauvegarde du développeur (2026-10-17)
+
+### 37.1 Le critère d'arrêt ne pouvait pas se confirmer
+
+L'étape B (sonde de présence) a échoué deux fois de suite sur « nage puis arrêt » avant de passer deux fois.
+Les deux échecs disent la même chose sous deux formes :
+
+```
+vitesse après arrêt 2.60 m/s (minimale observée 2.60), avancées vues=10,
+arrêt tenu 1.5s sur 60s de nage puis 10s d'arrêt (déplacement local du nageur : 2.73 m)
+vitesse après arrêt 0.00 m/s (minimale observée 0.00), avancées vues=7,
+arrêt tenu 1.5s sur 60s de nage puis 10s d'arrêt (déplacement local du nageur : 106.03 m)
+```
+
+Le code exigeait **deux** conditions : la position du pair ne devait plus avancer de plus de
+`PositionAdvanceMeters = 0,01 m` **et** la vitesse annoncée devait passer sous `0,5 m/s`. Les deux sont
+mauvaises pour un avatar interpolé :
+
+- **1 cm par échantillon** est en dessous du tremblement d'un avatar immobile (interpolation + animation de
+  racine) : le compteur repartait sans cesse, l'arrêt n'était jamais confirmé même à `0,00 m/s` ;
+- **la vitesse annoncée** repasse par zéro pendant la nage et peut rester figée à sa dernière valeur après
+  l'arrêt (mesuré : `2,60 m/s` dix secondes après).
+
+Le commentaire de la constante disait déjà « la position est le critère, la vitesse reste une observation » —
+le code ne le faisait pas. Correction : **déplacement borné** (`StopRadiusMeters = 0,5 m`, la limite de
+visibilité d'un avatar) sur `1,5 s`, la vitesse restant journalisée. La ligne de sonde affiche désormais
+`écart à l'arrêt max=… m (critère : < 0,5 m)`, pour qu'un vrai glissement se voie au lieu d'être absorbé.
+
+**Mesure** : deux runs consécutifs verts (`étape B : OK (103s)` puis `OK (101s)`, 2026-10-17 23:17 et 23:19),
+contre 2 échecs sur 3 avec l'ancien critère. Ce n'est pas une preuve statistique — c'est la cause identifiée
+dans le code et deux runs qui ne la contredisent pas.
+
+### 37.2 K laissait la sauvegarde de test modifiée
+
+La préparation de K écrit dans la sauvegarde de l'hôte : elle y ajoute un Seamoth et déplace le joueur à
+l'ancre. C'est le but de l'étape, mais le run suivant héritait de cet état — et l'étape B dépend de la
+position de départ du joueur. Chaque vérification modifiait donc la fixture de la suivante.
+
+`tools/verify.sh` copie maintenant `SNAppData/SavedGames/slot0000` **avant** la préparation et la restaure
+**après** l'arrêt des instances (elles sont fermées par `run-session.sh`, le jeu ne réécrit donc pas pendant
+la copie). Une restauration qui échoue est un échec de l'étape, pas un avertissement.
+
+**Mesure** : `étape K : OK (242s)` avec `sauvegarde : fixture slot0000 restaurée`, et l'empreinte du dossier
+(`find | sort | sha1sum`) est **identique avant et après** : `19d74e76531a0e7cc41c9b019853f179e7629107`.
+
+**Limite** : la fixture est désormais **stable**, pas **vierge** — elle contient encore le Seamoth et la
+position laissés par les premiers runs de K. Pour repartir d'un état connu, il faut recharger une sauvegarde
+manuelle ; K la préservera ensuite telle quelle.

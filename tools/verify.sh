@@ -629,6 +629,26 @@ if wanted K "$ONLY"; then
     # Deux runs, et c'est le point de l'étape : le premier met le Seamoth **dans la sauvegarde**, le second
     # mesure une vraie partie. Un seul run ne peut pas faire les deux — les clients ont déjà chargé le monde
     # quand la sauvegarde est écrite, donc leur monde ne contient pas encore le véhicule.
+    #
+    # La préparation **modifie la sauvegarde du développeur** : elle y ajoute un Seamoth et déplace le joueur
+    # à l'ancre. C'est voulu pour la mesure, mais ça contamine les runs suivants — l'étape B (nage puis arrêt)
+    # dépend de la position de départ du joueur et a échoué deux fois après une préparation de K. La fixture
+    # est donc copiée avant, puis restaurée après : K devient rejouable sans laisser de trace.
+    SAVE_DIR="$GAME_DIR_BASH/SNAppData/SavedGames/slot0000"
+    SAVE_BACKUP=""
+    if [ -d "$SAVE_DIR" ]; then
+        SAVE_BACKUP="$WORK_DIR/save-slot0000"
+        rm -rf "$SAVE_BACKUP"
+        if cp -a "$SAVE_DIR" "$SAVE_BACKUP" 2>/dev/null; then
+            echo "  sauvegarde : copie de sécurité de slot0000 (restaurée à la fin de l'étape)"
+        else
+            SAVE_BACKUP=""
+            echo "  sauvegarde : copie impossible — la fixture ne sera pas restaurée" >&2
+        fi
+    else
+        echo "  sauvegarde : $SAVE_DIR introuvable — la fixture ne sera pas restaurée" >&2
+    fi
+
     echo
     echo "=== étape K (préparation) — fabriquer un Seamoth et le sauvegarder dans la partie de l'hôte ==="
     prep_args=(--clients=1 --timeout=300
@@ -666,6 +686,18 @@ if wanted K "$ONLY"; then
         args+=(--no-build)
     fi
     step K "véhicule de la sauvegarde : clé d'identifiant identique des deux côtés, sans rattachement" assert_k "${args[@]}"
+
+    # Restauration **après** l'arrêt des instances (run-session les a fermées) : le jeu ne doit pas réécrire
+    # la sauvegarde pendant qu'on la remplace.
+    if [ -n "$SAVE_BACKUP" ] && [ -d "$SAVE_BACKUP" ]; then
+        rm -rf "$SAVE_DIR"
+        if cp -a "$SAVE_BACKUP" "$SAVE_DIR" 2>/dev/null; then
+            echo "  sauvegarde : fixture slot0000 restaurée (Seamoth et position du joueur d'origine)"
+        else
+            FAILURES+=("K : la fixture slot0000 n'a pas pu être restaurée — les runs suivants partiront d'un état modifié")
+            echo "  sauvegarde : RESTAURATION ÉCHOUÉE" >&2
+        fi
+    fi
 fi
 
 if wanted J "$ONLY"; then
