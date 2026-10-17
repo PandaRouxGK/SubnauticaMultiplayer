@@ -2817,3 +2817,55 @@ la copie). Une restauration qui échoue est un échec de l'étape, pas un averti
 **Limite** : la fixture est désormais **stable**, pas **vierge** — elle contient encore le Seamoth et la
 position laissés par les premiers runs de K. Pour repartir d'un état connu, il faut recharger une sauvegarde
 manuelle ; K la préservera ensuite telle quelle.
+
+---
+
+## 38. M5 (a) : la première décision autoritaire — un objet réclamé deux fois n'est accordé qu'une (2026-10-17)
+
+### Ce qui est en place
+
+Le client ne fait plus seulement remonter des positions : il **demande** une décision. Le serveur tient
+une carte `ItemKey → PlayerId` et répond, objet par objet :
+
+- **première réclamation** d'une clé → accordée à l'émetteur, la clé est enregistrée ;
+- **réclamation suivante par un autre joueur** → refusée, avec le détenteur nommé dans le journal et dans
+  la réponse ;
+- **réclamation du même joueur** → accordée (idempotente), pour qu'un renvoi après une perte de paquet ne
+  se transforme pas en refus ;
+- **clé nulle** → refusée (aucune identité d'objet) ;
+- **`PlayerId` annoncé ≠ id de session** → la réclamation est attribuée à la **session**, et l'écart est
+  compté (`ForgedPickupIds`) puis journalisé. Un client ne peut donc pas réclamer pour un autre.
+
+Protocole **v8** : `PickupClaim` (#15, client → serveur) et `PickupResult` (#16, serveur → demandeur), la
+clé de connexion LiteNetLib devient `coop-subnautica-v8`. Aucun état durable n'est ajouté côté client : la
+décision est un aller-retour fiable, et le résultat est mémorisé par clé pour que la sonde puisse le relire.
+
+### La mesure (étape L de `tools/verify.sh`, 2026-10-17 23:28)
+
+Deux clients réclament la **même** clé synthétique ; l'ordre est déterministe par identifiant (le client 1
+réclame à 10 s de sa connexion, le client 2 à 22 s), puis le second envoie une réclamation sous l'id 1.
+
+```
+client 1 — verdict=True : id=1, clé partagée 0x5049434b55503131 reçue=True accordée=True tenue par 1
+client 2 — verdict=True : id=2, clé partagée 0x5049434b55503131 reçue=True accordée=False tenue par 1 ;
+            clé forgée 0x5049434b55503232 reçue=True accordée=True tenue par 2
+serveur  — pickup : clé=0x… -> ACCORDÉE (premier claim)
+           pickup : clé=0x… -> REFUSÉE (déjà tenue par 'killi'#1)
+           vérification PlayerId (pickup) : '…' a annoncé l'id 1, effectif=2 -> verdict=True
+```
+
+`étape L : OK (97s)`. Les assertions portent sur les trois lignes du serveur et sur les deux verdicts
+clients — le refus n'est pas déduit d'un compteur, il est **nommé** avec son détenteur.
+
+### Ce que M5 (a) ne fait pas — la moitié qui reste
+
+- **Le ramassage réel n'est pas branché** : la clé vient de la sonde, pas d'un objet du monde. Le client
+  ramasse encore localement (le jeu ne demande pas la permission), et rien ne remet l'objet en place quand
+  le serveur refuse. Brancher les deux exige l'identité de l'objet **avant** sa destruction — un hook sur
+  `Pickupable` (Harmony) ou un inventaire de bord — puis un retour arrière (retirer de l'inventaire, faire
+  réapparaître l'objet).
+- **Aucune vérification de portée** : le serveur ne vérifie ni que l'objet existe ni que le joueur est à
+  côté. Une fois la clé lue dans le monde, la distance sera la première garde à ajouter.
+- **Pas de persistance** : la carte des réclamations vit avec la session serveur. Après un redémarrage,
+  les objets déjà ramassés ne sont plus réclamés — c'est cohérent tant que la sauvegarde, elle, les a bien
+  retirés.

@@ -176,6 +176,21 @@ namespace Coop.Server
         /// seulement lue dans le code.
         /// </summary>
         public int ForgedPlayerIds { get; private set; }
+
+        /// <summary>
+        /// Objet du monde → joueur qui l'a réclamé le premier (M5). C'est la **décision** du serveur :
+        /// une clé déjà présente ne peut plus être accordée à quelqu'un d'autre. La carte vit aussi
+        /// longtemps que la session serveur — un objet ramassé ne réapparaît pas.
+        /// </summary>
+        private readonly Dictionary<long, ushort> _pickupClaims = new Dictionary<long, ushort>();
+
+        public int PickupClaimsGranted { get; private set; }
+
+        public int PickupClaimsRefused { get; private set; }
+
+        /// <summary>Réclamations dont le <c>PlayerId</c> annoncé n'était pas celui de la session.</summary>
+        public int ForgedPickupIds { get; private set; }
+
         private string[] _lastHostEquipment;
         private string _lastHostEquipmentSignature;
         private string _lastHostHeldItemSignature;
@@ -511,6 +526,10 @@ namespace Coop.Server
 
                 case MessageType.PlayerHeldItem:
                     HandleHeldItem(peer, session, PlayerHeldItemMessage.Read(reader));
+                    break;
+
+                case MessageType.PickupClaim:
+                    HandlePickupClaim(peer, session, PickupClaimMessage.Read(reader));
                     break;
 
                 default:
@@ -911,6 +930,103 @@ namespace Coop.Server
 
             _log.LogInfo(
                 $"[net] PlayerHeldItem de '{session.Username}'#{session.PlayerId} diffusé à {forwarded} autre(s) client(s).");
+        }
+
+        /// <summary>
+        /// Première action **autoritaire** (M5) : le serveur décide qui a le droit de ramasser un objet.
+        ///
+        /// La règle est minimale et entièrement côté serveur : la première réclamation d'une clé gagne, les
+        /// suivantes sont refusées et **nommées** avec leur détenteur ; une réclamation du même joueur est
+        /// idempotente. Le `PlayerId` du message n'est jamais recopié — l'identité vient de la session, et
+        /// l'écart est compté, sans quoi un client pourrait réclamer pour le compte d'un autre.
+        ///
+        /// Ce que ce handler ne fait pas encore : vérifier que l'objet existe et que le demandeur est à
+        /// portée. C'est la moitié « branchement sur le ramassage réel » de M5 (PLAN.md §38) ; ici, la clé
+        /// est fournie par la sonde et la décision est réelle.
+        /// </summary>
+        private void HandlePickupClaim(NetPeer peer, ClientSession session, PickupClaimMessage msg)
+        {
+            if (!session.Accepted)
+            {
+                _log.LogWarning($"[net] réclamation de ramassage avant handshake ignorée de {peer}");
+                return;
+            }
+
+            var tech = string.IsNullOrEmpty(msg.TechTypeName) ? "(sans nom)" : msg.TechTypeName;
+
+            if (msg.PlayerId != 0 && msg.PlayerId != session.PlayerId)
+            {
+                ForgedPickupIds++;
+                _log.LogWarning(
+                    $"[net] PlayerId falsifié sur une réclamation : '{session.Username}' a annoncé sous l'id " +
+                    $"{msg.PlayerId} (le sien est {session.PlayerId}) — la réclamation est attribuée à la session.");
+                _log.LogInfo(
+                    $"[net] vérification PlayerId (pickup) : '{session.Username}' a annoncé l'id " +
+                    $"{msg.PlayerId}, effectif={session.PlayerId} -> verdict=True");
+            }
+
+            var granted = false;
+            var holder = session.PlayerId;
+
+            if (msg.ItemKey == 0L)
+            {
+                PickupClaimsRefused++;
+                _log.LogWarning(
+                    $"[net] pickup : clé nulle réclamée par '{session.Username}'#{session.PlayerId} " +
+                    $"('{tech}') -> REFUSÉE (aucune identité d'objet)");
+            }
+            else if (_pickupClaims.TryGetValue(msg.ItemKey, out var existing))
+            {
+                holder = existing;
+                granted = existing == session.PlayerId;
+                if (granted)
+                {
+                    PickupClaimsGranted++;
+                    _log.LogInfo(
+                        $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
+                        $"'{session.Username}'#{session.PlayerId} -> ACCORDÉE (déjà tenue par le même joueur)");
+                }
+                else
+                {
+                    PickupClaimsRefused++;
+                    _log.LogInfo(
+                        $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
+                        $"'{session.Username}'#{session.PlayerId} -> REFUSÉE (déjà tenue par " +
+                        $"{DescribeHolder(existing)})");
+                }
+            }
+            else
+            {
+                _pickupClaims[msg.ItemKey] = session.PlayerId;
+                granted = true;
+                PickupClaimsGranted++;
+                _log.LogInfo(
+                    $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
+                    $"'{session.Username}'#{session.PlayerId} -> ACCORDÉE (premier claim)");
+            }
+
+            Send(peer, new PickupResultMessage
+            {
+                ItemKey = msg.ItemKey,
+                TechTypeName = tech,
+                Granted = granted,
+                HolderId = holder,
+                ClaimedBy = msg.PlayerId,
+            }.Write, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>Nom lisible du détenteur, pour que le refus dise **qui** détient l'objet.</summary>
+        private string DescribeHolder(ushort playerId)
+        {
+            foreach (var pair in _sessions)
+            {
+                if (pair.Value.PlayerId == playerId)
+                {
+                    return $"'{pair.Value.Username}'#{playerId}";
+                }
+            }
+
+            return $"id {playerId}";
         }
 
         private void HandlePlayerEquipment(NetPeer peer, ClientSession session, PlayerEquipmentMessage msg)

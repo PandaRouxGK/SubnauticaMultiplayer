@@ -26,17 +26,20 @@ et signale franchement les systèmes où il n'y a rien.
 | **Positions et animation des avatars distants** | où se trouve l'autre joueur et à quelle vitesse ses bras bougent : le client applique ce qu'il reçoit (`PlayersSnapshot`, 20 Hz) au lieu de simuler | `Coop.Client/RemoteAvatar.cs` (interpolation, `PLAN.md` §22) | `[presence] première position locale émise : seq=… pos=… v=(…) pitch=… sousEau=… surface=…` ; `posEnvoyees=` dans `[ping]` ; l'avatar distant est créé à la position **annoncée** (`avatar instancié pour …`) |
 | **Position des véhicules** | où se trouve un véhicule du monde : le serveur le diffuse à 10 Hz (`VehicleSnapshot`), le client l'applique **interpolé** et gèle la physique de sa copie au lieu de la simuler | `Coop.Server/ServerNetwork.cs` (`BroadcastVehicleSnapshots`) · `Coop.Client/RemoteVehicleManager.cs` · `Coop.Shared/VehicleIdentity.cs` | compteurs cliente : `[véhicule] état : suivis=… appariés=… clé inconnue=… écart avant lissage max=… pas par image max=…` ; rapport serveur par destinataire (`diffusé(s)`, `sans clé écarté(s)`, `débit=`) ; **verdict automatisé** `-coopdebug=vehicle` des deux côtés (étape J de `tools/verify.sh`) : `[sonde] véhicule : verdict=True` chez l'hôte (déplacement) et `[sonde] véhicule client : verdict=True` (pas par image ≤ 1 m, aucune image ≥ 1 m). Un véhicule **conduit par le client** est laissé au joueur et compté (`conduits localement=`) — M4 ne transporte pas la conduite, et c'est dit plutôt que masqué |
 | **Propriété de la sauvegarde** | écrire dans la sauvegarde du monde : le serveur est propriétaire, le client ne sauvegarde pas | `Coop.Client/SaveGuard.cs` (garde installée **avant** le chargement du monde ; sans elle, le chargement est annulé) — **deux** remparts : l'entrée `IngameMenu.SaveGameAsync` et l'écriture `SaveLoadManager/GameInfo.SaveFile` | autotest explicite `-coopdebug=saveguard` (`PLAN.md` §19, passe A) : `autotest entrée bloquée` **et** `autotest écriture bloquée` (l'écriture est appelée **directement**, hors du menu), puis `sauvegarde cliente bloquée (entrée+écriture) -> verdict=True` ; le plugin journalise les deux signatures patchées. Étape D de `tools/verify.sh`. **La moitié positive est mesurée depuis le 2026-10-17** : l'étape F déclenche `IngameMenu.SaveGame()` **côté hôte** pendant qu'un client est connecté et relève `31 fichier(s) écrit(s) ou modifié(s)` dans le dossier temporaire de la sauvegarde, puis `sauvegarde serveur pendant un run -> verdict=True` — l'hôte peut donc encore écrire, et c'est la garde cliente qui l'en empêche, pas un défaut de la sauvegarde. **Le launcher s'en sert** (2026-10-17) : son bouton « Sauvegarder » n'a aucun accès réseau au jeu — il écrit un jeton dans `BepInEx/coop/save.request`, `ServerControlBehaviour` le relit toutes les 500 ms, appelle `IngameMenu.SaveGame()` et répond `jeton|ok|message` dans `save.ack`. Le jeton est unique par clic, donc deux clics demandent bien deux sauvegardes, et le launcher n'accepte un accusé que pour le jeton qu'il a émis |
+| **Réclamation d'un objet (M5, la décision)** | **qui a le droit de ramasser un objet** : la première réclamation d'une clé gagne, les suivantes sont refusées avec le détenteur nommé ; une réclamation annoncée sous un id étranger est attribuée à la session | `Coop.Server/ServerNetwork.cs` (`HandlePickupClaim`, carte `_pickupClaims`) · `Coop.Model/Messages.cs` (`PickupClaim` #15, `PickupResult` #16, protocole **v8**) · `Coop.Client/PickupProbeBehaviour.cs` | serveur : `[net] pickup : clé=0x… -> ACCORDÉE (premier claim)` / `-> REFUSÉE (déjà tenue par '<pseudo>'#id)` et `vérification PlayerId (pickup) : … a annoncé l'id 1, effectif=2 -> verdict=True`, compteurs `PickupClaimsGranted` / `Refused` / `ForgedPickupIds` ; client : `[pickup] résultat : … accordée=False tenue par 1` ; **verdict** `[sonde] ramassage : verdict=True` des deux côtés (étape L de `tools/verify.sh`) |
 
-**Les verdicts automatisés sont ceux des trois sondes** : `-coopdebug=creature` (sept critères, une erreur
+**Les verdicts automatisés sont ceux des quatre sondes** : `-coopdebug=creature` (sept critères, une erreur
 écrite par critère manqué) et `-coopdebug=avatar` (rendu isolé, cinq tenues, deux couleurs, deux corps,
 aller-retour d'équipement) et `-coopdebug=presence` (équipement réellement porté, changement d'équipement vu
 par l'autre joueur, couleur appliquée à un avatar déjà instancié, indice du serveur restauré, `PlayerId`
-falsifié réécrit par le relais, vrai outil tenu puis émis, nage et arrêt vus par l'autre). Depuis le
+falsifié réécrit par le relais, vrai outil tenu puis émis, nage et arrêt vus par l'autre) et
+`-coopdebug=pickup` (première réclamation accordée, seconde refusée avec le détenteur, id falsifié réécrit). Depuis le
 2026-10-17, `tools/run-session.sh` **fait échouer le run** (code de sortie 1) dès qu'un `verdict=False`
-apparaît dans un journal de client, et `tools/verify.sh` rejoue les **dix** runs (A avatar + créatures,
+apparaît dans un journal de client, et `tools/verify.sh` rejoue les **treize** runs (A avatar + créatures,
 B deux clients en sonde de présence, C plafond abaissé, D autotest de la garde cliente, E créatures seules à
 deux clients, F sauvegarde de l'hôte, G Seamoth en mouvement, H serveur dédié, I menu Échap du client,
-J diffusion et interpolation du véhicule) et rend un verdict unique :
+J diffusion et interpolation du véhicule, K clé nominale du Seamoth de la sauvegarde, L réclamation
+autoritaire d'un objet) et rend un verdict unique :
 lire un journal n'est plus nécessaire pour savoir qu'un contrôle est tombé. Les autres lignes de la colonne de droite sont des
 **compteurs et des relevés** : elles rendent une violation visible, elles ne la verdictent pas.
 
@@ -47,7 +50,7 @@ lire un journal n'est plus nécessaire pour savoir qu'un contrôle est tombé. L
 | Système | Ce que le client décide encore | Jalon | Ce qui manque pour le prouver |
 |---|---|---|---|
 | **Véhicules (Seamoth, Exosuit) — le reste** | **l'énergie** (consommation, recharge, panne), **les upgrades** (modules, dégâts, énergie du module) et **la conduite** : un client qui pilote son Seamoth le simule localement, et rien ne remonte vers le serveur. La **position**, elle, est désormais autoritaire (ligne ci-dessus) | M4 (`PLAN.md` §6 et §33) | les messages d'énergie/modules, un flux montant de conduite, et le refus serveur d'une valeur falsifiée. Mesuré le 2026-10-17 (étape J) : diffusion à 10 Hz d'un Seamoth à 20 m/s (`2,25 m` par annonce) et interpolation cliente (`0,39 m` par image au maximum sur la fenêtre de mesure, aucune image ≥ 1 m sur 10 259 images de session) — la partie **position** est faite |
-| **Première action autoritaire (pickup)** | récolter, ramasser, prendre une ressource : le client décide, et rien ne l'en empêche | M5 | un refus serveur (« déjà réclamé ») **et** le compteur qui montre le refus |
+| **Ramassage réel d'un objet (le reste de M5)** | récolter, ramasser, prendre une ressource : le client **ramasse encore localement**, sans demander la permission, et rien ne le remet en place si le serveur refuse. La **décision** est autoritaire (§1) ; son **branchement** sur le monde ne l'est pas | M5 (`PLAN.md` §38) | lire la clé de l'objet **avant** sa destruction (hook `Pickupable` en Harmony ou inventaire de bord), envoyer la réclamation par le message #15 déjà en place, appliquer le refus (retirer de l'inventaire, faire réapparaître l'objet) puis vérifier qu'une valeur falsifiée ne ramasse rien. Manque aussi la **portée** (le serveur ne vérifie ni l'existence de l'objet ni la distance) |
 | **Contenu (objets/creatures custom)** | la définition même de ce qui existe dans le monde | M6 | la livraison d'un AssetBundle côté client, et la vérification que le serveur refuse une définition falsifiée |
 
 ---
@@ -60,9 +63,10 @@ lire un journal n'est plus nécessaire pour savoir qu'un contrôle est tombé. L
   vérifie le canal des noms **et** se prouve discriminant) et `tools/NetProbe selftest` pour la sérialisation.
   Aucun de ces contrôles n'est un test *unitaire* : ils s'exécutent dans le jeu, sur un run complet.
 - **« Le serveur force `PlayerId` » ne se lit plus seulement dans le code** (2026-10-17) : l'étape B de
-  `tools/verify.sh` envoie un équipement marqué sous l'id d'un autre joueur et affirme que le message
-  revient **sous l'id réel de l'émetteur**, côté serveur (`diffusé sous l'id Y (revendiqué X)`) comme côté
-  client. Ce qui reste hors périmètre : les **autres** champs d'état (position, drapeaux d'action, nom
+Par l'étape B de `tools/verify.sh` envoie un équipement marqué sous l'id d'un autre joueur et affirme que le message
+revient **sous l'id réel de l'émetteur**, côté serveur (`diffusé sous l'id Y (revendiqué X)`) comme côté
+client. Depuis la même date, la **réclamation** d'un objet reçoit la même preuve (étape L) : une clé tenue
+par un joueur est refusée à l'autre **et** une réclamation sous un id falsifié est attribuée à la session. Ce qui reste hors périmètre : les **autres** champs d'état (position, drapeaux d'action, nom
   d'objet tenu) ne sont pas validés par le serveur — il les relaie, cf. §2.
 - Les instruments cités ci-dessus vivent dans les journaux d'instance
   (`BepInEx/logs/coop-client.log`, `coop-server.log`, et `coop-client-<n>.log` pour un client

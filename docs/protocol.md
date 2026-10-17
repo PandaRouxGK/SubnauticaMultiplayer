@@ -12,8 +12,8 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `7` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v7` | `Protocol.ConnectionKey` |
+| Version du protocole | `8` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v8` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
 | Encodage | little-endian, tampons réutilisables, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
@@ -51,13 +51,21 @@ et encodé en UTF-8.
 | 12 | `PlayerColor` | serveur → client | ReliableOrdered | `PlayerId` ushort, `ColorIndex` octet |
 | 13 | `CreatureSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte ushort, puis par créature : `Key` long, position (3), quaternion (4) |
 | 14 | `VehicleSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet, puis par véhicule : `Key` long, position (3), quaternion (4) |
+| 15 | `PickupClaim` | client → serveur | ReliableOrdered | `PlayerId` ushort (revendiqué, falsifiable), `ItemKey` long, `TechTypeName` string |
+| 16 | `PickupResult` | serveur → demandeur | ReliableOrdered | `ItemKey` long, `TechTypeName` string, `Granted` bool, `HolderId` ushort, `ClaimedBy` ushort |
 
-Trois points de contrat que ces messages portent :
+Quatre points de contrat que ces messages portent :
 
 - **Le serveur force `PlayerId`** sur ce qu'il rediffuse (#10, #11, #12) : un client ne peut donc pas se faire
   passer pour un autre ni choisir sa couleur (voir `docs/authority.md`).
 - **Les priorités d'animation voyagent avec l'objet tenu** (#11) : les paramètres `holding_*` sont **lus sur
   l'`Animator` de l'émetteur**, pas re-dérivés par le destinataire (`PlayerHeldItemMessage`).
+- **La première réclamation d'un objet gagne (#15/#16, v8).** Le serveur tient une carte `ItemKey →
+  PlayerId` : la première clé vue est accordée à son émetteur, toute réclamation suivante par un autre
+  joueur est **refusée** avec le détenteur nommé, et une réclamation du même joueur est idempotente. Le
+  `PlayerId` du message n'est jamais recopié : la décision est attribuée à la session, et l'écart est
+  compté (`ForgedPickupIds`) — la même règle que #10/#11/#12, appliquée à une **décision** et non à un
+  relais.
 - **Les flux #9, #13 et #14 sont filtrés par destinataire.** #13 n'est pas « toutes les créatures du
   monde » mais « celles qui comptent pour toi », dans le rayon ci-dessous (`ServerNetwork`,
   `BroadcastCreatureSnapshots`) ; #14 suit la même règle pour les véhicules, dans un rayon plus large
@@ -223,8 +231,12 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   pilote simule localement et le serveur ne le sait pas. La synchronisation suppose aussi un véhicule
   **présent dans la sauvegarde des deux côtés** : la création d'entité n'est pas dans le protocole (même
   famille de limite que M6).
-- **Aucun message d'action autoritaire** : rien ne permet au serveur de refuser un pickup, de valider une
-  récolte ou d'arbitrer une ressource (M5).
+- **Le ramassage n'est pas encore autoritaire** : la **décision** l'est depuis la v8 (messages #15/#16 : la
+  première réclamation d'une clé gagne, les suivantes sont refusées avec le détenteur nommé, et l'id
+  revendiqué est remplacé par celui de la session), mais rien ne la branche sur le monde — le client
+  ramasse toujours localement, sans demander la permission, et le serveur ne vérifie ni que l'objet existe
+  ni que le joueur est à portée. La clé vient d'une sonde (`PLAN.md` §38). Aucun autre arbitrage de
+  ressource (récolte, craft, dégâts) n'existe.
 - **Aucun transport de contenu** : pas d'AssetBundle, pas de définition d'objet envoyée au client (M6).
-- **Version 7** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
+- **Version 8** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
   tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

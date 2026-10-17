@@ -118,6 +118,14 @@ namespace Coop.Client
                 go.AddComponent<VehicleClientProbeBehaviour>();
             }
 
+            if (IsDebugFlagSet("pickup"))
+            {
+                // M5 : la première action autoritaire. Les deux clients réclament la même clé ; le serveur
+                // accorde au premier et refuse au second, et l'id falsifié est réécrit.
+                Log.LogWarning("[boot] sonde de ramassage activée (-coopdebug=pickup).");
+                go.AddComponent<PickupProbeBehaviour>();
+            }
+
             Log.LogInfo(
                 $"[boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde={saveGuardInstalled}, " +
                 $"pauseCliente={(pauseGuardInstalled ? "désactivée" : "NON patchée")}).");
@@ -282,6 +290,58 @@ namespace Coop.Client
         private int _equipmentsSent;
         private string _lastLocalEquipmentSignature;
         private int _heldItemsSent;
+
+        // — Réclamations de ramassage (M5) : la décision du serveur et son résultat local —
+        private readonly Dictionary<long, PickupResultMessage> _pickupResults = new Dictionary<long, PickupResultMessage>();
+        private int _pickupGranted;
+        private int _pickupDenied;
+        private int _pickupForgeriesSent;
+
+        /// <summary>Identifiant attribué par le serveur à ce client (<c>0</c> tant que le handshake n'est pas passé).</summary>
+        internal ushort AssignedPlayerId => _assignedPlayerId;
+
+        /// <summary>
+        /// Réclame un objet au serveur (M5). Le message part par le vrai chemin d'envoi, avec un
+        /// <c>PlayerId</c> **revendiqué** que le serveur ne recopie pas : c'est ce champ que la sonde
+        /// falsifie pour vérifier que l'identité vient de la session.
+        /// </summary>
+        internal bool ProbeSendPickupClaim(long itemKey, string techType, ushort claimedPlayerId)
+        {
+            if (_server == null || _server.ConnectionState != ConnectionState.Connected)
+            {
+                CoopClientPlugin.Log.LogWarning(
+                    "[sonde] ramassage : pas de connexion au serveur — la réclamation n'a pas pu partir.");
+                return false;
+            }
+
+            _writer.Reset();
+            new PickupClaimMessage
+            {
+                PlayerId = claimedPlayerId,
+                ItemKey = itemKey,
+                TechTypeName = techType,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+
+            if (claimedPlayerId != 0 && claimedPlayerId != _assignedPlayerId)
+            {
+                _pickupForgeriesSent++;
+            }
+
+            CoopClientPlugin.Log.LogInfo(
+                $"[pickup] réclamation envoyée : clé=0x{itemKey:x16} '{techType}' sous l'id " +
+                $"{claimedPlayerId} (le mien est {_assignedPlayerId})");
+            return true;
+        }
+
+        /// <summary>Résultat reçu du serveur pour une clé, ou <c>false</c> si la décision n'est pas encore arrivée.</summary>
+        internal bool TryGetPickupResult(long itemKey, out PickupResultMessage result) =>
+            _pickupResults.TryGetValue(itemKey, out result);
+
+        internal int PickupGrantedCount => _pickupGranted;
+        internal int PickupDeniedCount => _pickupDenied;
+        internal int PickupForgeriesSent => _pickupForgeriesSent;
         private string _lastHeldItemSignature;
 
         /// <summary>Couleur que le serveur a assignée à ce joueur (indice de palette, §27).</summary>
@@ -886,6 +946,26 @@ namespace Coop.Client
                     _vehicleSnapshotsReceived++;
                     _vehicleStatesReceived += vehicles.Vehicles != null ? vehicles.Vehicles.Length : 0;
                     _vehicles?.OnSnapshot(vehicles);
+                    break;
+                }
+
+                case MessageType.PickupResult:
+                {
+                    var result = PickupResultMessage.Read(reader);
+                    _pickupResults[result.ItemKey] = result;
+                    if (result.Granted)
+                    {
+                        _pickupGranted++;
+                    }
+                    else
+                    {
+                        _pickupDenied++;
+                    }
+
+                    CoopClientPlugin.Log.LogInfo(
+                        $"[pickup] résultat : clé=0x{result.ItemKey:x16} '{result.TechTypeName}' " +
+                        $"accordée={result.Granted} tenue par {result.HolderId} " +
+                        $"(revendiquée sous l'id {result.ClaimedBy})");
                     break;
                 }
 

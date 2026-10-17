@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les onze étapes, et ce que chacune prouve :
+# Les douze étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -41,6 +41,9 @@
 #   J  un client, sondes de véhicule **des deux côtés** -> l'hôte déplace un Seamoth à 20 m/s et le
 #      serveur le diffuse à 10 Hz (`VehicleSnapshot`) ; le client le suit et l'**interpole** : le pas par
 #      image reste sous 1 m alors qu'une annonce en vaut 2,15. C'est la mesure qui ferme M4 (b).
+#   L  deux clients, sonde de ramassage -> la première réclamation d'une clé gagne, la seconde est
+#      **refusée** avec son détenteur nommé, et une réclamation sous un id falsifié est réattribuée à la
+#      session émettrice. C'est la première décision autoritaire du plan (M5).
 #   K  deux clients, Seamoth **dans la sauvegarde** -> la clé nominale, et elle seule : les deux clients
 #      lisent le même `UniqueIdentifier` sérialisé, suivent le véhicule et l'interpolent **sans aucun
 #      rattachement par proximité** (dernière ligne d'état : `rattachés par proximité=0`, aucune ligne
@@ -49,7 +52,7 @@
 #      la partie de l'hôte, puis la mesure à deux clients.
 #
 # Usage :
-#   tools/verify.sh                    # les onze étapes
+#   tools/verify.sh                    # les douze étapes
 #   tools/verify.sh --only=B           # une seule étape (A..K, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
@@ -97,7 +100,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K  étapes à lancer (défaut : les onze)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L  étapes à lancer (défaut : les douze)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -117,9 +120,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJK,]*)
+    *[!ABCDEFGHIJKL,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -461,6 +464,30 @@ assert_k() {
     expect K "$c2" '\[sonde\] véhicule client : verdict=True' "client 2 : l'interpolation conclut True"
 }
 
+assert_l() {
+    local server="$WORK_DIR/L/coop-server.log"
+    local c1="$WORK_DIR/L/coop-client.log"
+    local c2="$WORK_DIR/L/coop-client-2.log"
+
+    # La **décision** du serveur : un accord nommé, un refus nommé, et la réécriture de l'id.
+    expect L "$server" 'pickup : clé=0x[0-9a-f]+ .* -> ACCORDÉE \(premier claim\)' \
+        "le serveur accorde la première réclamation"
+    expect L "$server" 'pickup : clé=0x[0-9a-f]+ .* -> REFUSÉE \(déjà tenue par' \
+        "le serveur refuse la seconde réclamation en nommant le détenteur"
+    expect L "$server" 'vérification PlayerId \(pickup\) : .* effectif=2 -> verdict=True' \
+        "l'id revendiqué est comparé à l'id de session"
+
+    expect L "$c1" '\[pickup\] résultat : .* accordée=True tenue par 1' \
+        "client 1 : sa réclamation est accordée"
+    expect L "$c1" '\[sonde\] ramassage : verdict=True' "client 1 : la sonde conclut True"
+
+    expect L "$c2" '\[pickup\] résultat : .* accordée=False tenue par 1' \
+        "client 2 : la même clé lui est refusée"
+    expect L "$c2" '\[pickup\] résultat : .* accordée=True tenue par 2 .*revendiquée sous l.id 1' \
+        "client 2 : l'id falsifié est réécrit, l'objet lui revient"
+    expect L "$c2" '\[sonde\] ramassage : verdict=True' "client 2 : la sonde conclut True"
+}
+
 assert_j() {
     local server="$WORK_DIR/J/coop-server.log"
     local client="$WORK_DIR/J/coop-client.log"
@@ -520,9 +547,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L}"
 fi
 
 if wanted A "$ONLY"; then
@@ -715,6 +742,20 @@ if wanted J "$ONLY"; then
         args+=(--no-build)
     fi
     step J "véhicule : diffusion serveur à 10 Hz et interpolation cliente mesurée image par image" assert_j "${args[@]}"
+fi
+
+if wanted L "$ONLY"; then
+    # M5 : deux clients réclament la **même** clé synthétique. L'ordre est déterministe par identifiant
+    # (le client 1 réclame à 10 s, le client 2 à 22 s de sa propre connexion), puis le second envoie une
+    # réclamation sous l'id 1 pour vérifier que l'attribution vient de la session.
+    args=(--clients=2 --together --timeout=240
+        "--host-args=-coopmode=server"
+        "--client-args=-coopmode=client -coopdebug=pickup"
+        "--client-marker=\\[sonde\\] ramassage : verdict=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step L "ramassage autoritaire : la première réclamation gagne, la seconde est refusée, l'id falsifié réécrit" assert_l "${args[@]}"
 fi
 
 if wanted I "$ONLY"; then

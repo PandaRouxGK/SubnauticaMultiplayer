@@ -8,17 +8,20 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **8** : ajout de la réclamation autoritaire d'un objet (`PickupClaim` / `PickupResult`, M5).
+        /// Un client v7 refuserait de lire l'opcode 15 comme un message connu — le handshake le refuse
+        /// avant, mais la version est la seule chose qui empêche un mélange silencieux.
         /// **7** : ajout du flux de véhicules (`VehicleSnapshot`). Un client v6 ne connaît pas l'opcode 14
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 7;
+        public const int Version = 8;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v7";
+        public const string ConnectionKey = "coop-subnautica-v8";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -232,6 +235,12 @@ namespace Coop.Model
 
         /// <summary>État des véhicules du monde serveur (Unreliable, 10 Hz, protocole v7).</summary>
         VehicleSnapshot = 14,
+
+        /// <summary>Réclamation d'un objet du monde, émis par le client (ReliableOrdered, protocole v8, M5).</summary>
+        PickupClaim = 15,
+
+        /// <summary>Décision du serveur sur une réclamation, envoyée au seul demandeur (ReliableOrdered, v8).</summary>
+        PickupResult = 16,
     }
 
     /// <summary>

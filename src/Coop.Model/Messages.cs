@@ -778,6 +778,102 @@ namespace Coop.Model
     }
 
     /// <summary>Regroupe l'écriture d'un message dans un tampon réutilisable.</summary>
+    /// <summary>
+    /// Réclamation d'un objet du monde (ReliableOrdered, protocole v8, M5) : « ce ramassage est à moi ».
+    ///
+    /// C'est la première action **autoritaire** du plan : le client ne fait plus seulement remonter une
+    /// position, il demande une décision. `ItemKey` est l'identité partagée de l'objet (même valeur des deux
+    /// côtés, comme pour les créatures et les véhicules) ; le serveur la compare à sa carte des objets déjà
+    /// réclamés et répond par <see cref="PickupResultMessage"/>.
+    ///
+    /// `PlayerId` est **revendiqué** et falsifiable : le serveur ne le recopie jamais, il prend l'identité de
+    /// la session et se sert de l'écart pour compter la falsification — même règle que l'équipement, et c'est
+    /// ce qui rend la règle mesurable au lieu de lisible.
+    /// </summary>
+    public sealed class PickupClaimMessage
+    {
+        public ushort PlayerId;
+        public long ItemKey;
+        public string TechTypeName;
+
+        public void Write(PacketWriter writer)
+        {
+            var name = TechTypeName ?? string.Empty;
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException($"nom de TechType trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
+            writer.WriteByte((byte)MessageType.PickupClaim);
+            writer.WriteUInt16(PlayerId);
+            writer.WriteLong(ItemKey);
+            writer.WriteString(name);
+        }
+
+        public static PickupClaimMessage Read(PacketReader reader)
+        {
+            var playerId = reader.ReadUInt16();
+            var itemKey = reader.ReadLong();
+            var name = reader.ReadString();
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException($"nom de TechType reçu trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
+            return new PickupClaimMessage
+            {
+                PlayerId = playerId,
+                ItemKey = itemKey,
+                TechTypeName = name,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Décision du serveur sur une réclamation (ReliableOrdered, v8), envoyée au **seul demandeur**.
+    ///
+    /// `HolderId` est le propriétaire **effectif** — celui de la session qui a réclamé en premier — jamais
+    /// celui que le message revendiquait. `ClaimedBy` recopie la revendication pour que le client puisse
+    /// constater lui-même la réécriture, comme le fait déjà l'aller-retour d'équipement.
+    /// </summary>
+    public sealed class PickupResultMessage
+    {
+        public long ItemKey;
+        public string TechTypeName;
+        public bool Granted;
+        public ushort HolderId;
+        public ushort ClaimedBy;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteByte((byte)MessageType.PickupResult);
+            writer.WriteLong(ItemKey);
+            writer.WriteString(TechTypeName ?? string.Empty);
+            writer.WriteBool(Granted);
+            writer.WriteUInt16(HolderId);
+            writer.WriteUInt16(ClaimedBy);
+        }
+
+        public static PickupResultMessage Read(PacketReader reader)
+        {
+            var itemKey = reader.ReadLong();
+            var name = reader.ReadString();
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException($"nom de TechType reçu trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
+            return new PickupResultMessage
+            {
+                ItemKey = itemKey,
+                TechTypeName = name,
+                Granted = reader.ReadBool(),
+                HolderId = reader.ReadUInt16(),
+                ClaimedBy = reader.ReadUInt16(),
+            };
+        }
+    }
+
     public static class MessageCodec
     {
         public static byte[] Encode(Action<PacketWriter> write, PacketWriter reusable = null)
