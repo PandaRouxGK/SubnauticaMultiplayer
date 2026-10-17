@@ -48,6 +48,11 @@ namespace Coop.Client
             // au menu, ce qui est réparable, plutôt que de risquer la sauvegarde du serveur.
             var saveGuardInstalled = SaveGuard.Install(Log);
 
+            // Le menu Échap d'un client ne doit pas geler la partie : le serveur continue de simuler,
+            // et un client figé cesse d'envoyer ses positions. Non bloquant volontairement : un menu qui
+            // met en pause est gênant, une garde de sauvegarde absente est dangereuse.
+            var pauseGuardInstalled = ClientPauseGuard.Install(Log);
+
             var host = Config.Bind("Reseau", "Hote", "127.0.0.1", "Adresse du serveur.");
             var port = Config.Bind("Reseau", "Port", Protocol.DefaultPort, "Port UDP du serveur.");
             var username = Config.Bind("Joueur", "Pseudo", Environment.UserName, "Pseudo envoyé au serveur.");
@@ -82,7 +87,40 @@ namespace Coop.Client
                 go.AddComponent<AvatarProbeBehaviour>();
             }
 
-            Log.LogInfo($"[boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde={saveGuardInstalled}).");
+            if (IsDebugFlagSet("creature"))
+            {
+                // Elle a besoin du suivi des créatures, qui n'existe qu'après `Start` du client réseau :
+                // la sonde attend donc qu'il soit là au lieu de le recevoir ici (elle lit
+                // `ClientNetworkBehaviour.Current`).
+                Log.LogWarning("[boot] sonde de créatures activée (-coopdebug=creature).");
+                go.AddComponent<CreatureProbeBehaviour>();
+            }
+
+            if (IsDebugFlagSet("pause"))
+            {
+                Log.LogWarning("[boot] sonde de pause activée (-coopdebug=pause).");
+                go.AddComponent<ClientPauseProbeBehaviour>();
+            }
+
+            if (IsDebugFlagSet("presence"))
+            {
+                // Même raison : elle lit le gestionnaire des avatars distants
+                // (`ClientNetworkBehaviour.Current.Remotes`), qui n'existe qu'après `Start`.
+                Log.LogWarning("[boot] sonde de présence activée (-coopdebug=presence).");
+                go.AddComponent<PresenceProbeBehaviour>();
+            }
+
+            if (IsDebugFlagSet("vehicle"))
+            {
+                // Elle mesure l'interpolation du véhicule que l'hôte déplace (M4). Le même drapeau
+                // active la sonde de l'hôte : c'est le couple qui produit la preuve de bout en bout.
+                Log.LogWarning("[boot] sonde de véhicule cliente activée (-coopdebug=vehicle).");
+                go.AddComponent<VehicleClientProbeBehaviour>();
+            }
+
+            Log.LogInfo(
+                $"[boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde={saveGuardInstalled}, " +
+                $"pauseCliente={(pauseGuardInstalled ? "désactivée" : "NON patchée")}).");
         }
 
         /// <summary>
@@ -133,10 +171,126 @@ namespace Coop.Client
         private string _gameVersion;
 
         private bool _accepted;
+        private ushort _assignedPlayerId;
         private long _sequence;
+        private uint _positionSequence;
         private double _nextPingTime;
+        private double _nextPositionTime;
+        private double _nextEquipmentCheckTime;
+        private double _nextHeldItemCheckTime;
         private double _nextReconnectTime;
         private double _nextStatsTime;
+
+        private RemotePlayerManager _remotes;
+
+        /// <summary>
+        /// Suivi des créatures que le serveur simule (M3). Créé au démarrage, jamais en cours de
+        /// route : la seule chose qui change, ce sont les créatures qu'il adopte.
+        /// </summary>
+        private RemoteCreatureManager _creatures;
+
+        /// <summary>
+        /// Suivi des véhicules du serveur (M4) : registre des clés locales et interpolation entre deux
+        /// annonces. Créé au démarrage, comme le suivi des créatures.
+        /// </summary>
+        private RemoteVehicleManager _vehicles;
+
+        /// <summary>
+        /// Instance en cours, pour que les sondes puissent lire l'état réel du suivi (M3) au lieu de
+        /// recevoir une copie figée au démarrage.
+        /// </summary>
+        internal static ClientNetworkBehaviour Current { get; private set; }
+
+        /// <summary>Suivi des créatures de cette instance ; <c>null</c> avant <see cref="Start"/>.</summary>
+        internal RemoteCreatureManager Creatures => _creatures;
+
+        /// <summary>Suivi des véhicules de cette instance ; <c>null</c> avant <see cref="Start"/>.</summary>
+        internal RemoteVehicleManager Vehicles => _vehicles;
+
+        /// <summary>
+        /// Gestionnaire des avatars distants de cette instance ; <c>null</c> avant <see cref="Start"/>.
+        ///
+        /// Exposé pour la sonde de présence (<c>-coopdebug=presence</c>), qui doit exercer le chemin
+        /// « couleur appliquée à un avatar **déjà instancié** » : l'ordre réel des messages fait toujours
+        /// arriver la couleur avant l'avatar, donc cette branche ne s'exécuterait jamais autrement.
+        /// </summary>
+        internal RemotePlayerManager Remotes => _remotes;
+
+        /// <summary>Id que le serveur a assigné à ce joueur (0 avant le handshake) — pour les sondes.</summary>
+        internal ushort AssignedPlayerIdForProbe => _assignedPlayerId;
+
+        /// <summary>Nombre d'annonces d'objet tenu réellement émises — pour la sonde.</summary>
+        internal int HeldItemsSentForProbe => _heldItemsSent;
+
+        /// <summary>
+        /// Envoie un équipement en **revendiquant un id qui n'est peut-être pas le sien**.
+        ///
+        /// C'est la seule façon de mesurer la règle « le serveur force `PlayerId` » : tant qu'aucune sonde
+        /// n'envoie un id étranger, l'affirmation se lit dans le code et rien ne la contredit. Le message
+        /// part par le **vrai** chemin d'envoi (même tampon, même canal fiable) — seule la valeur du champ
+        /// est falsifiée, et c'est exactement ce que la règle doit couvrir.
+        /// </summary>
+        internal bool ProbeSendEquipment(ushort claimedPlayerId, string[] types, string label)
+        {
+            if (_server == null || _server.ConnectionState != ConnectionState.Connected)
+            {
+                CoopClientPlugin.Log.LogWarning(
+                    "[sonde] PlayerId falsifié : pas de connexion au serveur — le message n'a pas pu partir.");
+                return false;
+            }
+
+            _writer.Reset();
+            new PlayerEquipmentMessage
+            {
+                PlayerId = claimedPlayerId,
+                TechTypeNames = types,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+
+            var desc = types.Length == 0 ? "(vide)" : string.Join(", ", types);
+            CoopClientPlugin.Log.LogWarning(
+                $"[sonde] PlayerId falsifié : {label} — équipement annoncé sous l'id {claimedPlayerId} " +
+                $"alors que le mien est {_assignedPlayerId} ({types.Length} pièce(s) : {desc}).");
+            return true;
+        }
+
+        /// <summary>
+        /// Renvoie l'équipement local **sans attendre un changement** : la sonde doit pouvoir remettre
+        /// l'état réel après avoir falsifié l'id, sinon l'avatar de l'autre client garderait la liste de
+        /// la falsification et la mesure suivante partirait d'un état faux.
+        /// </summary>
+        internal bool ProbeSendLocalEquipmentNow()
+        {
+            var items = RemoteAvatarEquipment.ReadLocalEquipment(out var failure, logResult: false);
+            if (failure != null)
+            {
+                CoopClientPlugin.Log.LogWarning(
+                    $"[sonde] PlayerId falsifié : équipement local illisible ({failure}) — pas de restauration.");
+                return false;
+            }
+
+            var sorted = new List<string>(items).ToArray();
+            Array.Sort(sorted, StringComparer.Ordinal);
+
+            _lastLocalEquipmentSignature = string.Join("|", sorted);
+            return ProbeSendEquipment(_assignedPlayerId, sorted, "restauration (id du serveur)");
+        }
+
+        private int _positionsSent;
+        private int _snapshotsReceived;
+        private int _equipmentsSent;
+        private string _lastLocalEquipmentSignature;
+        private int _heldItemsSent;
+        private string _lastHeldItemSignature;
+
+        /// <summary>Couleur que le serveur a assignée à ce joueur (indice de palette, §27).</summary>
+        private int _assignedColorIndex = -1;
+
+        private int _creatureSnapshotsReceived;
+        private int _creatureStatesReceived;
+        private int _vehicleSnapshotsReceived;
+        private int _vehicleStatesReceived;
 
         // Statistiques de ping.
         private int _pongsReceived;
@@ -157,6 +311,10 @@ namespace Coop.Client
         {
             _gameVersion = Application.version;
             _modListHash = BepInExModList.ComputeHash();
+            _remotes = new RemotePlayerManager(CoopClientPlugin.Log);
+            _creatures = new RemoteCreatureManager(CoopClientPlugin.Log);
+            _vehicles = new RemoteVehicleManager(CoopClientPlugin.Log);
+            Current = this;
             CoopClientPlugin.Log.LogInfo($"[net] jeu={_gameVersion}, modHash={_modListHash}, pseudo='{_username}'");
 
             _listener = new EventBasedNetListener();
@@ -215,11 +373,265 @@ namespace Coop.Client
                 SendPing();
             }
 
+            if (_accepted && now >= _nextPositionTime)
+            {
+                _nextPositionTime = now + Protocol.PositionSendIntervalMs / 1000.0;
+                SendLocalPositionIfReady();
+            }
+
+            if (_accepted && now >= _nextEquipmentCheckTime)
+            {
+                _nextEquipmentCheckTime = now + Protocol.EquipmentCheckIntervalMs / 1000.0;
+                SendLocalEquipmentIfChanged();
+            }
+
+            if (_accepted && now >= _nextHeldItemCheckTime)
+            {
+                _nextHeldItemCheckTime = now + Protocol.HeldItemCheckIntervalMs / 1000.0;
+                SendLocalHeldItemIfChanged();
+            }
+
+            _remotes?.UpdateAvatars();
+
+            // Le suivi des créatures se fait à chaque frame : c'est lui qui relâche celles dont
+            // l'état n'arrive plus (leur IA doit reprendre, pas rester figée).
+            _creatures?.Update();
+
+            // Les véhicules, eux, avancent par interpolation à chaque image : c'est ce qui remplace le
+            // saut de 2,15 m par annonce par un glissement de ~0,33 m à 60 fps.
+            _vehicles?.UpdateInterpolation();
+
             if (now >= _nextStatsTime)
             {
                 _nextStatsTime = now + StatsIntervalSeconds;
+                _creatures?.ReportPeriodically();
+                _vehicles?.ReportPeriodically();
                 ReportStats();
             }
+        }
+
+        private void SendLocalPositionIfReady()
+        {
+            var player = Player.main;
+            if (player == null || Player.mainObject == null)
+            {
+                return;
+            }
+
+            var tr = Player.mainObject.transform;
+            var pos = tr.position;
+
+            // La rotation envoyée est le **lacet du regard**, pas celui de la racine du joueur : dans
+            // Subnautica, `Player.mainObject` ne porte pas ce lacet (c'est la caméra qui le porte, et
+            // `Player/body` le compense en local). Envoyer `tr.rotation` envoyait une orientation quasi
+            // fixe ; l'avatar distant était alors orienté par le corps **du receveur**, donc tous les
+            // corps tournaient avec la caméra de celui qui regarde. Mesuré en jeu, puis corrigé ici et
+            // dans `RemoteAvatarFactory.ComputeBodyWorldPose`.
+            var rot = ViewDirection.Yaw(tr);
+
+            // Paramètres d'animation relevés dans ArmsController.SetPlayerSpeedParameters,
+            // ArmsController.InstallAnimationRules et ArmsController.Update via tools/ApiDump.
+            var arms = player.armsController;
+            var vel = arms != null ? arms.GetSmoothedVelocity() : Vector3.zero;
+            var pitch = MainCameraControl.main != null ? MainCameraControl.main.GetCameraPitch() : 0f;
+            var isUnderwater = player.IsUnderwater() && player.motorMode != Player.MotorMode.Vehicle;
+            var waterLevel = player.GetWaterLevel();
+            var onSurface = pos.y > waterLevel - 1f && pos.y < waterLevel + 1f
+                            && !player.IsInside() && player.IsUnderwaterForSwimming();
+
+            // Drapeaux d'action : mêmes sources que ArmsController.Update, relevées dans l'IL du jeu.
+            // Ils voyagent à 20 Hz (flux rapide) et non en fiable : un clic ne doit pas coûter
+            // un aller-retour, et perdre un paquet n'a aucune conséquence (le suivant le corrige).
+            var actionFlags = PlayerActionFlags.None;
+            var pda = player.GetPDA();
+            if (pda != null && pda.isInUse)
+            {
+                actionFlags |= PlayerActionFlags.UsingPda;
+            }
+
+            var guiHand = player.guiHand;
+            if (guiHand != null)
+            {
+                if (guiHand.GetUsingTool())
+                {
+                    actionFlags |= PlayerActionFlags.UsingTool;
+                }
+
+                if (guiHand.GetAltAttacking())
+                {
+                    actionFlags |= PlayerActionFlags.UsingToolAlt;
+                }
+            }
+
+            if (player.inSeamoth)
+            {
+                actionFlags |= PlayerActionFlags.InSeamoth;
+            }
+
+            if (player.inExosuit)
+            {
+                actionFlags |= PlayerActionFlags.InExosuit;
+            }
+
+            _positionSequence++;
+            _positionsSent++;
+
+            _writer.Reset();
+            new PlayerPositionMessage
+            {
+                Sequence = _positionSequence,
+                X = pos.x,
+                Y = pos.y,
+                Z = pos.z,
+                RotX = rot.x,
+                RotY = rot.y,
+                RotZ = rot.z,
+                RotW = rot.w,
+                MoveSpeedX = vel.x,
+                MoveSpeedY = vel.y,
+                MoveSpeedZ = vel.z,
+                ViewPitch = pitch,
+                IsUnderwater = isUnderwater,
+                OnSurface = onSurface,
+                ActionFlags = actionFlags,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.Unreliable);
+
+            if (_positionsSent == 1)
+            {
+                CoopClientPlugin.Log.LogInfo(
+                    $"[presence] première position locale émise : seq={_positionSequence} pos={pos.ToString("F2")} " +
+                    $"v=({vel.x:F1},{vel.y:F1},{vel.z:F1}) pitch={pitch:F1} sousEau={isUnderwater} surface={onSurface} " +
+                    $"lacetVue={ViewDirection.YawDegrees(rot):F1}° lacetRacine={ViewDirection.YawDegrees(tr.rotation):F1}°");
+            }
+        }
+
+        private void SendLocalEquipmentIfChanged()
+        {
+            if (Player.main == null || Player.mainObject == null)
+            {
+                return;
+            }
+
+            var items = RemoteAvatarEquipment.ReadLocalEquipment(out var failure, logResult: false);
+            if (failure != null)
+            {
+                return;
+            }
+
+            var sorted = new string[items.Count];
+            for (var i = 0; i < items.Count; i++)
+            {
+                sorted[i] = items[i];
+            }
+
+            Array.Sort(sorted, StringComparer.Ordinal);
+            var signature = string.Join("|", sorted);
+            if (_lastLocalEquipmentSignature != null &&
+                string.Equals(signature, _lastLocalEquipmentSignature, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastLocalEquipmentSignature = signature;
+            _equipmentsSent++;
+
+            _writer.Reset();
+            new PlayerEquipmentMessage
+            {
+                PlayerId = _assignedPlayerId,
+                TechTypeNames = sorted,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+
+            var desc = sorted.Length == 0 ? "(sans équipement)" : string.Join(", ", sorted);
+            CoopClientPlugin.Log.LogInfo(
+                $"[presence] équipement local émis (#{_equipmentsSent}, {sorted.Length} pièce(s)) : {desc}");
+        }
+
+        /// <summary>
+        /// Émet l'objet tenu (outil en main) et les paramètres d'animation `holding_*` actifs.
+        ///
+        /// Les paramètres `holding_*` sont **lus sur l'`Animator` du joueur local**, pas re-dérivés :
+        /// c'est le jeu qui les a posés pour l'outil équipé (`PlayerTool.animToolName` vaut
+        /// `TechTypeExtensions.AsString(TechType, true)`, donc le paramètre s'appelle
+        /// `holding_` + nom du `TechType`), et il n'y a donc rien à deviner ni table à maintenir.
+        ///
+        /// N'émet que sur changement : changer d'outil est rare, le paquet est fiable.
+        /// </summary>
+        private void SendLocalHeldItemIfChanged()
+        {
+            if (Player.main == null || Player.mainObject == null)
+            {
+                return;
+            }
+
+            var name = string.Empty;
+            try
+            {
+                var inventory = Inventory.main;
+                var tool = inventory != null ? inventory.GetHeldTool() : null;
+                if (tool != null)
+                {
+                    var pickupable = tool.GetComponent<Pickupable>();
+                    name = pickupable != null ? pickupable.GetTechType().ToString() : tool.gameObject.name;
+                }
+            }
+            catch (Exception exception)
+            {
+                // La boucle réseau ne doit jamais mourir pour un outil illisible : on émet « rien ».
+                CoopClientPlugin.Log.LogWarning($"[presence] objet tenu illisible ({exception.GetType().Name}) : rien envoyé.");
+                return;
+            }
+
+            var holding = new List<string>();
+            var animator = Player.mainObject.GetComponentInChildren<Animator>(true);
+            if (animator != null)
+            {
+                var parameters = animator.parameters;
+                for (var i = 0; i < parameters.Length; i++)
+                {
+                    var parameter = parameters[i];
+                    if (parameter.type != AnimatorControllerParameterType.Bool ||
+                        !parameter.name.StartsWith(Protocol.HoldingParamPrefix, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (animator.GetBool(parameter.name))
+                    {
+                        holding.Add(parameter.name);
+                    }
+                }
+            }
+
+            holding.Sort(StringComparer.Ordinal);
+            var signature = name + "|" + string.Join("|", holding);
+            if (_lastHeldItemSignature != null &&
+                string.Equals(signature, _lastHeldItemSignature, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastHeldItemSignature = signature;
+            _heldItemsSent++;
+
+            _writer.Reset();
+            new PlayerHeldItemMessage
+            {
+                PlayerId = _assignedPlayerId,
+                TechTypeName = name,
+                HoldingParams = holding.ToArray(),
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+
+            var held = name.Length == 0 ? "(rien en main)" : name;
+            var paramsText = holding.Count == 0 ? "(aucun)" : string.Join(", ", holding);
+            CoopClientPlugin.Log.LogInfo(
+                $"[presence] objet tenu émis (#{_heldItemsSent}) : '{held}' holding=[{paramsText}]");
         }
 
         private void SendPing()
@@ -250,8 +662,13 @@ namespace Coop.Client
             var minimum = _minRtt == long.MaxValue ? 0 : _minRtt;
 
             CoopClientPlugin.Log.LogInfo(
-                $"[ping] pongs={_pongsReceived} rtt dernier={_lastRtt}ms min={minimum}ms moy={average}ms max={_maxRtt}ms " +
-                $"dernierTickServeur={_lastServerTick}");
+                $"[ping] id={_assignedPlayerId} pongs={_pongsReceived} rtt dernier={_lastRtt}ms min={minimum}ms moy={average}ms max={_maxRtt}ms " +
+                $"dernierTickServeur={_lastServerTick} posEnvoyees={_positionsSent} equipEnvoyes={_equipmentsSent} outilsEnvoyes={_heldItemsSent} snapshotsRecus={_snapshotsReceived} " +
+                $"joueursDistants={_remotes?.RemoteCount ?? 0} avatarsActifs={_remotes?.SpawnedAvatarCount ?? 0} " +
+                $"couleurPerso={_assignedColorIndex} snapshotsCreatures={_creatureSnapshotsReceived} etatsCreatures={_creatureStatesReceived} " +
+                $"snapshotsVehicules={_vehicleSnapshotsReceived} etatsVehicules={_vehicleStatesReceived} " +
+                $"vehicules={(_vehicles != null ? _vehicles.Describe() : "(aucun suivi)")} " +
+                $"creatures={(_creatures != null ? _creatures.Describe() : "(aucun suivi)")}");
         }
 
         private void OnPeerConnected(NetPeer peer)
@@ -264,8 +681,13 @@ namespace Coop.Client
         {
             CoopClientPlugin.Log.LogWarning($"[net] déconnecté du serveur (raison={info.Reason})");
             _accepted = false;
+            _assignedPlayerId = 0;
+            _lastLocalEquipmentSignature = null;
+            _lastHeldItemSignature = null;
             _server = null;
             _pingSentAt.Clear();
+            _remotes?.ClearAll();
+            _vehicles?.ReleaseAll("déconnexion du serveur");
             _nextReconnectTime = _clock.Elapsed.TotalSeconds + ReconnectDelaySeconds;
         }
 
@@ -321,8 +743,16 @@ namespace Coop.Client
                     }
 
                     _accepted = true;
+                    _assignedPlayerId = response.AssignedPlayerId;
+                    _lastLocalEquipmentSignature = null;
+                    _lastHeldItemSignature = null;
+                    _assignedColorIndex = -1;
                     _nextPingTime = _clock.Elapsed.TotalSeconds;
-                    CoopClientPlugin.Log.LogInfo($"[net] handshake ACCEPTÉ (tick serveur={response.ServerTick}) — début des pings");
+                    _nextPositionTime = _clock.Elapsed.TotalSeconds;
+                    _nextEquipmentCheckTime = _clock.Elapsed.TotalSeconds;
+                    _nextHeldItemCheckTime = _clock.Elapsed.TotalSeconds;
+                    CoopClientPlugin.Log.LogInfo(
+                        $"[net] handshake ACCEPTÉ (id={response.AssignedPlayerId}, tick serveur={response.ServerTick}) — début des pings et positions");
                     break;
                 }
 
@@ -360,7 +790,102 @@ namespace Coop.Client
                     var message = DisconnectMessage.Read(reader);
                     CoopClientPlugin.Log.LogWarning($"[net] le serveur a fermé la connexion : {message.Reason}");
                     _accepted = false;
+                    _assignedPlayerId = 0;
                     _server = null;
+                    _remotes?.ClearAll();
+
+                    // Un serveur qui disparaît ne doit pas laisser le monde du client à moitié figé :
+                    // les créatures qu'il simulait pour nous reprennent leur IA ici.
+                    _creatures?.ReleaseAll("le serveur a fermé la connexion");
+                    _vehicles?.ReleaseAll("le serveur a fermé la connexion");
+                    break;
+                }
+
+                case MessageType.PlayerJoined:
+                {
+                    var joined = PlayerJoinedMessage.Read(reader);
+                    if (joined.PlayerId != _assignedPlayerId)
+                    {
+                        _remotes?.OnPlayerJoined(joined);
+                    }
+
+                    break;
+                }
+
+                case MessageType.PlayerLeft:
+                {
+                    var left = PlayerLeftMessage.Read(reader);
+                    _remotes?.OnPlayerLeft(left);
+                    break;
+                }
+
+                case MessageType.PlayersSnapshot:
+                {
+                    var snapshot = PlayersSnapshotMessage.Read(reader);
+                    _snapshotsReceived++;
+                    _lastServerTick = snapshot.ServerTick;
+                    _remotes?.OnSnapshot(snapshot);
+                    break;
+                }
+
+                case MessageType.PlayerEquipment:
+                {
+                    var equip = PlayerEquipmentMessage.Read(reader);
+                    if (equip.PlayerId != _assignedPlayerId)
+                    {
+                        _remotes?.OnPlayerEquipment(equip);
+                    }
+
+                    break;
+                }
+
+                case MessageType.PlayerHeldItem:
+                {
+                    var held = PlayerHeldItemMessage.Read(reader);
+                    if (held.PlayerId != _assignedPlayerId)
+                    {
+                        _remotes?.OnPlayerHeldItem(held);
+                    }
+
+                    break;
+                }
+
+                case MessageType.PlayerColor:
+                {
+                    var color = PlayerColorMessage.Read(reader);
+                    if (color.PlayerId == _assignedPlayerId)
+                    {
+                        // Sa propre couleur : elle ne sert pas à grand-chose tant qu'on ne colore que
+                        // les avatars distants, mais la connaître évite de croire à une couleur
+                        // manquante quand c'est la sienne qui a été attribuée.
+                        _assignedColorIndex = color.ColorIndex;
+                        Protocol.PlayerColorAt(color.ColorIndex, out var sr, out var sg, out var sb);
+                        CoopClientPlugin.Log.LogInfo(
+                            $"[presence] couleur assignée à ce joueur : indice {color.ColorIndex} rgb({sr},{sg},{sb})");
+                    }
+                    else
+                    {
+                        _remotes?.OnPlayerColor(color);
+                    }
+
+                    break;
+                }
+
+                case MessageType.CreatureSnapshot:
+                {
+                    var creatures = CreatureSnapshotMessage.Read(reader);
+                    _creatureSnapshotsReceived++;
+                    _creatureStatesReceived += creatures.Creatures != null ? creatures.Creatures.Length : 0;
+                    _creatures?.OnSnapshot(creatures);
+                    break;
+                }
+
+                case MessageType.VehicleSnapshot:
+                {
+                    var vehicles = VehicleSnapshotMessage.Read(reader);
+                    _vehicleSnapshotsReceived++;
+                    _vehicleStatesReceived += vehicles.Vehicles != null ? vehicles.Vehicles.Length : 0;
+                    _vehicles?.OnSnapshot(vehicles);
                     break;
                 }
 
@@ -374,6 +899,9 @@ namespace Coop.Client
         {
             try
             {
+                _remotes?.ClearAll();
+                _creatures?.ReleaseAll("arrêt du client");
+                _vehicles?.ReleaseAll("arrêt du client");
                 _net?.Stop();
             }
             catch (Exception exception)

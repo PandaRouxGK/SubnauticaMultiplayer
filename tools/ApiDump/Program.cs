@@ -4,12 +4,43 @@ using Mono.Cecil.Cil;
 // Usage:
 //   ApiDump <assembly.dll> <filtre>            -> liste les types dont le nom contient <filtre>
 //   ApiDump callers <assembly.dll> <methode>   -> liste les methodes qui APPELENT <methode> (scan IL)
+//   ApiDump il <assembly.dll> <type> <methode> -> affiche les instructions IL de <type>.<methode>
 
 if (args.Length < 2)
 {
     Console.Error.WriteLine("usage: ApiDump <assembly.dll> <filtre>");
     Console.Error.WriteLine("       ApiDump callers <assembly.dll> <methode>");
+    Console.Error.WriteLine("       ApiDump il <assembly.dll> <type> <methode>");
     return 1;
+}
+
+if (string.Equals(args[0], "il", StringComparison.OrdinalIgnoreCase) && args.Length >= 4)
+{
+    var asm = AssemblyDefinition.ReadAssembly(args[1]);
+    foreach (var t in EnumerateAllTypes(asm.MainModule))
+    {
+        if (!string.Equals(t.Name, args[2], StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(t.FullName, args[2], StringComparison.OrdinalIgnoreCase))
+        {
+            continue;
+        }
+
+        foreach (var m in t.Methods)
+        {
+            if (m.Name.IndexOf(args[3], StringComparison.OrdinalIgnoreCase) < 0 || !m.HasBody)
+            {
+                continue;
+            }
+
+            Console.WriteLine($"=== IL {t.FullName}.{m.Name} ===");
+            foreach (var ins in m.Body.Instructions)
+            {
+                Console.WriteLine($"  {ins.Offset:X4}: {ins.OpCode} {ins.Operand}");
+            }
+        }
+    }
+
+    return 0;
 }
 
 var callersMode = string.Equals(args[0], "callers", StringComparison.OrdinalIgnoreCase);

@@ -28,6 +28,13 @@
       <HintPath>$(SubnauticaManaged)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Assembly-CSharp-firstpass porte `ModelPlug`, la base de `PlayerTool` : lire l'objet tenu du
+         joueur local ne compile pas sans elle — et `UWE.PrefabDatabase` (le prefab du modèle tenu
+         d'un joueur distant) en vient aussi. -->
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(SubnauticaManaged)\Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <!-- HarmonyX fourni par BepInEx ; chargé par le preloader, jamais copié. -->
     <Reference Include="0Harmony">
       <HintPath>$(BepInExCore)\0Harmony.dll</HintPath>
@@ -77,6 +84,9 @@
     <Compile Include="..\Shared\BepInExModList.cs" Link="BepInExModList.cs" />
     <Compile Include="..\Shared\InstanceLogFile.cs" Link="InstanceLogFile.cs" />
     <Compile Include="..\Shared\AutoLoadBehaviour.cs" Link="AutoLoadBehaviour.cs" />
+    <Compile Include="..\Shared\CreatureIdentity.cs" Link="CreatureIdentity.cs" />
+    <Compile Include="..\Shared\VehicleIdentity.cs" Link="VehicleIdentity.cs" />
+    <Compile Include="..\Shared\ViewDirection.cs" Link="ViewDirection.cs" />
   </ItemGroup>
 
 </Project>

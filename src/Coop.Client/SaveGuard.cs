@@ -11,13 +11,23 @@ namespace Coop.Client
     /// Empêche le client d'écrire dans la sauvegarde. Le serveur est seul propriétaire du monde :
     /// deux instances qui écrivent la même partie la corrompraient (elles chargent la même sessionId).
     ///
-    /// Point de blocage choisi **sur preuve**, pas au jugé. Un scan IL de `Assembly-CSharp.dll`
-    /// (outil `tools/ApiDump`, mode `callers`) donne exactement deux appelants de
-    /// `IngameMenu.SaveGameAsync` (itérateur privé, sans paramètre) :
-    ///   - `IngameMenu.SaveGame` — le bouton « Sauvegarder » du menu pause ;
-    ///   - `IngameMenu/&lt;QuitGameAsync&gt;d__65.MoveNext` — la sauvegarde au moment de quitter.
-    /// Et `SaveToTemporaryStorageAsync` / `SaveToDeepStorageAsync` n'ont **aucun** autre appelant
-    /// que `SaveGameAsync`. Un seul prefix ferme donc tous les chemins d'écriture.
+    /// Deux points de blocage, tous deux choisis **sur preuve** (scan IL de `Assembly-CSharp.dll` par
+    /// `tools/ApiDump callers`), et superposés parce qu'ils ne protègent pas la même chose :
+    ///
+    /// 1. **L'entrée** — `IngameMenu.SaveGameAsync` (itérateur privé, sans paramètre) n'a que deux
+    ///    appelants : `IngameMenu.SaveGame` (le bouton du menu pause, lui-même rappelé par
+    ///    `OnSaveErrorConfirmed`) et `IngameMenu/&lt;QuitGameAsync&gt;d__65.MoveNext` (sauvegarde à la
+    ///    fermeture). Le bloquer arrête l'intention : rien de la sauvegarde ne commence.
+    /// 2. **L'écriture** — `SaveLoadManager/GameInfo.SaveFile(string, byte[])` est la dernière chose
+    ///    avant le disque (`Platform.IO.File.WriteAllBytes`), et son **unique** appelant est
+    ///    `GameInfo.SaveIntoCurrentSlot`, lui-même appelé par le seul itérateur de
+    ///    `SaveToTemporaryStorageAsync`. Bloquer ici protège d'un chemin qui contournerait le menu —
+    ///    y compris un chemin qui n'existe pas encore dans cette version du jeu.
+    ///
+    /// Ce que la garde ne couvre pas, et il faut le dire : `SaveLoadManager.CreateSlotAsync` (menu
+    /// principal → « nouvelle partie ») écrit une partie **neuve** — jamais la session du serveur — et
+    /// reste volontairement autorisé, sinon le mod casserait le jeu solo ; `ScreenshotManager` écrit des
+    /// PNG de captures d'écran, pas des données de sauvegarde. Les deux sont hors du risque visé.
     ///
     /// Contre-exemple utile : `SaveLoadManager.GetAllowWritingFiles()` a un nom qui donne envie,
     /// mais le scan montre qu'il n'est appelé que par `LargeWorldStreamer.TryUnloadBatch` — c'est un
@@ -29,11 +39,23 @@ namespace Coop.Client
         private const string TargetTypeName = "IngameMenu";
         private const string TargetMethodName = "SaveGameAsync";
 
+        /// <summary>Type imbriqué du dernier rempart : la méthode qui écrit réellement les octets.</summary>
+        private const string WriteTargetTypeName = "SaveLoadManager+GameInfo";
+        private const string WriteTargetMethodName = "SaveFile";
+
         private static ManualLogSource _log;
         private static int _blockedCount;
+        private static int _blockedWriteCount;
 
-        /// <summary>Nombre de sauvegardes interceptées : sert aussi d'assertion pour l'autotest.</summary>
+        /// <summary>Nombre de sauvegardes interceptées à l'entrée : sert d'assertion pour l'autotest.</summary>
         public static int BlockedCount => _blockedCount;
+
+        /// <summary>
+        /// Nombre d'écritures interceptées au dernier rempart (avant le disque) : c'est la mesure qui
+        /// prouve que la garde tient même quand on n'entre pas par le menu — l'autotest appelle
+        /// `SaveFile` directement.
+        /// </summary>
+        public static int BlockedWriteCount => _blockedWriteCount;
 
         /// <summary>Installe la garde. Renvoie <c>false</c> si la cible n'a pas pu être patchée.</summary>
         public static bool Install(ManualLogSource log)
@@ -56,19 +78,49 @@ namespace Coop.Client
                 return false;
             }
 
-            try
+            // Dernier rempart : la méthode qui appelle `File.WriteAllBytes`. Si le type imbriqué n'est pas
+            // résolu, on échoue **fermé** comme pour l'entrée : un client qui écrit dans la sauvegarde du
+            // serveur est un dégât irréversible, un coop qui refuse de démarrer ne l'est pas.
+            var writeTargetType = typeof(SaveLoadManager).GetNestedType("GameInfo", BindingFlags.Public | BindingFlags.NonPublic);
+            var writeTarget = writeTargetType == null
+                ? null
+                : writeTargetType.GetMethod(
+                    WriteTargetMethodName,
+                    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (writeTarget == null)
             {
-                new Harmony(HarmonyId).Patch(target, new HarmonyMethod(prefix));
-            }
-            catch (Exception exception)
-            {
-                log.LogError($"[garde] échec du patch de {Describe(target)} : {exception}");
+                log.LogError(
+                    $"[garde] cible d'écriture introuvable : {WriteTargetTypeName}.{WriteTargetMethodName} — " +
+                    "aucun rempart avant le disque, chargement du monde refusé.");
                 return false;
             }
 
-            // On journalise la signature réellement patchée : c'est la seule façon de savoir
-            // qu'on a bien visé la bonne méthode et pas une surcharge inattendue.
-            log.LogInfo($"[garde] sauvegarde cliente désactivée — patché : {Describe(target)}");
+            var writePrefix = AccessTools.Method(typeof(SaveGuard), nameof(BlockWrite));
+            if (writePrefix == null)
+            {
+                log.LogError("[garde] préfixe d'écriture introuvable (incohérence de build).");
+                return false;
+            }
+
+            var harmony = new Harmony(HarmonyId);
+            try
+            {
+                harmony.Patch(target, new HarmonyMethod(prefix));
+                harmony.Patch(writeTarget, new HarmonyMethod(writePrefix));
+            }
+            catch (Exception exception)
+            {
+                log.LogError(
+                    $"[garde] échec du patch de {Describe(target)} ou de {Describe(writeTarget)} : {exception}");
+                return false;
+            }
+
+            // On journalise les signatures réellement patchées : c'est la seule façon de savoir
+            // qu'on a bien visé les bonnes méthodes et pas une surcharge inattendue.
+            log.LogInfo(
+                $"[garde] sauvegarde cliente désactivée — patché : {Describe(target)} (entrée) et " +
+                $"{Describe(writeTarget)} (écriture sur disque)");
             return true;
         }
 
@@ -89,6 +141,26 @@ namespace Coop.Client
                 "le serveur est seul propriétaire du monde.");
 
             __result = NoOp();
+            return false;
+        }
+
+        /// <summary>
+        /// Prefix du dernier rempart. Renvoyer <c>false</c> saute l'écriture : les octets ne touchent jamais
+        /// le disque, quelle que soit la porte d'entrée.
+        ///
+        /// Volontairement **sans** remplacement de résultat (contrairement à <see cref="BlockSave"/> : la
+        /// méthode renvoie <c>void</c>) et sans exception : un chemin de sauvegarde qui se poursuivrait
+        /// verrait simplement un fichier absent, ce qui est le comportement d'un client sans droit d'écriture.
+        /// </summary>
+        private static bool BlockWrite(object[] __args)
+        {
+            _blockedWriteCount++;
+
+            var fileName = __args != null && __args.Length > 0 ? __args[0] as string : null;
+            _log?.LogWarning(
+                $"[garde] écriture de sauvegarde interceptée avant le disque (n°{_blockedWriteCount}, fichier " +
+                $"« {fileName ?? "(null)"} ») : cette instance est un client, le serveur est seul propriétaire du monde.");
+
             return false;
         }
 
@@ -191,6 +263,7 @@ namespace Coop.Client
                 Log.LogInfo($"[autotest] après Open() : actifDansHierarchie={menu.gameObject.activeInHierarchy}");
             }
 
+            // — 1. L'entrée : le chemin qu'un joueur déclenche vraiment (bouton « Sauvegarder »).
             var before = SaveGuard.BlockedCount;
             Log.LogWarning($"[autotest] déclenchement volontaire de IngameMenu.SaveGame() — compteur avant={before}");
 
@@ -208,14 +281,62 @@ namespace Coop.Client
             yield return new WaitForSeconds(4f);
 
             var after = SaveGuard.BlockedCount;
-            if (after > before)
+            var entryBlocked = after > before;
+            Log.LogInfo(
+                entryBlocked
+                    ? $"[autotest] entrée bloquée : IngameMenu.SaveGameAsync intercepté (compteur {before} -> {after})."
+                    : $"[autotest] entrée NON bloquée : aucune interception (compteur resté à {after}).");
+
+            // — 2. L'écriture : appelée **directement**, en contournant le menu. C'est la mesure qui
+            //      compte : elle prouve qu'un chemin qui n'entre pas par `IngameMenu` ne peut pas écrire.
+            //      Arguments nuls exprès — avec la garde la méthode n'exécute rien ; sans elle, elle lève,
+            //      et l'exception est la preuve que le dernier rempart est absent. Aucun octet n'est écrit
+            //      dans les deux cas.
+            var writeBefore = SaveGuard.BlockedWriteCount;
+            var writer = typeof(SaveLoadManager)
+                .GetNestedType("GameInfo", BindingFlags.Public | BindingFlags.NonPublic)?
+                .GetMethod("SaveFile", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (writer == null)
             {
-                Log.LogWarning($"[autotest] RÉSULTAT OK : tentative interceptée (compteur {before} -> {after}).");
+                Log.LogError(
+                    "[autotest] SaveLoadManager/GameInfo.SaveFile introuvable : le dernier rempart n'est " +
+                    "pas vérifiable sur cette version du jeu.");
             }
             else
             {
-                Log.LogError($"[autotest] RÉSULTAT ÉCHEC : aucune interception (compteur resté à {after}) — la garde est INOPÉRANTE.");
+                try
+                {
+                    writer.Invoke(null, new object[] { null, null });
+                }
+                catch (Exception exception)
+                {
+                    Log.LogError(
+                        $"[autotest] l'écriture directe a LEVÉ ({exception.GetType().Name}: {exception.Message}) " +
+                        "— le dernier rempart n'a pas intercepté l'appel.");
+                }
             }
+
+            var writeAfter = SaveGuard.BlockedWriteCount;
+            var writeBlocked = writer != null && writeAfter > writeBefore;
+            Log.LogInfo(
+                writeBlocked
+                    ? $"[autotest] écriture bloquée : SaveFile intercepté hors du menu (compteur {writeBefore} -> {writeAfter})."
+                    : $"[autotest] écriture NON bloquée : SaveFile n'a pas été intercepté (compteur resté à {writeAfter}).");
+
+            var verdict = entryBlocked && writeBlocked;
+            if (verdict)
+            {
+                Log.LogWarning($"[autotest] RÉSULTAT OK : les deux remparts ont parlé (entrée {before}->{after}, écriture {writeBefore}->{writeAfter}).");
+            }
+            else
+            {
+                Log.LogError(
+                    $"[autotest] RÉSULTAT ÉCHEC : entrée={entryBlocked}, écriture={writeBlocked} — la garde est " +
+                    "INOPÉRANTE sur au moins un chemin, et cette instance écrirait dans la sauvegarde du serveur.");
+            }
+
+            Log.LogInfo($"[autotest] sauvegarde cliente bloquée (entrée+écriture) -> verdict={verdict}");
 
             menu.Close();
         }

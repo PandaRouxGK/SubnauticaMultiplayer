@@ -24,6 +24,11 @@ namespace Coop.Client
     /// **compte donc les pixels que la copie change** : deux clichés dos à dos sans la copie donnent
     /// le bruit de la scène (eau, HUD), puis un cliché avec la copie donne l'écart. Sans témoin de
     /// bruit, un écart de pixels ne prouve rien non plus.
+    ///
+    /// Cette mesure-là dépend de la scène, donc elle se tait quand le bruit monte (mesuré : bruit médian
+    /// dépassant le tiers du signal). Ce qui fait autorité sur « la copie est-elle dessinée », c'est le
+    /// **rendu isolé** — la copie seule, sur fond magenta, avec notre caméra propre (voir
+    /// <see cref="LogVisibilityVerdict"/>). Le témoin de scène corrobore ou reste muet, il ne conclut pas.
     /// </summary>
     public class AvatarProbeBehaviour : MonoBehaviour
     {
@@ -44,6 +49,48 @@ namespace Coop.Client
 
         /// <summary>Écart minimal de composante RVB pour compter un pixel comme changé (0-255).</summary>
         private const int PixelDifferenceThreshold = 30;
+
+        /// <summary>
+        /// Écart minimal (0-255) entre les couleurs relues de deux indices pour les compter comme
+        /// différentes.
+        ///
+        /// 8/255 est au-dessus de l'arrondi d'un aller-retour couleur -> matériau -> rendu, et très en
+        /// dessous de ce que la palette produit entre deux de ses entrées (le rouge et le cyan diffèrent
+        /// de plus de 170). Un seuil plus haut laisserait passer deux teintes voisines pour identiques ;
+        /// plus bas, il ferait échouer la mesure sur du bruit d'arrondi.
+        /// </summary>
+        private const int ColorDifferenceThreshold = 8;
+
+        /// <summary>
+        /// Écart (m) entre les deux corps de la preuve « deux avatars, deux couleurs ».
+        ///
+        /// La caméra du rendu isolé voit 3,36 m de large à la distance du corps (±1,68 m) : à 1,10 m du
+        /// centre, le second corps reste entier dans l'image, sans recouvrir le premier.
+        /// </summary>
+        private const float TwoBodiesSpacingMeters = 1.1f;
+
+        /// <summary>
+        /// Demi-taille (px) de la région échantillonnée autour du torse d'un corps.
+        ///
+        /// Le torse fait ~76 px de large dans ce rendu ; ±24 px tombe donc dans le corps, ce qui est le
+        /// but — mesurer **une** région par corps, pas la moyenne de toute l'image.
+        /// </summary>
+        private const int BodyRegionHalfSizePixels = 24;
+
+        // — Résultat des deux mesures de visibilité, assemblées en un seul verdict —————————————
+        //
+        // Mesuré au run du 2026-10-17 : la sonde concluait « la copie ne change pas assez de pixels pour
+        // être considérée comme rendue » alors que son propre rendu isolé, 17 ms plus tard, montrait la
+        // copie dessinée sur 4,5 % de l'image. Un verdict qui nie ce qui vient d'être mesuré vaut moins
+        // que pas de verdict : les deux mesures sont donc conservées, puis assemblées une fois connues.
+        private bool _frameDifferenceRenders;
+        private double _frameDifferenceSignal;
+        private double _frameDifferenceNoise;
+        private double _frameDifferenceThreshold;
+
+        private bool _isolatedMeasured;
+        private long _isolatedCoverage;
+        private long _isolatedPixels;
 
         private static readonly ManualLogSource Log = RemoteAvatarFactory.Log;
 
@@ -138,6 +185,10 @@ namespace Coop.Client
         /// maximal de la scène sur la durée totale — c'est le mètre-étalon, pas l'écart entre deux
         /// images voisines qui sous-estimerait le bruit. Chaque mesure est ensuite comparée à **ce**
         /// bruit-là, ce qui rend le verdict difficile à obtenir par accident.
+        ///
+        /// Cette mesure **ne conclut pas** que la copie ne s'affiche pas : elle dépend du bruit de la
+        /// scène, et quand ce bruit monte elle devient muette. Elle est conservée telle quelle et c'est
+        /// <see cref="LogVisibilityVerdict"/> qui tranche, une fois le rendu isolé connu.
         /// </summary>
         private IEnumerator MeasureVisibility(GameObject clone, Camera camera)
         {
@@ -207,15 +258,24 @@ namespace Coop.Client
             var threshold = System.Math.Max(noise * 3, 2000);
             var renders = signal > threshold;
 
+            _frameDifferenceRenders = renders;
+            _frameDifferenceSignal = signal;
+            _frameDifferenceNoise = noise;
+            _frameDifferenceThreshold = threshold;
+
             Log.LogInfo(
-                $"[sonde] décision : signal médian={signal:F0} px, bruit médian={noise:F0} px, seuil={threshold:F0} px " +
-                $"(3x le bruit, plancher 2000) -> la copie rend={renders}");
+                $"[sonde] décision (différence d'images) : signal médian={signal:F0} px, bruit médian={noise:F0} px, " +
+                $"seuil={threshold:F0} px (3x le bruit, plancher 2000) -> signal au-dessus du seuil={renders}");
 
             if (!renders)
             {
-                Log.LogError(
-                    "[sonde] la copie ne change pas assez de pixels pour être considérée comme rendue : " +
-                    "elle existe, mais rien ne s'affiche.");
+                // Pas un échec, une **mesure muette** : le bruit de la scène (eau, HUD) impose un seuil que le
+                // signal ne dépasse pas. Cette mesure ne peut donc pas dire que rien ne s'affiche — elle dit
+                // qu'ici elle ne voit pas la copie. Le rendu isolé, lui, ne dépend pas de la scène.
+                Log.LogWarning(
+                    $"[sonde] mesure par différence d'images NON CONCLUANTE : bruit médian de la scène={noise:F0} px, " +
+                    $"signal médian={signal:F0} px, seuil={threshold:F0} px — le bruit de la scène masque le signal, " +
+                    "donc cette mesure ne dit rien de la copie. Le rendu isolé tranche (voir le verdict de rendu).");
             }
 
             foreach (var shot in shots)
@@ -365,6 +425,14 @@ namespace Coop.Client
                 $"({(coverage * 100.0 / pixels):F1} %), luminance moyenne hors fond={averageLuminance:F0}/255, " +
                 $"étendue du sujet={blobWidth}x{blobHeight} px sur {renderTexture.width}x{renderTexture.height}");
 
+            // C'est **cette** mesure qui fait autorité sur « la copie est-elle dessinée » : elle ne dépend ni
+            // de l'orientation du joueur, ni du bruit de la scène. Le verdict est assemblé ici, quand les deux
+            // mesures sont connues, et non au moment où la première tombe.
+            _isolatedMeasured = true;
+            _isolatedCoverage = coverage;
+            _isolatedPixels = pixels;
+            LogVisibilityVerdict();
+
             if (texture != null)
             {
                 var path = IsolatedProofPath();
@@ -388,8 +456,16 @@ namespace Coop.Client
             // pixels) au lieu de se croire.
             yield return MeasureEquipmentScenarios(clone, probeCamera, renderTexture);
 
+            // Deux joueurs en scaphandre de base sont identiques : la couleur est ce qui les distingue,
+            // et elle se mesure sur le rendu, pas sur le setter qu'on vient d'appeler.
+            yield return MeasureColorScenarios(clone, probeCamera, renderTexture);
+
+            // Et la question que se pose vraiment un joueur : deux avatars **côte à côte**, deux couleurs,
+            // dans une seule image. La phase ci-dessus ne la pose pas (elle mesure la même copie deux fois).
+            yield return MeasureTwoColorProof(clone, probeCamera, renderTexture);
+
             // L'aller-retour complet : lire l'équipement local, le transmettre sous forme de noms, puis
-            // l'appliquer à la copie — et comparer le résultat à ce que le joueur local porte vraiment.
+            // l'appliquer à la copie — et vérifier que le voyage en noms ne perd rien.
             yield return MeasureLocalEquipmentRoundTrip(clone);
 
             // La copie repasse sur le calque du monde : c'est l'état qu'aurait un vrai avatar distant.
@@ -403,60 +479,130 @@ namespace Coop.Client
 
         /// <summary>
         /// Fait le tour complet du chemin que le réseau empruntera : **lire** l'équipement du joueur
-        /// local, le passer en noms, l'appliquer à la copie, puis **comparer** la copie à l'original.
+        /// local, le passer en noms, l'appliquer à la copie — et vérifier que ce voyage en noms ne perd
+        /// rien.
         ///
-        /// C'est le seul test qui vérifie les deux moitiés ensemble. Un scénario écrit à la main
-        /// (celui du dessus) prouve que les règles marchent pour l'équipement qu'on leur donne ;
-        /// celui-ci prouve que l'équipement qu'on leur donnera **est bien celui du joueur**. Si les
-        /// deux compositions diffèrent, l'écart est nommé nœud par nœud : c'est le genre d'écart qui
-        /// produirait un avatar subtilement faux, et il vaut mieux le lire ici que le découvrir en jeu.
+        /// **La référence a changé, et c'est une mesure qui l'a imposé.** La première version comparait la
+        /// copie à l'**état brut du modèle local**, et elle rendait `verdict=False` à chaque run : relevé du
+        /// 2026-10-17, `0 pièce(s) lue(s), 10 nœud(s) actif(s) chez le joueur local contre 3 sur la copie`,
+        /// 7 nœuds « manquants » dont les porteurs de palmes, de bouteille et de détendeur. Ce n'était pas
+        /// un défaut des règles : le jeu pilote une partie des nœuds du modèle local par d'autres moyens que
+        /// l'équipement (`ConditionRules`, `ArmsController`). Comparer à cet état ne testait donc rien — et
+        /// un verdict toujours faux est pire qu'aucun verdict : il fait ignorer les vrais (c'est le harnais
+        /// `tools/run-session.sh`, qui fait échouer un run sur `verdict=False`, qui l'a démasqué).
+        ///
+        /// L'état brut du modèle local reste **journalisé comme observation**, avec sa raison de ne pas
+        /// conclure : les porteurs actifs alors que rien n'est porté restent une information à suivre.
+        ///
+        /// Trois contrôles, chacun falsifiable :
+        ///
+        /// 1. **le canal des noms ne perd rien** : sur l'ensemble des pièces que ces règles connaissent,
+        ///    `ApplyNames(noms)` doit donner exactement l'état de `Apply(types)`. Un `Enum.TryParse` qui
+        ///    échouerait sur un nom du jeu ferait disparaître une pièce du voyage, et c'est exactement ce
+        ///    que ce contrôle attrape ;
+        /// 2. **le contrôle lui-même peut échouer** : la même liste avec un nom corrompu (`"X" + nom`) doit
+        ///    donner **autre chose**. Sans ça, l'égalité du point 1 pourrait être vraie pour tout et ne rien
+        ///    prouver — un contrôle qu'on n'a jamais vu broncher n'est pas un contrôle ;
+        /// 3. **la lecture locale ne perd rien** : autant de noms que de `TechType` lus, et une lecture qui
+        ///    a échoué ne passe pas pour un succès.
         /// </summary>
         private IEnumerator MeasureLocalEquipmentRoundTrip(GameObject clone)
         {
-            if (Player.main == null || Player.mainObject == null)
-            {
-                Log.LogWarning("[sonde] aller-retour d'équipement impossible : joueur local absent.");
-                yield break;
-            }
+            Log.LogInfo("[sonde] --- aller-retour : le voyage en noms ne doit rien perdre ---");
 
-            var sourceBody = RemoteAvatarFactory.FindBodyRoot(Player.mainObject.transform);
-            if (sourceBody == null)
-            {
-                Log.LogWarning("[sonde] aller-retour d'équipement impossible : corps du joueur local introuvable.");
-                yield break;
-            }
-
-            var sourceNodes = RemoteAvatarEquipment.ActiveGovernedNodes(sourceBody.gameObject);
-            var names = RemoteAvatarEquipment.ReadLocalEquipment(out var failure);
+            // Ce que le réseau transportera vraiment (les noms, tels que le plugin les produit) et la
+            // référence correspondante, lue dans la même passe silencieuse pour ne pas journaliser deux
+            // fois la même ligne.
+            var names = RemoteAvatarEquipment.ReadLocalEquipment(out var failure, logResult: false);
+            var types = RemoteAvatarEquipment.ReadLocalEquipmentTypes(out var typesFailure, logResult: true);
             if (failure != null)
             {
-                Log.LogWarning($"[sonde] aller-retour d'équipement : lecture impossible ({failure}).");
+                Log.LogWarning($"[sonde] aller-retour d'équipement : lecture des noms impossible ({failure}).");
             }
 
-            RemoteAvatarEquipment.ApplyNames(clone, names);
+            // Observation, pas critère : ce que le jeu laisse actif sur le modèle local.
+            var sourceBody = Player.mainObject != null
+                ? RemoteAvatarFactory.FindBodyRoot(Player.mainObject.transform)
+                : null;
+            if (sourceBody != null)
+            {
+                var sourceNodes = RemoteAvatarEquipment.ActiveGovernedNodes(sourceBody.gameObject);
+                Log.LogInfo(
+                    $"[sonde] aller-retour d'équipement : observation (hors critère) — {sourceNodes.Count} nœud(s) " +
+                    $"actif(s) sur le modèle local pour {(types.Count == 0 ? "rien de porté" : $"{types.Count} pièce(s)")} : " +
+                    $"{string.Join(", ", sourceNodes)}. Le jeu en pilote une partie hors équipement " +
+                    "(ConditionRules, ArmsController) : ce n'est pas une référence.");
+            }
+
+            // — 1. Le canal des noms, éprouvé sur l'ensemble des pièces que les règles savent appliquer.
+            //     Un `ToString()` suivi d'un `Enum.TryParse` est exactement ce que fait le voyage réseau ;
+            //     la liste est volontairement complète pour couvrir toutes les branches des règles.
+            var probeTypes = new[]
+            {
+                TechType.RadiationSuit, TechType.RadiationHelmet, TechType.RadiationGloves,
+                TechType.Tank, TechType.DoubleTank, TechType.HighCapacityTank, TechType.PlasteelTank,
+                TechType.Fins, TechType.SwimChargeFins, TechType.UltraGlideFins, TechType.Rebreather,
+                TechType.WaterFiltrationSuit,
+                TechType.ReinforcedDiveSuit, TechType.ReinforcedGloves,
+            };
+            var probeNames = probeTypes.Select(type => type.ToString()).ToList();
+
+            RemoteAvatarEquipment.Apply(clone, probeTypes);
             yield return new WaitForEndOfFrame();
+            var viaTypes = RemoteAvatarEquipment.ActiveGovernedNodes(clone);
 
-            var cloneNodes = RemoteAvatarEquipment.ActiveGovernedNodes(clone);
-            var missing = sourceNodes.Where(node => !cloneNodes.Contains(node)).ToList();
-            var extra = cloneNodes.Where(node => !sourceNodes.Contains(node)).ToList();
-            var verdict = missing.Count == 0 && extra.Count == 0;
+            RemoteAvatarEquipment.ApplyNames(clone, probeNames);
+            yield return new WaitForEndOfFrame();
+            var viaNames = RemoteAvatarEquipment.ActiveGovernedNodes(clone);
+
+            var channelMissing = viaTypes.Where(node => !viaNames.Contains(node)).ToList();
+            var channelExtra = viaNames.Where(node => !viaTypes.Contains(node)).ToList();
+            var channelIntact = channelMissing.Count == 0 && channelExtra.Count == 0;
 
             Log.LogInfo(
-                $"[sonde] aller-retour d'équipement : {names.Count} pièce(s) lue(s), " +
-                $"{sourceNodes.Count} nœud(s) actif(s) chez le joueur local contre {cloneNodes.Count} sur la copie");
+                $"[sonde] aller-retour d'équipement : {probeTypes.Length} pièce(s) passée(s) en noms -> " +
+                $"{probeNames.Count} nom(s), {viaTypes.Count} nœud(s) actif(s) par les types contre {viaNames.Count} " +
+                $"par les noms" +
+                (channelIntact
+                    ? " (mêmes nœuds)"
+                    : $" — {channelMissing.Count} manquant(s) [{string.Join(", ", channelMissing)}], " +
+                      $"{channelExtra.Count} en trop [{string.Join(", ", channelExtra)}]") +
+                $" -> verdict={channelIntact}");
+
+            // — 2. Le contrôle doit pouvoir échouer : les mêmes noms, tous corrompus, doivent donner
+            //     l'état sans équipement — sinon l'égalité ci-dessus est vraie par construction.
+            //     Les avertissements « nom de TechType inconnu » de cet appel sont **attendus** ici.
+            var corrupted = probeNames.Select(name => "X" + name).ToList();
+            RemoteAvatarEquipment.ApplyNames(clone, corrupted);
+            yield return new WaitForEndOfFrame();
+            var viaCorrupted = RemoteAvatarEquipment.ActiveGovernedNodes(clone);
+            var discriminates = !channelIntact
+                || viaCorrupted.Count != viaTypes.Count
+                || viaCorrupted.Any(node => !viaTypes.Contains(node));
+
             Log.LogInfo(
-                $"[sonde] aller-retour d'équipement : {missing.Count} nœud(s) manquant(s)" +
-                (missing.Count == 0 ? string.Empty : $" [{string.Join(", ", missing)}]") +
-                $", {extra.Count} en trop" +
-                (extra.Count == 0 ? string.Empty : $" [{string.Join(", ", extra)}]") +
-                $" -> verdict={verdict}");
+                $"[sonde] aller-retour d'équipement : discrimination du contrôle — {corrupted.Count} nom(s) " +
+                $"corrompu(s) donnent {viaCorrupted.Count} nœud(s) actif(s) contre {viaTypes.Count} pour les noms " +
+                $"intacts -> verdict={discriminates} (un contrôle qui ne peut pas échouer ne prouve rien)");
+
+            // — 3. La lecture locale : la conversion en noms ne doit rien perdre, et un échec de lecture ne
+            //     doit pas passer pour un succès (une liste vide des deux côtés serait « égale »).
+            var readLossless = typesFailure == null && names.Count == types.Count;
+
+            Log.LogInfo(
+                $"[sonde] aller-retour d'équipement : lecture locale — {names.Count} nom(s) pour {types.Count} " +
+                $"TechType lu(s)" + (typesFailure == null ? string.Empty : $", lecture en échec ({typesFailure})") +
+                $" -> verdict={readLossless}");
+
+            var verdict = channelIntact && discriminates && readLossless;
+            Log.LogInfo($"[sonde] aller-retour d'équipement : verdict={verdict}");
 
             if (!verdict)
             {
-                // Ce n'est pas forcément une faute de notre part : si le jeu active un nœud pour une
-                // raison qui n'est pas l'équipement (ou l'inverse), l'écart le dit.
-                Log.LogWarning(
-                    "[sonde] aller-retour d'équipement : la copie ne reproduit pas exactement l'état du joueur local.");
+                Log.LogError(
+                    "[sonde] aller-retour d'équipement : le voyage en noms ne reproduit pas l'équipement appliqué en " +
+                    "types, ou le contrôle ne discrimine pas, ou la lecture locale a échoué — un avatar distant " +
+                    "porterait une tenue fausse.");
             }
 
             RemoteAvatarEquipment.Apply(clone, new TechType[0]);
@@ -547,6 +693,384 @@ namespace Coop.Client
 
             // Les nœuds gouvernés hors `male_geo` (l'objet tenu) ont leur propre relevé, plus haut.
             Log.LogInfo($"[sonde] tenue : règles appliquées sans exception sur {scenarios.Length} scénario(s).");
+        }
+
+        /// <summary>
+        /// Mesure la couleur de joueur sur la copie, et **prouve** que deux indices différents donnent
+        /// deux apparences différentes.
+        ///
+        /// Le sujet a été relevé avant d'écrire la moindre ligne de coloration : Subnautica n'a pas de
+        /// couleur de joueur (aucun champ ni propriété de couleur dans `Player`), c'est Nitrox qui
+        /// l'invente. C'est pourquoi « j'ai appelé un setter » ne doit jamais être confondu avec « la
+        /// copie a changé » : un nom de propriété de shader qui n'existerait pas laisserait le matériau
+        /// intact, et l'avatar distant resterait gris. D'où deux lectures indépendantes :
+        ///
+        /// - ce que les **matériaux** portent après application (`RemoteAvatarColor.Describe`) ;
+        /// - ce que le **rendu** montre (moyenne RVB des pixels du sujet, fond exclu).
+        ///
+        /// Le verdict porte sur le rendu quand il est mesurable, parce que c'est la seule des deux qui
+        /// dit ce qu'un joueur verrait ; il retombe sur les matériaux sinon, **en le disant** plutôt
+        /// qu'en faisant passer une mesure manquée pour un succès.
+        /// </summary>
+        private IEnumerator MeasureColorScenarios(GameObject clone, Camera probeCamera, RenderTexture renderTexture)
+        {
+            Log.LogInfo("[sonde] --- couleur : deux joueurs en scaphandre de base doivent se distinguer ---");
+
+            byte[] indices = { 0, 1 };
+            var reports = new string[indices.Length];
+            var readBacks = new string[indices.Length];
+            var materialColors = new Color?[indices.Length];
+            var averages = new Color[indices.Length];
+            var coverages = new long[indices.Length];
+            var luminances = new float[indices.Length];
+
+            for (var i = 0; i < indices.Length; i++)
+            {
+                var index = indices[i];
+                reports[i] = RemoteAvatarColor.Apply(clone, index);
+
+                // Une frame au moins : changer la couleur d'un matériau ne prend effet qu'au rendu qui
+                // suit, et mesurer avant reviendrait à mesurer la couleur précédente.
+                yield return new WaitForEndOfFrame();
+
+                readBacks[i] = RemoteAvatarColor.Describe(clone);
+                materialColors[i] = RemoteAvatarColor.AverageTint(clone);
+
+                probeCamera.Render();
+                coverages[i] = ReadSubjectColor(renderTexture, out averages[i], out luminances[i], out var texture);
+
+                Log.LogInfo($"[sonde] couleur {index} : {reports[i]}");
+                Log.LogInfo($"[sonde] couleur {index} : matériaux relus -> {readBacks[i]}");
+                Log.LogInfo(
+                    $"[sonde] couleur {index} : rendu isolé {coverages[i]} px, moyenne RVB du sujet=" +
+                    $"({averages[i].r * 255f:F0}, {averages[i].g * 255f:F0}, {averages[i].b * 255f:F0}), " +
+                    $"luminance={luminances[i]:F0}/255");
+
+                if (texture != null)
+                {
+                    var path = ColorProofPath(index);
+                    File.WriteAllBytes(path, texture.EncodeToPNG());
+                    Log.LogInfo($"[sonde] couleur {index} : image écrite -> {path}");
+                    Destroy(texture);
+                }
+            }
+
+            var pixelDelta = ComponentDelta(averages[0], averages[1]);
+            var hueDelta = HueDelta(averages[0], averages[1]);
+            var materialDelta = materialColors[0].HasValue && materialColors[1].HasValue
+                ? ComponentDelta(materialColors[0].Value, materialColors[1].Value)
+                : -1;
+            var rendered = coverages[0] > 0 && coverages[1] > 0;
+
+            // Deux mesures, parce qu'une seule ne suffit pas : sur les moyennes brutes, un sujet
+            // sombre écrase l'écart de teinte jusqu'à le rendre invisible (voir `HueDelta`).
+            var verdict = rendered
+                ? pixelDelta >= ColorDifferenceThreshold || hueDelta >= ColorDifferenceThreshold
+                : materialDelta >= ColorDifferenceThreshold;
+
+            Log.LogInfo(
+                $"[sonde] couleur : écart maximal entre l'indice 0 et l'indice 1 = {pixelDelta}/255 sur les " +
+                $"moyennes RVB du rendu, {hueDelta}/255 de teinte à luminance égale" +
+                (materialDelta >= 0 ? $", {materialDelta}/255 sur les matériaux" : ", matériaux illisibles") +
+                $" (seuil {ColorDifferenceThreshold}) -> verdict={verdict}");
+
+            if (!rendered)
+            {
+                Log.LogWarning(
+                    "[sonde] couleur : au moins un des deux rendus ne produit aucun pixel — le verdict porte " +
+                    "donc sur les matériaux, pas sur ce qu'un joueur verrait.");
+            }
+
+            if (!verdict)
+            {
+                Log.LogError(
+                    "[sonde] couleur : les indices 0 et 1 donnent la même apparence — deux joueurs en " +
+                    "scaphandre de base resteraient indiscernables.");
+            }
+
+            // L'avatar revient à un état défini (indice 0) : la dernière couleur mesurée ne doit pas
+            // rester affichée comme si le réseau l'avait choisie.
+            RemoteAvatarColor.Apply(clone, 0);
+            yield return new WaitForEndOfFrame();
+        }
+
+        /// <summary>
+        /// Écart maximal (0-255) entre deux couleurs, composante par composante.
+        ///
+        /// Pourquoi un maximum et pas une moyenne : la palette est faite de teintes franches, et c'est
+        /// la composante la plus éloignée qui dit si l'œil verra la différence. Une moyenne diluerait
+        /// par exemple un rouge (255, 82, 82) et un rose (255, 64, 129) en un écart moyen modeste alors
+        /// que les deux tons se distinguent nettement.
+        /// </summary>
+        private static int ComponentDelta(Color a, Color b) =>
+            Mathf.Max(
+                Mathf.Abs(Mathf.RoundToInt(a.r * 255f) - Mathf.RoundToInt(b.r * 255f)),
+                Mathf.Max(
+                    Mathf.Abs(Mathf.RoundToInt(a.g * 255f) - Mathf.RoundToInt(b.g * 255f)),
+                    Mathf.Abs(Mathf.RoundToInt(a.b * 255f) - Mathf.RoundToInt(b.b * 255f))));
+
+        /// <summary>
+        /// Écart maximal (0-255) entre deux couleurs **ramenées à la même luminance** : la teinte
+        /// seule, débarrassée de l'exposition du rendu.
+        ///
+        /// Pourquoi cette seconde mesure existe : la sonde rend la copie dans l'éclairage du monde, et
+        /// le relevé du 2026-10-17 mesurait un sujet à `14/255` de luminance. Sur un sujet aussi sombre,
+        /// la teinte est **multipliée** par l'éclairage : le rouge `(255,82,82)` et l'orange
+        /// `(255,152,0)` de la palette ne se séparent plus que de `4,5/255` en moyenne brute, alors
+        /// qu'à luminance égale ils se séparent de `23/255` — et, sur les mêmes pixels, 15,2 % d'entre
+        /// eux (1 704 sur 11 188) changent de plus de `8/255`, jusqu'à `32/255`. Juger sur les moyennes
+        /// brutes seules conclurait « même apparence » sur deux teintes que l'œil distingue.
+        ///
+        /// Elle reste falsifiable : si la propriété de couleur n'existait pas sur le shader, les deux
+        /// rendus seraient identiques et cet écart vaudrait `0`.
+        /// </summary>
+        private static int HueDelta(Color a, Color b) => ComponentDelta(NormalizeHue(a), NormalizeHue(b));
+
+        /// <summary>
+        /// Ramène une couleur à une luminance unité : garde les rapports entre canaux (la teinte),
+        /// jette le niveau (l'exposition). Une couleur éteinte n'a pas de teinte : elle est rendue telle
+        /// quelle, sans division par zéro.
+        /// </summary>
+        private static Color NormalizeHue(Color color)
+        {
+            var total = color.r + color.g + color.b;
+            if (total <= 0f)
+            {
+                return color;
+            }
+
+            return new Color(color.r / total, color.g / total, color.b / total, 1f);
+        }
+
+        /// <summary>
+        /// Verdict de visibilité, assemblé à partir des **deux** mesures — parce qu'aucune des deux ne
+        /// suffit, et que les confondre a déjà produit un faux échec.
+        ///
+        /// Le rendu isolé fait autorité : la copie seule, sur fond magenta, par notre propre caméra. Il ne
+        /// dépend ni de l'endroit où le joueur regarde, ni du bruit de la scène. La mesure par différence
+        /// d'images, elle, dit ce que la copie change **à l'écran du joueur** quand elle est concluante,
+        /// et se tait quand le bruit monte.
+        ///
+        /// Mesuré au run du 2026-10-17 : la sonde concluait « la copie ne change pas assez de pixels pour
+        /// être considérée comme rendue » alors que son propre rendu isolé, 17 ms plus tard, montrait la
+        /// copie dessinée (`11742/262144 px`, 4,5 %). Le faux échec venait de la mesure de scène seule, qui
+        /// n'avait pas le droit de conclure cela.
+        /// </summary>
+        private void LogVisibilityVerdict()
+        {
+            if (!_isolatedMeasured)
+            {
+                Log.LogError(
+                    "[sonde] RÉSULTAT ÉCHEC : aucune mesure de rendu isolé — la visibilité de la copie reste " +
+                    "NON PROUVÉE (le rendu isolé n'a pas pu être fait).");
+                return;
+            }
+
+            if (_isolatedCoverage <= 0)
+            {
+                var frameDifference = _frameDifferenceRenders
+                    ? $"la mesure par différence d'images donnait, elle, un signal de {_frameDifferenceSignal:F0} px " +
+                      $"(bruit médian {_frameDifferenceNoise:F0} px) : les deux mesures se CONTREDISENT"
+                    : $"la mesure par différence d'images ne la voyait pas non plus (signal {_frameDifferenceSignal:F0} px, " +
+                      $"bruit médian {_frameDifferenceNoise:F0} px)";
+
+                Log.LogError(
+                    $"[sonde] RÉSULTAT ÉCHEC : le rendu isolé ne montre aucun pixel de la copie (0/{_isolatedPixels}) et " +
+                    $"{frameDifference} — la copie existe, mais rien ne s'affiche dans un rendu qui ne dépend que d'elle.");
+                return;
+            }
+
+            var coveragePercent = _isolatedCoverage * 100.0 / _isolatedPixels;
+            var corroboration = _frameDifferenceRenders
+                ? $"corrobore (signal {_frameDifferenceSignal:F0} px pour un seuil de {_frameDifferenceThreshold:F0} px)"
+                : $"reste muette, bruit médian={_frameDifferenceNoise:F0} px contre un signal de {_frameDifferenceSignal:F0} px " +
+                  $"(seuil {_frameDifferenceThreshold:F0} px) — muette, pas contradictoire";
+
+            Log.LogInfo(
+                $"[sonde] verdict de rendu : la copie EST dessinée — rendu isolé {_isolatedCoverage}/{_isolatedPixels} px " +
+                $"({coveragePercent:F1} %), mesuré seule sur fond magenta par notre caméra. Mesure par différence d'images : " +
+                $"{corroboration}.");
+        }
+
+        /// <summary>
+        /// Preuve à **deux corps** : deux avatars côte à côte, teintés par deux entrées différentes de la
+        /// palette, mesurés dans **une seule image**.
+        ///
+        /// Ce que la phase de couleur seule ne pouvait pas dire : elle mesure la même copie avec deux
+        /// indices, donc elle prouve qu'une teinte change — pas que **deux joueurs se distinguent côte à
+        /// côte**, qui est la seule question que se pose un joueur devant l'écran. Ici les deux corps sont
+        /// dans le même rendu, sur le même fond magenta, et chacun est mesuré dans **sa** région de l'image.
+        ///
+        /// Si un des deux corps n'est pas mesurable, le verdict est faux et il le dit : une preuve qui
+        /// suppose visible ce qu'elle n'a pas compté ne prouve rien.
+        /// </summary>
+        private IEnumerator MeasureTwoColorProof(GameObject clone, Camera probeCamera, RenderTexture renderTexture)
+        {
+            var probeLayer = FindProbeLayer();
+            if (probeLayer < 0)
+            {
+                Log.LogError("[sonde] deux avatars : aucun calque libre pour le rendu isolé — preuve impossible.");
+                yield break;
+            }
+
+            // Même fabrique que la copie mesurée plus haut : deux chemins de création divergeraient, et une
+            // preuve sur un corps qui ne serait pas celui des avatars réels ne prouverait rien du jeu.
+            var playerRoot = Player.mainObject != null ? Player.mainObject.transform : clone.transform;
+            var position = clone.transform.position + probeCamera.transform.right * TwoBodiesSpacingMeters;
+            var second = RemoteAvatarFactory.TryCreate(playerRoot, position, playerRoot, out var failure);
+
+            if (second == null)
+            {
+                Log.LogError(
+                    $"[sonde] deux avatars : le second corps n'a pas pu être créé ({failure}) — la distinction de " +
+                    "deux joueurs côte à côte reste NON PROUVÉE.");
+                yield break;
+            }
+
+            // Le calque de la sonde est le seul que sa caméra dessine ; sans ça, le second corps serait
+            // invisible dans l'image et la mesure le dirait pour la mauvaise raison.
+            foreach (var renderer in second.GetComponentsInChildren<Renderer>(true))
+            {
+                renderer.gameObject.layer = probeLayer;
+            }
+
+            RemoteAvatarColor.Apply(clone, 0);
+            RemoteAvatarColor.Apply(second, 1);
+
+            // Deux frames : changer la couleur d'un matériau ne prend effet qu'au rendu qui suit.
+            yield return new WaitForEndOfFrame();
+            yield return new WaitForEndOfFrame();
+
+            probeCamera.Render();
+            var image = ReadImage(renderTexture);
+
+            var countA = ReadRegionColor(image, probeCamera, clone, out var colorA);
+            var countB = ReadRegionColor(image, probeCamera, second, out var colorB);
+            var delta = countA > 0 && countB > 0 ? ComponentDelta(colorA, colorB) : -1;
+            var verdict = countA > 0 && countB > 0 && delta >= ColorDifferenceThreshold;
+
+            Log.LogInfo(
+                $"[sonde] couleur : deux avatars dans la même image — corps A (indice 0)={countA} px " +
+                $"moyenne=({colorA.r * 255f:F0}, {colorA.g * 255f:F0}, {colorA.b * 255f:F0}), " +
+                $"corps B (indice 1)={countB} px moyenne=({colorB.r * 255f:F0}, {colorB.g * 255f:F0}, {colorB.b * 255f:F0}), " +
+                $"écart={delta}/255 (seuil {ColorDifferenceThreshold}) -> verdict={verdict}");
+
+            if (!verdict)
+            {
+                Log.LogError(
+                    "[sonde] deux avatars : un des deux corps n'est pas mesurable dans l'image, ou les deux teintes " +
+                    "ne se distinguent pas — deux joueurs côte à côte resteraient indiscernables.");
+            }
+
+            if (image != null)
+            {
+                var path = TwoColorProofPath();
+                File.WriteAllBytes(path, image.EncodeToPNG());
+                Log.LogInfo($"[sonde] deux avatars : image écrite -> {path}");
+                Destroy(image);
+            }
+
+            // Le second corps n'est là que pour la mesure : le laisser en place ferait croire, à la phase
+            // suivante, à un joueur distant qui n'existe pas.
+            Destroy(second);
+        }
+
+        /// <summary>Lit un rendu hors écran dans une image, pour la mesurer **et** la garder.</summary>
+        private static Texture2D ReadImage(RenderTexture renderTexture)
+        {
+            var previous = RenderTexture.active;
+            RenderTexture.active = renderTexture;
+
+            var image = new Texture2D(renderTexture.width, renderTexture.height, TextureFormat.RGBA32, false);
+            image.ReadPixels(new Rect(0, 0, renderTexture.width, renderTexture.height), 0, 0);
+            image.Apply();
+
+            RenderTexture.active = previous;
+            return image;
+        }
+
+        /// <summary>
+        /// Couleur moyenne d'**un** corps dans sa région de l'image, et nombre de pixels ainsi mesurés.
+        ///
+        /// La région est le carré de ±<see cref="BodyRegionHalfSizePixels"/> pixels autour de la projection
+        /// du torse (`-0,9 m` sous l'origine de la copie : c'est le cadrage déjà utilisé par le rendu isolé,
+        /// l'origine étant en haut du corps). Compter les pixels non-fond **de cette région** — et non de
+        /// toute l'image — est ce qui permet de dire « celui-là est rouge, celui-là est orange » dans une
+        /// même image.
+        ///
+        /// Composantes en 0–1, comme celles d'un matériau : les pixels lus sont en 0–255, l'appelant les
+        /// repasse en 0–255 pour l'affichage et pour les écarts.
+        /// </summary>
+        private static long ReadRegionColor(Texture2D image, Camera camera, GameObject body, out Color average)
+        {
+            average = Color.clear;
+
+            if (image == null || camera == null || body == null)
+            {
+                return 0;
+            }
+
+            var torso = body.transform.position - Vector3.up * 0.9f;
+            var viewport = camera.WorldToViewportPoint(torso);
+            if (viewport.z <= 0f)
+            {
+                // Derrière la caméra : rien à mesurer, et surtout pas « mesuré noir ».
+                return 0;
+            }
+
+            var centreX = (int)System.Math.Round(viewport.x * image.width);
+            var centreY = (int)System.Math.Round(viewport.y * image.height);
+            var pixels = image.GetPixels32();
+
+            long coverage = 0;
+            long red = 0;
+            long green = 0;
+            long blue = 0;
+
+            for (var y = centreY - BodyRegionHalfSizePixels; y <= centreY + BodyRegionHalfSizePixels; y++)
+            {
+                if (y < 0 || y >= image.height)
+                {
+                    continue;
+                }
+
+                for (var x = centreX - BodyRegionHalfSizePixels; x <= centreX + BodyRegionHalfSizePixels; x++)
+                {
+                    if (x < 0 || x >= image.width)
+                    {
+                        continue;
+                    }
+
+                    var pixel = pixels[y * image.width + x];
+                    var difference =
+                        System.Math.Abs(pixel.r - 255) +
+                        System.Math.Abs(pixel.g - 0) +
+                        System.Math.Abs(pixel.b - 255);
+
+                    if (difference <= PixelDifferenceThreshold)
+                    {
+                        // Fond magenta : le compter reviendrait à mesurer le fond, pas le corps.
+                        continue;
+                    }
+
+                    coverage++;
+                    red += pixel.r;
+                    green += pixel.g;
+                    blue += pixel.b;
+                }
+            }
+
+            if (coverage == 0)
+            {
+                return 0;
+            }
+
+            average = new Color(
+                red / (255f * coverage),
+                green / (255f * coverage),
+                blue / (255f * coverage),
+                1f);
+            return coverage;
         }
 
         /// <summary>Rend lisible un état de nœud à trois valeurs, en gardant `introuvable` distinct.</summary>
@@ -1101,6 +1625,72 @@ namespace Coop.Client
             return coverage;
         }
 
+        /// <summary>
+        /// Lit le rendu hors écran et donne la **couleur moyenne du sujet**, pas seulement sa luminance :
+        /// c'est la mesure qui distingue « la copie est teintée » de « la copie est là ». Même lecture et
+        /// même seuil de fond magenta que <see cref="ReadCoverage"/> : les pixels de fond sont donc
+        /// exclus du calcul, sinon la teinte mesurée serait celle du fond.
+        /// </summary>
+        private static long ReadSubjectColor(
+            RenderTexture renderTexture,
+            out Color average,
+            out float averageLuminance,
+            out Texture2D texture)
+        {
+            var previous = RenderTexture.active;
+            RenderTexture.active = renderTexture;
+
+            texture = new Texture2D(renderTexture.width, renderTexture.height, TextureFormat.RGBA32, false);
+            texture.ReadPixels(new Rect(0, 0, renderTexture.width, renderTexture.height), 0, 0);
+            texture.Apply();
+
+            RenderTexture.active = previous;
+
+            var pixels = texture.GetPixels32();
+            long coverage = 0;
+            long red = 0;
+            long green = 0;
+            long blue = 0;
+
+            for (var i = 0; i < pixels.Length; i++)
+            {
+                var difference =
+                    System.Math.Abs(pixels[i].r - 255) +
+                    System.Math.Abs(pixels[i].g - 0) +
+                    System.Math.Abs(pixels[i].b - 255);
+
+                if (difference <= PixelDifferenceThreshold)
+                {
+                    continue;
+                }
+
+                coverage++;
+                red += pixels[i].r;
+                green += pixels[i].g;
+                blue += pixels[i].b;
+            }
+
+            if (coverage == 0)
+            {
+                average = Color.clear;
+                averageLuminance = 0f;
+                return 0;
+            }
+
+            // Composantes en **0–1**, comme celles que rend un matériau (`Color` d'Unity) : les pixels
+            // lus sont en 0–255, et les garder tels quels faisait afficher « moyenne RVB =(7793, …) »
+            // — une valeur qui n'existe pas — puis un écart de « 1157/255 ». Diviser ici met les deux
+            // sources de couleur (rendu et matériaux) dans la même unité, et rend le seuil de 8/255
+            // comparable entre les deux.
+            average = new Color(
+                red / (255f * coverage),
+                green / (255f * coverage),
+                blue / (255f * coverage),
+                1f);
+            averageLuminance = (red + green + blue) / (3f * coverage);
+            return coverage;
+        }
+
         private static Texture2D Capture() => ScreenCapture.CaptureScreenshotAsTexture();
 
         /// <summary>Médiane : robuste à un échantillon aberrant, contrairement à la moyenne et au maximum.</summary>
@@ -1285,18 +1875,38 @@ namespace Coop.Client
         }
 
         /// <summary>
-        /// La capture va dans le dossier de logs, à côté du log de l'instance : c'est là que tout ce
-        /// qui concerne une exécution est déjà rangé, et c'est un dossier qu'on sait retrouver.
+        /// Chemin d'une image de preuve, dans le dossier de logs, à côté du log de l'instance : c'est là
+        /// que tout ce qui concerne une exécution est déjà rangé, et c'est un dossier qu'on sait retrouver.
+        ///
+        /// Le suffixe <c>COOP_LOG_SUFFIX</c> (vide en usage courant) est celui du **log de l'instance**,
+        /// cf. <c>InstanceLogFile</c> : deux clients lancés depuis le même dossier de jeu partagent ce
+        /// dossier, et ces images ont des noms fixes — le second écraserait les preuves du premier. Une
+        /// preuve qui s'écrase toute seule est une preuve qu'on ne peut pas comparer. Sans la variable, les
+        /// noms sont exactement ceux d'avant, donc un run à un seul client ne change pas.
         /// </summary>
-        private static string ScreenshotPath() =>
-            Path.GetFullPath(Path.Combine(Application.dataPath, "..", "BepInEx", "logs", "coop-avatar-proof.png"));
+        private static string ProofPath(string name)
+        {
+            var suffix = System.Environment.GetEnvironmentVariable("COOP_LOG_SUFFIX");
+            return Path.GetFullPath(
+                Path.Combine(Application.dataPath, "..", "BepInEx", "logs", $"{name}{suffix}.png"));
+        }
+
+        /// <summary>Capture d'écran du rendu du joueur, avec la copie dedans.</summary>
+        private static string ScreenshotPath() => ProofPath("coop-avatar-proof");
 
         /// <summary>Image de la copie seule, sur fond magenta, prise par notre propre caméra.</summary>
-        private static string IsolatedProofPath() =>
-            Path.GetFullPath(Path.Combine(Application.dataPath, "..", "BepInEx", "logs", "coop-avatar-isolated.png"));
+        private static string IsolatedProofPath() => ProofPath("coop-avatar-isolated");
+
+        /// <summary>Une image par couleur mesurée : deux teintes valent mieux qu'un chiffre seul.</summary>
+        private static string ColorProofPath(byte index) => ProofPath($"coop-avatar-couleur-{index}");
 
         /// <summary>Une image par tenue mesurée : quatre silhouettes différentes valent mieux qu'une.</summary>
-        private static string EquipmentProofPath(string key) =>
-            Path.GetFullPath(Path.Combine(Application.dataPath, "..", "BepInEx", "logs", $"coop-avatar-tenue-{key}.png"));
+        private static string EquipmentProofPath(string key) => ProofPath($"coop-avatar-tenue-{key}");
+
+        /// <summary>
+        /// Deux avatars de deux couleurs, dans **une** image : la preuve qu'un joueur peut les distinguer
+        /// côte à côte, là où une image par couleur ne montre qu'une teinte à la fois.
+        /// </summary>
+        private static string TwoColorProofPath() => ProofPath("coop-avatar-couleurs-deux-corps");
     }
 }

@@ -34,6 +34,20 @@ namespace Coop.Shared
         private static bool IsMenuScene(string sceneName) =>
             sceneName == "XMenu" || sceneName == "MenuEnvironment" || sceneName == "StartScreen";
 
+        /// <summary>
+        /// Vrai une fois qu'une partie est **réellement** chargée : la scène active n'est plus une scène de
+        /// menu. C'est le seul signal fiable pour les sondes qui doivent agir sur le monde.
+        ///
+        /// Pourquoi pas `Player.main` ni `LargeWorldStreamer.main` : les deux existent déjà dans les scènes
+        /// de menu. Le premier run de l'étape K a fabriqué son Seamoth à `(2,08, -3,78, -0,69)` — la position
+        /// du joueur de menu — et l'a sauvegardé là, à 400 m de la capsule ; la mesure à deux clients a alors
+        /// dû rattacher le véhicule par proximité, ce qui prouvait exactement le contraire de l'étape. Ce
+        /// drapeau-ci est posé par la même boucle qui journalise `MONDE CHARGÉ`, donc après le changement de
+        /// scène (observation à 2 s près) : les sondes attendent celui-là, puis laissent le jeu placer le
+        /// joueur à sa position sauvegardée.
+        /// </summary>
+        public static bool WorldLoaded { get; private set; }
+
         private IEnumerator Start()
         {
             Log.LogInfo("[monde] attente du menu principal...");
@@ -97,6 +111,7 @@ namespace Coop.Shared
                 var scene = SceneManager.GetActiveScene();
                 if (!IsMenuScene(scene.name))
                 {
+                    WorldLoaded = true;
                     Log.LogInfo($"[monde] *** MONDE CHARGÉ : scene '{scene.name}' ***");
                     yield break;
                 }

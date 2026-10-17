@@ -23,9 +23,20 @@ namespace Coop.Shared
     /// </summary>
     internal sealed class InstanceLogFile : ILogListener, IDisposable
     {
-        /// <summary>Nom du fichier par rôle, sous <c>BepInEx/logs/</c>.</summary>
-        public static string PathFor(string role) =>
-            Path.Combine(Paths.BepInExRootPath, "logs", $"coop-{role}.log");
+        /// <summary>
+        /// Nom du fichier par rôle, sous <c>BepInEx/logs/</c>.
+        ///
+        /// Le rôle ne suffit plus dès qu'on lance **deux clients** depuis le même dossier de jeu : les deux
+        /// s'appellent « client » et le second réécrirait le journal du premier (c'est déjà la raison d'être
+        /// de ce listener, cf. plus haut). Un suffixe par processus, <c>COOP_LOG_SUFFIX=-2</c>, les sépare —
+        /// et l'usage courant garde son nom : sans variable d'environnement, c'est toujours
+        /// <c>coop-client.log</c>.
+        /// </summary>
+        public static string PathFor(string role)
+        {
+            var suffix = Environment.GetEnvironmentVariable("COOP_LOG_SUFFIX");
+            return Path.Combine(Paths.BepInExRootPath, "logs", $"coop-{role}{suffix}.log");
+        }
 
         private readonly object _gate = new object();
         private readonly StreamWriter _writer;

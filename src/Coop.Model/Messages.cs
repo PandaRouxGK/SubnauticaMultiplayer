@@ -38,12 +38,16 @@ namespace Coop.Model
         public string Reason;
         public long ServerTick;
 
+        /// <summary>Identifiant attribué à ce client par le serveur (valide si <see cref="Accepted"/> est vrai).</summary>
+        public ushort AssignedPlayerId;
+
         public void Write(PacketWriter writer)
         {
             writer.WriteByte((byte)MessageType.HandshakeResponse);
             writer.WriteBool(Accepted);
             writer.WriteString(Reason);
             writer.WriteLong(ServerTick);
+            writer.WriteUInt16(AssignedPlayerId);
         }
 
         public static HandshakeResponse Read(PacketReader reader) => new HandshakeResponse
@@ -51,6 +55,7 @@ namespace Coop.Model
             Accepted = reader.ReadBool(),
             Reason = reader.ReadString(),
             ServerTick = reader.ReadLong(),
+            AssignedPlayerId = reader.ReadUInt16(),
         };
     }
 
@@ -119,6 +124,657 @@ namespace Coop.Model
         {
             Reason = reader.ReadString(),
         };
+    }
+
+    /// <summary>
+    /// Présence d'un joueur (ReliableOrdered). Envoyé à tous quand un joueur rejoint, et envoyé au
+    /// nouvel arrivant pour chaque joueur déjà présent (y compris le personnage de l'instance serveur).
+    /// </summary>
+    public sealed class PlayerJoinedMessage
+    {
+        public ushort PlayerId;
+        public string Username;
+        public float X;
+        public float Y;
+        public float Z;
+        public float RotX;
+        public float RotY;
+        public float RotZ;
+        public float RotW;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteByte((byte)MessageType.PlayerJoined);
+            writer.WriteUInt16(PlayerId);
+            writer.WriteString(Username);
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteFloat(RotX);
+            writer.WriteFloat(RotY);
+            writer.WriteFloat(RotZ);
+            writer.WriteFloat(RotW);
+        }
+
+        public static PlayerJoinedMessage Read(PacketReader reader) => new PlayerJoinedMessage
+        {
+            PlayerId = reader.ReadUInt16(),
+            Username = reader.ReadString(),
+            X = reader.ReadFloat(),
+            Y = reader.ReadFloat(),
+            Z = reader.ReadFloat(),
+            RotX = reader.ReadFloat(),
+            RotY = reader.ReadFloat(),
+            RotZ = reader.ReadFloat(),
+            RotW = reader.ReadFloat(),
+        };
+    }
+
+    /// <summary>Départ d'un joueur (ReliableOrdered) : le client détruit l'avatar correspondant.</summary>
+    public sealed class PlayerLeftMessage
+    {
+        public ushort PlayerId;
+        public string Username;
+        public string Reason;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteByte((byte)MessageType.PlayerLeft);
+            writer.WriteUInt16(PlayerId);
+            writer.WriteString(Username);
+            writer.WriteString(Reason);
+        }
+
+        public static PlayerLeftMessage Read(PacketReader reader) => new PlayerLeftMessage
+        {
+            PlayerId = reader.ReadUInt16(),
+            Username = reader.ReadString(),
+            Reason = reader.ReadString(),
+        };
+    }
+
+    /// <summary>
+    /// État de position/orientation et paramètres d'animation envoyé par le client au serveur (Unreliable, 20 Hz).
+    /// <see cref="Sequence"/> permet au serveur d'ignorer les paquets arrivés dans le désordre.
+    /// </summary>
+    public sealed class PlayerPositionMessage
+    {
+        public uint Sequence;
+        public float X;
+        public float Y;
+        public float Z;
+        public float RotX;
+        public float RotY;
+        public float RotZ;
+        public float RotW;
+        public float MoveSpeedX;
+        public float MoveSpeedY;
+        public float MoveSpeedZ;
+        public float ViewPitch;
+        public bool IsUnderwater;
+        public bool OnSurface;
+        public PlayerActionFlags ActionFlags;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteByte((byte)MessageType.PlayerPosition);
+            writer.WriteInt(unchecked((int)Sequence));
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteFloat(RotX);
+            writer.WriteFloat(RotY);
+            writer.WriteFloat(RotZ);
+            writer.WriteFloat(RotW);
+            writer.WriteFloat(MoveSpeedX);
+            writer.WriteFloat(MoveSpeedY);
+            writer.WriteFloat(MoveSpeedZ);
+            writer.WriteFloat(ViewPitch);
+            writer.WriteBool(IsUnderwater);
+            writer.WriteBool(OnSurface);
+            writer.WriteByte((byte)ActionFlags);
+        }
+
+        public static PlayerPositionMessage Read(PacketReader reader)
+        {
+            var msg = new PlayerPositionMessage
+            {
+                Sequence = unchecked((uint)reader.ReadInt()),
+                X = reader.ReadFloat(),
+                Y = reader.ReadFloat(),
+                Z = reader.ReadFloat(),
+                RotX = reader.ReadFloat(),
+                RotY = reader.ReadFloat(),
+                RotZ = reader.ReadFloat(),
+                RotW = reader.ReadFloat(),
+                MoveSpeedX = reader.ReadFloat(),
+                MoveSpeedY = reader.ReadFloat(),
+                MoveSpeedZ = reader.ReadFloat(),
+                ViewPitch = reader.ReadFloat(),
+                IsUnderwater = reader.ReadBool(),
+                OnSurface = reader.ReadBool(),
+                ActionFlags = (PlayerActionFlags)reader.ReadByte(),
+            };
+            EnsureFinite(
+                msg.X, msg.Y, msg.Z,
+                msg.RotX, msg.RotY, msg.RotZ, msg.RotW,
+                msg.MoveSpeedX, msg.MoveSpeedY, msg.MoveSpeedZ, msg.ViewPitch);
+            return msg;
+        }
+
+        internal static void EnsureFinite(
+            float x, float y, float z,
+            float rx, float ry, float rz, float rw,
+            float vx = 0f, float vy = 0f, float vz = 0f, float pitch = 0f)
+        {
+            if (IsInvalid(x) || IsInvalid(y) || IsInvalid(z) ||
+                IsInvalid(rx) || IsInvalid(ry) || IsInvalid(rz) || IsInvalid(rw) ||
+                IsInvalid(vx) || IsInvalid(vy) || IsInvalid(vz) || IsInvalid(pitch))
+            {
+                throw new ProtocolException("coordonnées, quaternion ou paramètres d'animation non finis (NaN/Infinity)");
+            }
+        }
+
+        private static bool IsInvalid(float v) => float.IsNaN(v) || float.IsInfinity(v);
+    }
+
+    /// <summary>État d'un joueur dans un <see cref="PlayersSnapshotMessage"/>.</summary>
+    public struct PlayerStateEntry
+    {
+        public ushort PlayerId;
+        public float X;
+        public float Y;
+        public float Z;
+        public float RotX;
+        public float RotY;
+        public float RotZ;
+        public float RotW;
+        public float MoveSpeedX;
+        public float MoveSpeedY;
+        public float MoveSpeedZ;
+        public float ViewPitch;
+        public bool IsUnderwater;
+        public bool OnSurface;
+        public PlayerActionFlags ActionFlags;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteUInt16(PlayerId);
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteFloat(RotX);
+            writer.WriteFloat(RotY);
+            writer.WriteFloat(RotZ);
+            writer.WriteFloat(RotW);
+            writer.WriteFloat(MoveSpeedX);
+            writer.WriteFloat(MoveSpeedY);
+            writer.WriteFloat(MoveSpeedZ);
+            writer.WriteFloat(ViewPitch);
+            writer.WriteBool(IsUnderwater);
+            writer.WriteBool(OnSurface);
+            writer.WriteByte((byte)ActionFlags);
+        }
+
+        public static PlayerStateEntry Read(PacketReader reader)
+        {
+            var entry = new PlayerStateEntry
+            {
+                PlayerId = reader.ReadUInt16(),
+                X = reader.ReadFloat(),
+                Y = reader.ReadFloat(),
+                Z = reader.ReadFloat(),
+                RotX = reader.ReadFloat(),
+                RotY = reader.ReadFloat(),
+                RotZ = reader.ReadFloat(),
+                RotW = reader.ReadFloat(),
+                MoveSpeedX = reader.ReadFloat(),
+                MoveSpeedY = reader.ReadFloat(),
+                MoveSpeedZ = reader.ReadFloat(),
+                ViewPitch = reader.ReadFloat(),
+                IsUnderwater = reader.ReadBool(),
+                OnSurface = reader.ReadBool(),
+                ActionFlags = (PlayerActionFlags)reader.ReadByte(),
+            };
+            PlayerPositionMessage.EnsureFinite(
+                entry.X, entry.Y, entry.Z,
+                entry.RotX, entry.RotY, entry.RotZ, entry.RotW,
+                entry.MoveSpeedX, entry.MoveSpeedY, entry.MoveSpeedZ, entry.ViewPitch);
+            return entry;
+        }
+    }
+
+    /// <summary>
+    /// Photographie diffusée par le serveur à chaque tick (20 Hz, Unreliable) contenant les positions
+    /// connues de tous les joueurs présents dans le monde.
+    /// </summary>
+    public sealed class PlayersSnapshotMessage
+    {
+        public long ServerTick;
+        public PlayerStateEntry[] Players;
+
+        public void Write(PacketWriter writer)
+        {
+            var list = Players ?? Array.Empty<PlayerStateEntry>();
+            if (list.Length > byte.MaxValue)
+            {
+                throw new ProtocolException($"trop de joueurs dans le snapshot ({list.Length})");
+            }
+
+            writer.WriteByte((byte)MessageType.PlayersSnapshot);
+            writer.WriteLong(ServerTick);
+            writer.WriteByte((byte)list.Length);
+            for (var i = 0; i < list.Length; i++)
+            {
+                list[i].Write(writer);
+            }
+        }
+
+        public static PlayersSnapshotMessage Read(PacketReader reader)
+        {
+            var tick = reader.ReadLong();
+            var count = reader.ReadByte();
+            var players = count == 0 ? Array.Empty<PlayerStateEntry>() : new PlayerStateEntry[count];
+            for (var i = 0; i < count; i++)
+            {
+                players[i] = PlayerStateEntry.Read(reader);
+            }
+
+            return new PlayersSnapshotMessage
+            {
+                ServerTick = tick,
+                Players = players,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Équipement complet porté par un joueur (ReliableOrdered).
+    ///
+    /// Émis par un client vers le serveur dès que son équipement change (et une première fois à
+    /// l'entrée dans le monde), puis rediffusé par le serveur à tous les autres clients (avec
+    /// <see cref="PlayerId"/> forcé à l'identifiant du joueur source). Également envoyé au nouvel
+    /// arrivant au handshake pour chaque joueur déjà présent.
+    /// </summary>
+    public sealed class PlayerEquipmentMessage
+    {
+        public ushort PlayerId;
+        public string[] TechTypeNames;
+
+        public void Write(PacketWriter writer)
+        {
+            var list = TechTypeNames ?? Array.Empty<string>();
+            if (list.Length > Protocol.MaxEquipmentSlots)
+            {
+                throw new ProtocolException($"trop de pièces d'équipement ({list.Length} > {Protocol.MaxEquipmentSlots})");
+            }
+
+            writer.WriteByte((byte)MessageType.PlayerEquipment);
+            writer.WriteUInt16(PlayerId);
+            writer.WriteByte((byte)list.Length);
+            for (var i = 0; i < list.Length; i++)
+            {
+                var name = list[i] ?? string.Empty;
+                if (name.Length > Protocol.MaxTechTypeNameLength)
+                {
+                    throw new ProtocolException($"nom de TechType trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+                }
+
+                writer.WriteString(name);
+            }
+        }
+
+        public static PlayerEquipmentMessage Read(PacketReader reader)
+        {
+            var playerId = reader.ReadUInt16();
+            var count = reader.ReadByte();
+            if (count > Protocol.MaxEquipmentSlots)
+            {
+                throw new ProtocolException($"trop de pièces d'équipement reçues ({count} > {Protocol.MaxEquipmentSlots})");
+            }
+
+            var names = count == 0 ? Array.Empty<string>() : new string[count];
+            for (var i = 0; i < count; i++)
+            {
+                var name = reader.ReadString();
+                if (name.Length > Protocol.MaxTechTypeNameLength)
+                {
+                    throw new ProtocolException($"nom de TechType reçu trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+                }
+
+                names[i] = name;
+            }
+
+            return new PlayerEquipmentMessage
+            {
+                PlayerId = playerId,
+                TechTypeNames = names,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Objet tenu par un joueur (ReliableOrdered) : l'outil en main, et les paramètres d'animation que
+    /// le jeu a lui-même posés pour cet outil.
+    ///
+    /// Émis par un client quand son objet tenu change (et une première fois à l'entrée dans le monde),
+    /// puis rediffusé par le serveur aux autres clients avec <see cref="PlayerId"/> forcé à l'émetteur.
+    /// Envoyé aussi au nouvel arrivant au handshake pour chaque joueur déjà présent.
+    /// </summary>
+    public sealed class PlayerHeldItemMessage
+    {
+        public ushort PlayerId;
+
+        /// <summary>Nom technique du <c>TechType</c> tenu ; chaîne vide si le joueur n'a rien en main.</summary>
+        public string TechTypeName;
+
+        /// <summary>
+        /// Paramètres d'animation `holding_*` actifs chez l'émetteur, lus **sur son propre `Animator`**
+        /// plutôt que re-dérivés : c'est le jeu qui les a calculés, et il n'y a donc rien à deviner.
+        /// </summary>
+        public string[] HoldingParams;
+
+        public void Write(PacketWriter writer)
+        {
+            var paramsList = HoldingParams ?? Array.Empty<string>();
+            if (paramsList.Length > Protocol.MaxActionParams)
+            {
+                throw new ProtocolException($"trop de paramètres d'action ({paramsList.Length} > {Protocol.MaxActionParams})");
+            }
+
+            var name = TechTypeName ?? string.Empty;
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException($"nom de TechType tenu trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
+            writer.WriteByte((byte)MessageType.PlayerHeldItem);
+            writer.WriteUInt16(PlayerId);
+            writer.WriteString(name);
+            writer.WriteByte((byte)paramsList.Length);
+            for (var i = 0; i < paramsList.Length; i++)
+            {
+                var param = paramsList[i] ?? string.Empty;
+                if (param.Length > Protocol.MaxTechTypeNameLength)
+                {
+                    throw new ProtocolException($"nom de paramètre d'animation trop long ({param.Length})");
+                }
+
+                writer.WriteString(param);
+            }
+        }
+
+        public static PlayerHeldItemMessage Read(PacketReader reader)
+        {
+            var playerId = reader.ReadUInt16();
+            var name = reader.ReadString();
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException($"nom de TechType tenu reçu trop long ({name.Length})");
+            }
+
+            var count = reader.ReadByte();
+            if (count > Protocol.MaxActionParams)
+            {
+                throw new ProtocolException($"trop de paramètres d'action reçus ({count} > {Protocol.MaxActionParams})");
+            }
+
+            var holding = count == 0 ? Array.Empty<string>() : new string[count];
+            for (var i = 0; i < count; i++)
+            {
+                var param = reader.ReadString();
+                if (param.Length > Protocol.MaxTechTypeNameLength)
+                {
+                    throw new ProtocolException($"nom de paramètre d'action reçu trop long ({param.Length})");
+                }
+
+                holding[i] = param;
+            }
+
+            return new PlayerHeldItemMessage
+            {
+                PlayerId = playerId,
+                TechTypeName = name,
+                HoldingParams = holding,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Couleur assignée à un joueur (ReliableOrdered), décidée **par le serveur** et par personne
+    /// d'autre.
+    ///
+    /// Pourquoi le serveur décide : c'est la seule façon de garantir que deux joueurs ne portent
+    /// jamais la même couleur. Un client qui choisirait la sienne pourrait tomber sur celle d'un
+    /// autre, et il faudrait alors arbitrer — c'est-à-dire refaire ce que fait déjà le serveur.
+    /// Même forme que l'équipement : le serveur force <see cref="PlayerId"/> et rediffuse.
+    /// </summary>
+    public sealed class PlayerColorMessage
+    {
+        public ushort PlayerId;
+
+        /// <summary>Indice dans la palette de <see cref="Protocol.PlayerColorAt"/>.</summary>
+        public byte ColorIndex;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteByte((byte)MessageType.PlayerColor);
+            writer.WriteUInt16(PlayerId);
+            writer.WriteByte(ColorIndex);
+        }
+
+        public static PlayerColorMessage Read(PacketReader reader) => new PlayerColorMessage
+        {
+            PlayerId = reader.ReadUInt16(),
+            ColorIndex = reader.ReadByte(),
+        };
+    }
+
+    /// <summary>État d'une créature dans un <see cref="CreatureSnapshotMessage"/>.</summary>
+    public struct CreatureStateEntry
+    {
+        /// <summary>
+        /// Clé de la créature, calculée de la même façon des deux côtés (voir
+        /// <c>Coop.Shared.CreatureIdentity</c>) : c'est elle qui permet au client de retrouver, dans
+        /// son propre monde, la créature que le serveur simule.
+        /// </summary>
+        public long Key;
+
+        public float X;
+        public float Y;
+        public float Z;
+        public float RotX;
+        public float RotY;
+        public float RotZ;
+        public float RotW;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteLong(Key);
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteFloat(RotX);
+            writer.WriteFloat(RotY);
+            writer.WriteFloat(RotZ);
+            writer.WriteFloat(RotW);
+        }
+
+        public static CreatureStateEntry Read(PacketReader reader)
+        {
+            var entry = new CreatureStateEntry
+            {
+                Key = reader.ReadLong(),
+                X = reader.ReadFloat(),
+                Y = reader.ReadFloat(),
+                Z = reader.ReadFloat(),
+                RotX = reader.ReadFloat(),
+                RotY = reader.ReadFloat(),
+                RotZ = reader.ReadFloat(),
+                RotW = reader.ReadFloat(),
+            };
+            PlayerPositionMessage.EnsureFinite(
+                entry.X, entry.Y, entry.Z,
+                entry.RotX, entry.RotY, entry.RotZ, entry.RotW);
+            return entry;
+        }
+    }
+
+    /// <summary>
+    /// Photographie des créatures que le serveur simule (Unreliable, tous les
+    /// <see cref="Protocol.CreatureStreamIntervalTicks"/> ticks).
+    ///
+    /// Le serveur ne dit pas « voici toutes les créatures du monde » mais « voici celles qui
+    /// comptent pour toi » : les entrées sont déjà filtrées par <see cref="Protocol.CreatureRelevancyRadiusMeters"/>.
+    /// </summary>
+    public sealed class CreatureSnapshotMessage
+    {
+        public long ServerTick;
+        public CreatureStateEntry[] Creatures;
+
+        public void Write(PacketWriter writer)
+        {
+            var list = Creatures ?? Array.Empty<CreatureStateEntry>();
+            if (list.Length > Protocol.MaxCreatureStates)
+            {
+                throw new ProtocolException($"trop de créatures dans le snapshot ({list.Length} > {Protocol.MaxCreatureStates})");
+            }
+
+            writer.WriteByte((byte)MessageType.CreatureSnapshot);
+            writer.WriteLong(ServerTick);
+            writer.WriteUInt16((ushort)list.Length);
+            for (var i = 0; i < list.Length; i++)
+            {
+                list[i].Write(writer);
+            }
+        }
+
+        public static CreatureSnapshotMessage Read(PacketReader reader)
+        {
+            var tick = reader.ReadLong();
+            var count = reader.ReadUInt16();
+            if (count > Protocol.MaxCreatureStates)
+            {
+                throw new ProtocolException($"trop de créatures reçues ({count} > {Protocol.MaxCreatureStates})");
+            }
+
+            var creatures = count == 0 ? Array.Empty<CreatureStateEntry>() : new CreatureStateEntry[count];
+            for (var i = 0; i < count; i++)
+            {
+                creatures[i] = CreatureStateEntry.Read(reader);
+            }
+
+            return new CreatureSnapshotMessage
+            {
+                ServerTick = tick,
+                Creatures = creatures,
+            };
+        }
+    }
+
+    /// <summary>
+    /// État d'un véhicule dans un <see cref="VehicleSnapshotMessage"/>.
+    ///
+    /// La clé est calculée des deux côtés par <c>Coop.Shared.VehicleIdentity</c> : sans elle, le client
+    /// ne pourrait pas dire « ce Seamoth-là, c'est celui que le serveur simule » — un véhicule n'a pas
+    /// d'identifiant réseau, et deux Seamoth de la même sauvegarde sont indiscernables par leur nom.
+    /// </summary>
+    public struct VehicleStateEntry
+    {
+        /// <summary>Clé stable du véhicule, calculée de la même façon des deux côtés.</summary>
+        public long Key;
+
+        public float X;
+        public float Y;
+        public float Z;
+        public float RotX;
+        public float RotY;
+        public float RotZ;
+        public float RotW;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteLong(Key);
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteFloat(RotX);
+            writer.WriteFloat(RotY);
+            writer.WriteFloat(RotZ);
+            writer.WriteFloat(RotW);
+        }
+
+        public static VehicleStateEntry Read(PacketReader reader)
+        {
+            var entry = new VehicleStateEntry
+            {
+                Key = reader.ReadLong(),
+                X = reader.ReadFloat(),
+                Y = reader.ReadFloat(),
+                Z = reader.ReadFloat(),
+                RotX = reader.ReadFloat(),
+                RotY = reader.ReadFloat(),
+                RotZ = reader.ReadFloat(),
+                RotW = reader.ReadFloat(),
+            };
+            PlayerPositionMessage.EnsureFinite(
+                entry.X, entry.Y, entry.Z,
+                entry.RotX, entry.RotY, entry.RotZ, entry.RotW);
+            return entry;
+        }
+    }
+
+    /// <summary>
+    /// Photographie des véhicules que le serveur considère pertinents pour un client (Unreliable, 10 Hz).
+    ///
+    /// Le serveur est la source de vérité : la position annoncée est celle de **son** véhicule, et le
+    /// client l'applique avec une interpolation entre deux annonces (voir <c>RemoteVehicleManager</c>).
+    /// Rien ne remonte du client : conduire un véhicule reste, pour l'instant, une simulation locale que
+    /// ce flux ne transporte pas (M4 ne couvre que la position).
+    /// </summary>
+    public sealed class VehicleSnapshotMessage
+    {
+        public long ServerTick;
+        public VehicleStateEntry[] Vehicles;
+
+        public void Write(PacketWriter writer)
+        {
+            var list = Vehicles ?? Array.Empty<VehicleStateEntry>();
+            if (list.Length > Protocol.MaxVehicleStates)
+            {
+                throw new ProtocolException($"trop de véhicules dans le snapshot ({list.Length} > {Protocol.MaxVehicleStates})");
+            }
+
+            writer.WriteByte((byte)MessageType.VehicleSnapshot);
+            writer.WriteLong(ServerTick);
+            writer.WriteByte((byte)list.Length);
+            for (var i = 0; i < list.Length; i++)
+            {
+                list[i].Write(writer);
+            }
+        }
+
+        public static VehicleSnapshotMessage Read(PacketReader reader)
+        {
+            var tick = reader.ReadLong();
+            var count = reader.ReadByte();
+            if (count > Protocol.MaxVehicleStates)
+            {
+                throw new ProtocolException($"trop de véhicules reçus ({count} > {Protocol.MaxVehicleStates})");
+            }
+
+            var vehicles = count == 0 ? Array.Empty<VehicleStateEntry>() : new VehicleStateEntry[count];
+            for (var i = 0; i < count; i++)
+            {
+                vehicles[i] = VehicleStateEntry.Read(reader);
+            }
+
+            return new VehicleSnapshotMessage
+            {
+                ServerTick = tick,
+                Vehicles = vehicles,
+            };
+        }
     }
 
     /// <summary>Regroupe l'écriture d'un message dans un tampon réutilisable.</summary>

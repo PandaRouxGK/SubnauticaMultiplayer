@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using BepInEx.Logging;
+using System.Linq;
 using Coop.Model;
+using Coop.Shared;
 using LiteNetLib;
 
 namespace Coop.Server
@@ -21,9 +23,70 @@ namespace Coop.Server
     {
         private sealed class ClientSession
         {
+            public ushort PlayerId;
             public string Username;
             public bool Accepted;
             public long PingsReceived;
+            public long PositionsReceived;
+            public long EquipmentsReceived;
+            public long HeldItemsReceived;
+
+            // Dernier équipement connu du joueur (noms de TechType).
+            public string[] Equipment;
+
+            // Dernier objet tenu connu du joueur : null = jamais annoncé, chaîne vide = rien en main.
+            public string HeldItemName;
+
+            // Paramètres d'animation `holding_*` que l'émetteur a annoncés comme actifs.
+            public string[] HoldingParams;
+
+            // Dernier état de position reçu du joueur (ou position de spawn initiale).
+            public uint LastPositionSequence;
+            public float X;
+            public float Y;
+            public float Z;
+            public float RotX;
+            public float RotY;
+            public float RotZ;
+            public float RotW = 1f;
+            public float MoveSpeedX;
+            public float MoveSpeedY;
+            public float MoveSpeedZ;
+            public float ViewPitch;
+            public bool IsUnderwater;
+            public bool OnSurface;
+
+            // Dernières actions instantanées reçues (PDA, outil, véhicule).
+            public PlayerActionFlags ActionFlags;
+
+            /// <summary>Couleur assignée à ce joueur par le serveur (indice dans la palette).</summary>
+            public byte ColorIndex;
+
+            // — Débit de créatures vers ce client, cumulé depuis le dernier rapport (5 s) ————
+            //
+            // Compté **au moment de l'envoi**, avec la taille réelle du paquet : c'est la seule façon de
+            // chiffrer ce que le relevancy et le plafond coûtent vraiment, plutôt que de multiplier des
+            // constantes. Remis à zéro après chaque rapport.
+            public long CreatureBytesSent;
+            public long CreatureStatesSent;
+            public long CreaturePacketsSent;
+
+            // — Débit de véhicules vers ce client, cumulé depuis le dernier rapport (5 s) ————
+            public long VehicleBytesSent;
+            public long VehicleStatesSent;
+            public long VehiclePacketsSent;
+
+            /// <summary>Instant du prochain rapport de véhicules **pour ce client** (même raison que les créatures).</summary>
+            public float NextVehicleReport;
+
+            /// <summary>
+            /// Instant du prochain rapport de créatures **pour ce client**.
+            ///
+            /// Le rapport était auparavant gardé par un unique compteur global : le premier client de la
+            /// boucle le faisait avancer, et le second ne recevait donc jamais son rapport. Avec un débit
+            /// à mesurer par client, ça ne pouvait plus durer.
+            /// </summary>
+            public float NextCreatureReport;
 
             /// <summary>Instant (ms) au-delà duquel un peer qui n'a pas fini son handshake est éjecté.</summary>
             public long HandshakeDeadline;
@@ -36,6 +99,182 @@ namespace Coop.Server
         private readonly string _modListHash;
         private readonly Dictionary<NetPeer, ClientSession> _sessions = new Dictionary<NetPeer, ClientSession>();
         private readonly PacketWriter _writer = new PacketWriter();
+
+        /// <summary>
+        /// Compteur réutilisé des clés de créatures, pour relever les clés **partagées par deux
+        /// créatures** côté serveur.
+        ///
+        /// Le client a le même compteur sur son propre registre ; les deux mesures sont nécessaires, parce
+        /// que les deux ensembles ne sont pas les mêmes (le serveur voit tout son monde, le client ne voit
+        /// que ses cellules chargées). Une clé partagée ici veut dire que l'identité n'est pas injective —
+        /// et c'est la seule hypothèse sur laquelle repose tout le suivi.
+        /// </summary>
+        private readonly Dictionary<long, int> _creatureKeyTally = new Dictionary<long, int>();
+
+        /// <summary>
+        /// Dernière position **envoyée** pour chaque clé de créature, pour mesurer le déplacement du serveur
+        /// entre deux diffusions.
+        ///
+        /// À quoi ça sert : le client mesure l'écart entre sa copie et la position annoncée, et ce chiffre
+        /// seul est ambigu — un serveur qui va vite ressemble à un client qui traîne (mesuré au run du
+        /// 2026-10-17 : `1.69m` en `0.10s`, soit 16,9 m/s pour un `Peeper` qui nage à 5). En relevant le
+        /// déplacement **côté serveur**, les deux nombres se comparent : si le serveur a lui-même bougé de
+        /// 1,6 m, l'écart du client ne dit rien contre la synchronisation.
+        /// </summary>
+        private readonly Dictionary<long, SentPosition> _lastSentPositions = new Dictionary<long, SentPosition>();
+
+        private struct SentPosition
+        {
+            public UnityEngine.Vector3 Position;
+            public float Realtime;
+        }
+
+        /// <summary>
+        /// Distance (m) en deçà de laquelle une créature sacrifiée au plafond n'est plus un compromis
+        /// acceptable : elle est **sous les yeux du joueur**. La mesure de référence (2026-10-17) : 19 à 20
+        /// créatures sacrifiées sur 83 candidates, la plus proche bien au-delà — le plafond mordait alors
+        /// le bout du rayon, ce qui est le comportement voulu.
+        /// </summary>
+        private const float CloseSacrificeMeters = 30f;
+
+        private int _closeSacrificeWarnings;
+
+        /// <summary>
+        /// Paquets de créatures par tick et par client, tel que le protocole le fixe — **surchargeable par
+        /// `COOP_CREATURE_CHUNKS`**.
+        ///
+        /// Pourquoi une surcharge pour une constante : la garde de sacrifice (« une créature non diffusée à
+        /// moins de `CloseSacrificeMeters` doit être signalée ») n'a jamais pu s'exercer, parce que dans nos
+        /// zones la plus proche sacrifiée était à 68–72 m. Or un contrôle qu'on n'a jamais vu broncher n'est
+        /// pas un contrôle : en abaissant le plafond le temps d'un run, l'avertissement **doit** sortir. Un
+        /// test qu'on ne peut pas déclencher ne prouve rien.
+        /// </summary>
+        private static readonly int CreatureChunksPerTick = ParseChunksOverride();
+
+        /// <summary>Vrai si le plafond de diffusion vient de la variable d'environnement et non du protocole.</summary>
+        private static readonly bool CreatureChunksOverridden =
+            CreatureChunksPerTick != Protocol.MaxCreatureChunksPerTick;
+
+        private static int ParseChunksOverride()
+        {
+            var raw = Environment.GetEnvironmentVariable("COOP_CREATURE_CHUNKS");
+            if (int.TryParse(raw, out var value) && value >= 1)
+            {
+                return value;
+            }
+
+            return Protocol.MaxCreatureChunksPerTick;
+        }
+
+        private ushort _nextPlayerId;
+        private long _snapshotsBroadcast;
+
+        /// <summary>
+        /// Nombre de messages dont le <c>PlayerId</c> annoncé ne correspondait pas à la session qui les a
+        /// envoyés — tous réécrits avec l'id de la session. Ce compteur existe pour que la règle
+        /// « le serveur force <c>PlayerId</c> » soit **mesurée** (une sonde envoie un id étranger) et non
+        /// seulement lue dans le code.
+        /// </summary>
+        public int ForgedPlayerIds { get; private set; }
+        private string[] _lastHostEquipment;
+        private string _lastHostEquipmentSignature;
+        private string _lastHostHeldItemSignature;
+
+        /// <summary>
+        /// Indice de couleur distribué au prochain client. Avance à chaque admission, donc deux
+        /// joueurs connectés ne peuvent pas recevoir le même tant qu'ils sont au plus
+        /// <see cref="Protocol.PlayerColorCount"/>. Au-delà, la palette tourne — c'est dit au §27.
+        /// </summary>
+        private byte _nextClientColorIndex;
+
+        /// <summary>
+        /// Couleur du personnage de l'instance serveur. Fixe : c'est le repère visuel stable quand
+        /// un client rejoint, et il faut de toute façon lui réserver un indice pour ne pas le
+        /// distribuer à un client.
+        /// </summary>
+        private const byte HostColorIndex = 0;
+
+        // — Créatures (M3) ————————————————————————————————————————————————————
+
+        /// <summary>
+        /// Cache des créatures du monde. `FindObjectsOfType` parcourt toute la scène : à 10 Hz ce
+        /// serait absurde, alors qu'une créature apparaît ou disparaît rarement. Le cache est
+        /// rafraîchi toutes les <see cref="CreatureCacheSeconds"/> et suffit largement pour un
+        /// relevancy à 120 m.
+        /// </summary>
+        private Creature[] _creatureCache;
+        private float _creatureCacheRealtime = float.NegativeInfinity;
+        private const float CreatureCacheSeconds = 2f;
+
+        private long _creatureSnapshotsBroadcast;
+        private long _creatureStatesBroadcast;
+
+        /// <summary>
+        /// Paquets de créatures refusés parce qu'ils dépassaient la taille acceptée par LiteNetLib.
+        ///
+        /// Ce compteur existe parce que ce cas est **invisible** autrement : LiteNetLib jette le
+        /// paquet en écrivant dans le journal Unity, pas dans le nôtre. Le premier envoi de créatures
+        /// est tombé pile dans ce trou.
+        /// </summary>
+        private long _oversizedCreaturePackets;
+        private string _lastCreatureIdentityReport;
+
+        /// <summary>Prochain instant (s) où un résumé des créatures doit être journalisé.</summary>
+        /// <summary>
+        /// Intervalle (s) du rapport de créatures, **par client** : c'est la fenêtre sur laquelle le débit
+        /// envoyé est cumulé puis remis à zéro. La même valeur sert de diviseur au débit, donc elle doit
+        /// rester la durée réellement écoulée — d'où une constante et non un littéral recopié.
+        /// </summary>
+        private const float CreatureReportSeconds = 5f;
+
+        /// <summary>
+        /// Prochain instant (s) du relevé de distance. Séparé du résumé d'envoi : sinon le premier
+        /// à écrire consommerait le créneau de l'autre, et l'un des deux disparaîtrait du journal.
+        /// </summary>
+        private float _nextCreatureDiagnostic;
+
+        /// <summary>
+        /// Intervalle (s) du relevé des véhicules, et prochain instant.
+        ///
+        /// Il existe pour **M4** : la première question d'un Seamoth autoritaire n'est pas « comment
+        /// l'écrire » mais « y a-t-il un véhicule à mesurer dans cette sauvegarde ». Un scan de scène est
+        /// trop lourd pour la boucle à 10 Hz : trente secondes suffisent, un véhicule ne se déplace pas
+        /// d'un monde à l'autre entre deux relevés.
+        /// </summary>
+        private const float VehicleReportSeconds = 30f;
+
+        private float _nextVehicleDiagnostic;
+
+        // — Véhicules (M4) ————————————————————————————————————————————————————————
+
+        /// <summary>
+        /// Cache des véhicules du monde, rafraîchi toutes les <see cref="VehicleCacheSeconds"/>.
+        /// `FindObjectsOfType<Vehicle>` parcourt la scène : à 10 Hz ce serait absurde, et un véhicule
+        /// apparaît ou disparaît rarement.
+        /// </summary>
+        private Vehicle[] _vehicleCache;
+        private float _vehicleCacheRealtime = float.NegativeInfinity;
+        private const float VehicleCacheSeconds = 2f;
+
+        /// <summary>Intervalle (s) du rapport de flux de véhicules, par client.</summary>
+        private const float VehicleStreamReportSeconds = 5f;
+
+        private long _vehicleSnapshotsBroadcast;
+        private long _vehicleStatesBroadcast;
+
+        /// <summary>Véhicules écartés faute de clé : une identité inventée vaudrait moins qu'un véhicule non diffusé.</summary>
+        private long _vehiclesWithoutKey;
+
+        /// <summary>Paquets de véhicules refusés pour dépassement de la limite non fiable (invisibles autrement).</summary>
+        private long _oversizedVehiclePackets;
+
+        private string _lastVehicleIdentityReport;
+
+        private readonly List<VehicleStateEntry> _vehicleBuffer = new List<VehicleStateEntry>();
+        private readonly List<KeyValuePair<float, int>> _vehicleCandidates = new List<KeyValuePair<float, int>>();
+
+        private readonly List<CreatureStateEntry> _creatureBuffer = new List<CreatureStateEntry>();
+        private readonly List<KeyValuePair<float, int>> _creatureCandidates = new List<KeyValuePair<float, int>>();
 
         public ServerNetwork(string gameVersion, string modListHash, ManualLogSource log)
         {
@@ -184,8 +423,32 @@ namespace Coop.Server
             var known = _sessions.TryGetValue(peer, out var session);
             _sessions.Remove(peer);
 
-            var who = known && session.Username != null ? session.Username : peer.ToString();
-            _log.LogInfo($"[net] '{who}' déconnecté (raison={info.Reason}, pings={session?.PingsReceived ?? 0})");
+            var who = known && session.Username != null ? $"{session.Username}#{session.PlayerId}" : peer.ToString();
+            _log.LogInfo(
+                $"[net] '{who}' déconnecté (raison={info.Reason}, pings={session?.PingsReceived ?? 0}, " +
+                $"positions={session?.PositionsReceived ?? 0}, objetsTenus={session?.HeldItemsReceived ?? 0})");
+
+            if (known && session.Accepted)
+            {
+                var leftMsg = new PlayerLeftMessage
+                {
+                    PlayerId = session.PlayerId,
+                    Username = session.Username,
+                    Reason = info.Reason.ToString(),
+                };
+
+                foreach (var pair in _sessions)
+                {
+                    if (!pair.Value.Accepted)
+                    {
+                        continue;
+                    }
+
+                    Send(pair.Key, leftMsg.Write, DeliveryMethod.ReliableOrdered);
+                }
+
+                _log.LogInfo($"[net] PlayerLeft diffusé pour '{session.Username}' (id={session.PlayerId})");
+            }
         }
 
         private void OnNetworkError(System.Net.IPEndPoint endPoint, System.Net.Sockets.SocketError error)
@@ -238,6 +501,18 @@ namespace Coop.Server
                     HandlePing(peer, session, PingMessage.Read(reader));
                     break;
 
+                case MessageType.PlayerPosition:
+                    HandlePlayerPosition(peer, session, PlayerPositionMessage.Read(reader));
+                    break;
+
+                case MessageType.PlayerEquipment:
+                    HandlePlayerEquipment(peer, session, PlayerEquipmentMessage.Read(reader));
+                    break;
+
+                case MessageType.PlayerHeldItem:
+                    HandleHeldItem(peer, session, PlayerHeldItemMessage.Read(reader));
+                    break;
+
                 default:
                     _log.LogWarning($"[net] message inattendu {type} de {peer} (handshake accepté={session.Accepted})");
                     break;
@@ -259,19 +534,210 @@ namespace Coop.Server
                 // On envoie le motif en fiable et on LAISSE le client fermer. Couper juste après
                 // l'envoi faisait perdre le motif (la coupure dépassait le message) : le client
                 // ne voyait plus qu'un « RemoteConnectionClose » sans explication.
-                Send(peer, w => new HandshakeResponse { Accepted = false, Reason = reason, ServerTick = ServerTickBehaviour.Ticks }.Write(w), DeliveryMethod.ReliableOrdered);
+                Send(peer, w => new HandshakeResponse
+                {
+                    Accepted = false,
+                    Reason = reason,
+                    ServerTick = ServerTickBehaviour.Ticks,
+                    AssignedPlayerId = 0,
+                }.Write(w), DeliveryMethod.ReliableOrdered);
                 session.HandshakeDeadline = ServerClock.Milliseconds + Protocol.HandshakeTimeoutSeconds * 1000L;
                 return;
             }
 
+            _nextPlayerId++;
+            if (_nextPlayerId == 0)
+            {
+                _nextPlayerId = 1;
+            }
+
+            session.PlayerId = _nextPlayerId;
             session.Username = request.Username;
             session.Accepted = true;
+            session.RotW = 1f;
+
+            // La couleur est décidée **ici**, une fois, et annoncée ensuite à tout le monde. L'hôte
+            // occupe l'indice 0 quand son personnage est dans le monde : on cherche donc sa
+            // présence avant de distribuer quoi que ce soit, et on réutilise la même référence plus
+            // bas plutôt que de refaire la recherche.
+            // **Sauf en serveur dédié** : l'admission est l'autre chemin qui fabriquait un avatar id=9999 —
+            // celui que le client reçoit juste après son handshake, avant tout snapshot. Le mesurer a montré
+            // que bloquer seulement la diffusion périodique laissait un « HoteServeur » apparaître 10 s plus
+            // tard : il venait d'ici.
+            var hostPlayer = CoopServerPlugin.Dedicated ? null : UnityEngine.Object.FindObjectOfType<Player>();
+            var hostInWorld = hostPlayer != null && hostPlayer.gameObject != null;
+            session.ColorIndex = AllocateColorIndex(hostInWorld);
+
+            Protocol.PlayerColorAt(session.ColorIndex, out var assignedR, out var assignedG, out var assignedB);
 
             _log.LogInfo(
-                $"[net] handshake ACCEPTÉ : '{request.Username}' (jeu={request.GameVersion}, modHash={request.ModListHash}) " +
+                $"[net] handshake ACCEPTÉ : '{request.Username}' (id={session.PlayerId}, jeu={request.GameVersion}, modHash={request.ModListHash}) " +
                 $"depuis {peer} — {AcceptedClients}/{Protocol.MaxClients} client(s)");
 
-            Send(peer, w => new HandshakeResponse { Accepted = true, Reason = string.Empty, ServerTick = ServerTickBehaviour.Ticks }.Write(w), DeliveryMethod.ReliableOrdered);
+            Send(peer, w => new HandshakeResponse
+            {
+                Accepted = true,
+                Reason = string.Empty,
+                ServerTick = ServerTickBehaviour.Ticks,
+                AssignedPlayerId = session.PlayerId,
+            }.Write(w), DeliveryMethod.ReliableOrdered);
+
+            _log.LogInfo(
+                $"[net] couleur assignée à '{session.Username}'#{session.PlayerId} : indice {session.ColorIndex} " +
+                $"= rgb({assignedR},{assignedG},{assignedB})");
+
+            // Sa propre couleur d'abord : un client qui ignore la sienne ne peut ni l'afficher, ni la
+            // signaler en cas de doute.
+            Send(peer, w => new PlayerColorMessage
+            {
+                PlayerId = session.PlayerId,
+                ColorIndex = session.ColorIndex,
+            }.Write(w), DeliveryMethod.ReliableOrdered);
+
+            // 1. Informer le nouvel arrivant de tous les joueurs déjà présents (ainsi que l'hôte id=9999 s'il est dans le monde).
+            if (hostInWorld)
+            {
+                var htr = hostPlayer.transform;
+                var hpos = htr.position;
+                // Même source que le client : le lacet du regard, pas la racine du joueur (sinon
+                // l'avatar de l'hôte ne tourne jamais, et le receveur lui prêtait son propre lacet).
+                var hrot = ViewDirection.Yaw(htr);
+                Send(peer, w => new PlayerJoinedMessage
+                {
+                    PlayerId = 9999,
+                    Username = "HoteServeur",
+                    X = hpos.x,
+                    Y = hpos.y,
+                    Z = hpos.z,
+                    RotX = hrot.x,
+                    RotY = hrot.y,
+                    RotZ = hrot.z,
+                    RotW = hrot.w,
+                }.Write(w), DeliveryMethod.ReliableOrdered);
+
+                var hostEquip = ReadHostEquipment();
+                if (hostEquip != null)
+                {
+                    Send(peer, w => new PlayerEquipmentMessage
+                    {
+                        PlayerId = 9999,
+                        TechTypeNames = hostEquip,
+                    }.Write(w), DeliveryMethod.ReliableOrdered);
+                }
+
+                var hostHeldItem = ReadHostHeldItemName();
+                var hostHeldItemParams = ReadHostHoldingParams();
+                if (hostHeldItem != null && hostHeldItemParams != null)
+                {
+                    Send(peer, w => new PlayerHeldItemMessage
+                    {
+                        PlayerId = 9999,
+                        TechTypeName = hostHeldItem,
+                        HoldingParams = hostHeldItemParams,
+                    }.Write(w), DeliveryMethod.ReliableOrdered);
+                }
+
+                // La couleur de l'hôte : c'est elle qui rend le personnage de l'instance serveur
+                // reconnaissable parmi les joueurs, au même titre que sa tenue.
+                Send(peer, w => new PlayerColorMessage
+                {
+                    PlayerId = 9999,
+                    ColorIndex = HostColorIndex,
+                }.Write(w), DeliveryMethod.ReliableOrdered);
+            }
+
+            foreach (var pair in _sessions)
+            {
+                if (!pair.Value.Accepted || pair.Key == peer)
+                {
+                    continue;
+                }
+
+                var other = pair.Value;
+                Send(peer, w => new PlayerJoinedMessage
+                {
+                    PlayerId = other.PlayerId,
+                    Username = other.Username,
+                    X = other.X,
+                    Y = other.Y,
+                    Z = other.Z,
+                    RotX = other.RotX,
+                    RotY = other.RotY,
+                    RotZ = other.RotZ,
+                    RotW = other.RotW,
+                }.Write(w), DeliveryMethod.ReliableOrdered);
+
+                if (other.Equipment != null)
+                {
+                    Send(peer, w => new PlayerEquipmentMessage
+                    {
+                        PlayerId = other.PlayerId,
+                        TechTypeNames = other.Equipment,
+                    }.Write(w), DeliveryMethod.ReliableOrdered);
+                }
+
+                if (other.HeldItemName != null)
+                {
+                    Send(peer, w => new PlayerHeldItemMessage
+                    {
+                        PlayerId = other.PlayerId,
+                        TechTypeName = other.HeldItemName,
+                        HoldingParams = other.HoldingParams ?? Array.Empty<string>(),
+                    }.Write(w), DeliveryMethod.ReliableOrdered);
+                }
+
+                Send(peer, w => new PlayerColorMessage
+                {
+                    PlayerId = other.PlayerId,
+                    ColorIndex = other.ColorIndex,
+                }.Write(w), DeliveryMethod.ReliableOrdered);
+            }
+
+            // 2. Informer tous les joueurs déjà présents de l'arrivée de ce joueur.
+            var joinedMsg = new PlayerJoinedMessage
+            {
+                PlayerId = session.PlayerId,
+                Username = session.Username,
+                X = session.X,
+                Y = session.Y,
+                Z = session.Z,
+                RotX = session.RotX,
+                RotY = session.RotY,
+                RotZ = session.RotZ,
+                RotW = session.RotW,
+            };
+
+            foreach (var pair in _sessions)
+            {
+                if (!pair.Value.Accepted || pair.Key == peer)
+                {
+                    continue;
+                }
+
+                Send(pair.Key, joinedMsg.Write, DeliveryMethod.ReliableOrdered);
+                Send(pair.Key, w => new PlayerColorMessage
+                {
+                    PlayerId = session.PlayerId,
+                    ColorIndex = session.ColorIndex,
+                }.Write(w), DeliveryMethod.ReliableOrdered);
+            }
+        }
+
+        /// <summary>
+        /// Indice de couleur du prochain client admis.
+        ///
+        /// La règle tient en une ligne : on avance d'un cran par client, en sautant l'indice de
+        /// l'hôte quand son personnage est dans le monde. C'est ce qui garantit que deux joueurs ne
+        /// reçoivent pas la même couleur, sans arbitrage à la connexion et sans que le client ait
+        /// quelque chose à décider.
+        /// </summary>
+        private byte AllocateColorIndex(bool hostInWorld)
+        {
+            // Sans hôte dans le monde, l'indice 0 est libre : les clients le prennent à leur tour.
+            var start = hostInWorld ? HostColorIndex + 1 : 0;
+            var index = (byte)((_nextClientColorIndex + start) % Protocol.PlayerColorCount);
+            _nextClientColorIndex = (byte)((_nextClientColorIndex + 1) % Protocol.PlayerColorCount);
+            return index;
         }
 
         /// <summary>Retourne la raison du refus, ou <c>null</c> si la connexion est valide.</summary>
@@ -327,6 +793,1319 @@ namespace Coop.Server
                 ServerTick = ServerTickBehaviour.Ticks,
                 ServerTimeMs = ServerClock.Milliseconds,
             }.Write(w), DeliveryMethod.Unreliable);
+        }
+
+        private void HandlePlayerPosition(NetPeer peer, ClientSession session, PlayerPositionMessage pos)
+        {
+            if (!session.Accepted)
+            {
+                _log.LogWarning($"[net] position avant handshake ignorée de {peer}");
+                return;
+            }
+
+            // Rejeter les paquets UDP arrivés dans le désordre.
+            if (session.PositionsReceived > 0 && pos.Sequence <= session.LastPositionSequence)
+            {
+                return;
+            }
+
+            // Garde-fou contre les flottants dégénérés (NaN / Inf).
+            if (float.IsNaN(pos.X) || float.IsInfinity(pos.X) ||
+                float.IsNaN(pos.Y) || float.IsInfinity(pos.Y) ||
+                float.IsNaN(pos.Z) || float.IsInfinity(pos.Z) ||
+                float.IsNaN(pos.RotX) || float.IsInfinity(pos.RotX) ||
+                float.IsNaN(pos.RotY) || float.IsInfinity(pos.RotY) ||
+                float.IsNaN(pos.RotZ) || float.IsInfinity(pos.RotZ) ||
+                float.IsNaN(pos.RotW) || float.IsInfinity(pos.RotW))
+            {
+                _log.LogWarning($"[net] position NaN/Infinity ignorée de '{session.Username}'#{session.PlayerId}");
+                return;
+            }
+
+            session.LastPositionSequence = pos.Sequence;
+            session.PositionsReceived++;
+            session.X = pos.X;
+            session.Y = pos.Y;
+            session.Z = pos.Z;
+            session.RotX = pos.RotX;
+            session.RotY = pos.RotY;
+            session.RotZ = pos.RotZ;
+            session.RotW = pos.RotW;
+            session.MoveSpeedX = pos.MoveSpeedX;
+            session.MoveSpeedY = pos.MoveSpeedY;
+            session.MoveSpeedZ = pos.MoveSpeedZ;
+            session.ViewPitch = pos.ViewPitch;
+            session.IsUnderwater = pos.IsUnderwater;
+            session.OnSurface = pos.OnSurface;
+            session.ActionFlags = pos.ActionFlags;
+
+            if (session.PositionsReceived == 1)
+            {
+                _log.LogInfo(
+                    $"[net] première position reçue de '{session.Username}'#{session.PlayerId} : " +
+                    $"({pos.X:F2}, {pos.Y:F2}, {pos.Z:F2}) v=({pos.MoveSpeedX:F1},{pos.MoveSpeedY:F1},{pos.MoveSpeedZ:F1}) " +
+                    $"pitch={pos.ViewPitch:F1} sousEau={pos.IsUnderwater} actions={pos.ActionFlags}");
+            }
+        }
+
+        /// <summary>
+        /// Objet tenu annoncé par un client (outil en main, ou rien).
+        ///
+        /// Le serveur ne fait que le mémoriser et le relayer : il ne le valide pas contre un inventaire
+        /// qu'il ne détient pas pour les joueurs distants, et il **force** l'identité de l'émetteur —
+        /// un client ne peut donc pas prétendre tenir un objet à la place d'un autre.
+        /// </summary>
+        private void HandleHeldItem(NetPeer peer, ClientSession session, PlayerHeldItemMessage msg)
+        {
+            if (!session.Accepted)
+            {
+                _log.LogWarning($"[net] objet tenu avant handshake ignoré de {peer}");
+                return;
+            }
+
+            // Le client peut prétendre tenir l'objet d'un autre : l'identité qui compte est celle de la
+            // session, jamais celle du message. Un écart est une falsification, et elle se dit — une
+            // réécriture silencieuse laisserait croire à une confiance accordée au champ.
+            var forgedHeld = msg.PlayerId != 0 && msg.PlayerId != session.PlayerId;
+            if (forgedHeld)
+            {
+                ForgedPlayerIds++;
+                _log.LogWarning(
+                    $"[net] PlayerId falsifié sur l'objet tenu : '{session.Username}' a annoncé sous l'id " +
+                    $"{msg.PlayerId} (le sien est {session.PlayerId}) — le relais réécrit avec l'id de la session.");
+                _log.LogInfo(
+                    $"[net] vérification PlayerId (objet tenu) : '{session.Username}' a annoncé l'id " +
+                    $"{msg.PlayerId}, effectif={session.PlayerId} -> verdict=True");
+            }
+
+            session.HeldItemName = msg.TechTypeName ?? string.Empty;
+            session.HoldingParams = msg.HoldingParams ?? Array.Empty<string>();
+            session.HeldItemsReceived++;
+
+            var held = session.HeldItemName.Length == 0 ? "(rien en main)" : session.HeldItemName;
+            var parameters = session.HoldingParams.Length == 0
+                ? "(aucun paramètre)"
+                : string.Join(", ", session.HoldingParams);
+            _log.LogInfo(
+                $"[net] objet tenu reçu de '{session.Username}'#{session.PlayerId} : {held} " +
+                $"— paramètres : {parameters}");
+
+            var outgoing = new PlayerHeldItemMessage
+            {
+                PlayerId = session.PlayerId,
+                TechTypeName = session.HeldItemName,
+                HoldingParams = session.HoldingParams,
+            };
+
+            var forwarded = 0;
+            foreach (var pair in _sessions)
+            {
+                if (!pair.Value.Accepted || pair.Key == peer)
+                {
+                    continue;
+                }
+
+                Send(pair.Key, outgoing.Write, DeliveryMethod.ReliableOrdered);
+                forwarded++;
+            }
+
+            _log.LogInfo(
+                $"[net] PlayerHeldItem de '{session.Username}'#{session.PlayerId} diffusé à {forwarded} autre(s) client(s).");
+        }
+
+        private void HandlePlayerEquipment(NetPeer peer, ClientSession session, PlayerEquipmentMessage msg)
+        {
+            if (!session.Accepted)
+            {
+                _log.LogWarning($"[net] équipement avant handshake ignoré de {peer}");
+                return;
+            }
+
+            // Le serveur est autoritaire sur l'identité de l'émetteur : un client ne peut pas
+            // prétendre modifier la tenue d'un autre joueur. Le champ `PlayerId` reçu n'est donc
+            // **jamais** recopié — il sert seulement à constater la falsification, et c'est cette
+            // constatation qui rend la règle mesurable au lieu de lisible.
+            var forgedEquipment = msg.PlayerId != 0 && msg.PlayerId != session.PlayerId;
+            if (forgedEquipment)
+            {
+                ForgedPlayerIds++;
+                _log.LogWarning(
+                    $"[net] PlayerId falsifié sur l'équipement : '{session.Username}' a annoncé sous l'id " +
+                    $"{msg.PlayerId} (le sien est {session.PlayerId}) — le relais réécrit avec l'id de la session.");
+                _log.LogInfo(
+                    $"[net] vérification PlayerId (équipement) : '{session.Username}' a annoncé l'id " +
+                    $"{msg.PlayerId}, effectif={session.PlayerId} -> verdict=True");
+            }
+
+            session.Equipment = msg.TechTypeNames ?? Array.Empty<string>();
+            session.EquipmentsReceived++;
+
+            var summary = session.Equipment.Length == 0
+                ? "(sans équipement)"
+                : string.Join(", ", session.Equipment);
+            _log.LogInfo(
+                $"[net] équipement reçu de '{session.Username}'#{session.PlayerId} " +
+                $"({session.Equipment.Length} pièce(s)) : {summary}");
+
+            var outgoing = new PlayerEquipmentMessage
+            {
+                PlayerId = session.PlayerId,
+                TechTypeNames = session.Equipment,
+            };
+
+            var forwarded = 0;
+            foreach (var pair in _sessions)
+            {
+                if (!pair.Value.Accepted || pair.Key == peer)
+                {
+                    continue;
+                }
+
+                Send(pair.Key, outgoing.Write, DeliveryMethod.ReliableOrdered);
+                forwarded++;
+            }
+
+            _log.LogInfo(
+                $"[net] PlayerEquipment de '{session.Username}'#{session.PlayerId} diffusé à {forwarded} autre(s) client(s).");
+            if (forgedEquipment)
+            {
+                _log.LogInfo(
+                    $"[net] vérification PlayerId (équipement) : diffusé sous l'id {session.PlayerId} " +
+                    $"(revendiqué {msg.PlayerId}) pour {forwarded} client(s) -> verdict=True");
+            }
+        }
+
+        private static string[] ReadHostEquipment()
+        {
+            var inventory = Inventory.main;
+            var equipment = inventory != null ? inventory.equipment : null;
+            if (equipment == null)
+            {
+                return null;
+            }
+
+            var names = new List<string>();
+            var slots = equipment.GetEquipment();
+            while (slots.MoveNext())
+            {
+                var item = slots.Current.Value;
+                var pickupable = item != null ? item.item : null;
+                if (pickupable == null)
+                {
+                    continue;
+                }
+
+                names.Add(pickupable.GetTechType().ToString());
+            }
+
+            names.Sort(StringComparer.Ordinal);
+            return names.ToArray();
+        }
+
+        private void BroadcastHostEquipmentIfChanged()
+        {
+            var hostEquip = ReadHostEquipment();
+            if (hostEquip == null)
+            {
+                return;
+            }
+
+            var signature = string.Join("|", hostEquip);
+            if (string.Equals(signature, _lastHostEquipmentSignature, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastHostEquipmentSignature = signature;
+            _lastHostEquipment = hostEquip;
+
+            var outgoing = new PlayerEquipmentMessage
+            {
+                PlayerId = 9999,
+                TechTypeNames = hostEquip,
+            };
+
+            foreach (var pair in _sessions)
+            {
+                if (!pair.Value.Accepted)
+                {
+                    continue;
+                }
+
+                Send(pair.Key, outgoing.Write, DeliveryMethod.ReliableOrdered);
+            }
+        }
+
+        /// <summary>
+        /// Nom de l'objet tenu par le personnage de l'instance serveur, ou chaîne vide s'il n'a rien
+        /// en main. Renvoie <c>null</c> si l'inventaire local n'est pas lisible (monde non chargé).
+        /// </summary>
+        private static string ReadHostHeldItemName()
+        {
+            var inventory = Inventory.main;
+            if (inventory == null)
+            {
+                return null;
+            }
+
+            var tool = inventory.GetHeldTool();
+            if (tool == null)
+            {
+                return string.Empty;
+            }
+
+            var pickupable = tool.GetComponent<Pickupable>();
+            return pickupable != null ? pickupable.GetTechType().ToString() : string.Empty;
+        }
+
+        /// <summary>
+        /// Paramètres `holding_*` du personnage hôte, **lus sur son propre `Animator`** — exactement
+        /// comme un client le fait pour lui-même, et non plus re-dérivés du nom de l'objet tenu.
+        ///
+        /// Pourquoi lire et non dériver : le jeu pose ces booléens depuis les `ConditionRules` de
+        /// chaque prefab d'outil (`ArmsController` en expose une pour `holding_welder`), et la règle
+        /// « `holding_` + nom du `TechType` en minuscules » n'en est qu'une conséquence la plupart du
+        /// temps. Deux façons de calculer la même donnée finiraient par diverger en silence : ici la
+        /// source est unique pour l'hôte comme pour les clients.
+        ///
+        /// Renvoie <c>null</c> si l'état n'est pas lisible (pas de joueur, pas d'animator) : c'est
+        /// différent d'un tableau vide, qui veut dire « rien en main ».
+        /// </summary>
+        private static string[] ReadHostHoldingParams()
+        {
+            var hostPlayer = UnityEngine.Object.FindObjectOfType<Player>();
+            if (hostPlayer == null || hostPlayer.gameObject == null)
+            {
+                return null;
+            }
+
+            var animator = hostPlayer.gameObject.GetComponentInChildren<UnityEngine.Animator>(true);
+            if (animator == null)
+            {
+                return null;
+            }
+
+            var holding = new List<string>();
+            var parameters = animator.parameters;
+            for (var i = 0; i < parameters.Length; i++)
+            {
+                var parameter = parameters[i];
+                if (parameter.type != UnityEngine.AnimatorControllerParameterType.Bool ||
+                    !parameter.name.StartsWith(Protocol.HoldingParamPrefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (animator.GetBool(parameter.name))
+                {
+                    holding.Add(parameter.name);
+                }
+            }
+
+            holding.Sort(StringComparer.Ordinal);
+            return holding.ToArray();
+        }
+
+        private void BroadcastHostHeldItemIfChanged()
+        {
+            var name = ReadHostHeldItemName();
+            var parameters = ReadHostHoldingParams();
+            if (name == null || parameters == null)
+            {
+                return;
+            }
+
+            var signature = name + "|" + string.Join("|", parameters);
+            if (string.Equals(signature, _lastHostHeldItemSignature, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastHostHeldItemSignature = signature;
+
+            var outgoing = new PlayerHeldItemMessage
+            {
+                PlayerId = 9999,
+                TechTypeName = name,
+                HoldingParams = parameters,
+            };
+
+            var sent = 0;
+            foreach (var pair in _sessions)
+            {
+                if (!pair.Value.Accepted)
+                {
+                    continue;
+                }
+
+                Send(pair.Key, outgoing.Write, DeliveryMethod.ReliableOrdered);
+                sent++;
+            }
+
+            _log.LogInfo(
+                $"[net] objet tenu de l'hôte modifié : {(name.Length == 0 ? "(rien en main)" : name)} " +
+                $"-> diffusé à {sent} client(s) (paramètres lus sur son animator : " +
+                (parameters.Length == 0 ? "(aucun)" : string.Join(", ", parameters)) + ")");
+        }
+
+        /// <summary>
+        /// Diffuse à chaque tick (20 Hz) l'état de position de tous les autres joueurs connectés
+        /// à chaque client accepté.
+        /// </summary>
+        public void BroadcastSnapshots(long serverTick)
+        {
+            if (_sessions.Count == 0)
+            {
+                return;
+            }
+
+            var acceptedCount = AcceptedClients;
+            if (acceptedCount == 0)
+            {
+                return;
+            }
+
+            // Si l'hôte (le joueur local de l'instance serveur) est dans le monde, on l'inclut
+            // comme joueur virtuel id=9999 afin qu'un client seul puisse aussi voir le personnage
+            // de l'instance serveur dans le monde !
+            //
+            // **Sauf en serveur dédié** : la instance headless n'a pas de personnage joueur, et diffuser
+            // quand même un id=9999 ferait apparaître à la capsule un avatar que personne ne pilote —
+            // exactement ce que « le serveur n'est pas un personnage » interdit.
+            var hostPlayer = CoopServerPlugin.Dedicated ? null : UnityEngine.Object.FindObjectOfType<Player>();
+            var hasHostAvatar = hostPlayer != null && hostPlayer.gameObject != null;
+            if (hasHostAvatar && serverTick % 5 == 0)
+            {
+                BroadcastHostEquipmentIfChanged();
+                BroadcastHostHeldItemIfChanged();
+            }
+
+            // Les créatures voyagent moins souvent que les joueurs : elles bougent plus lentement, et
+            // doubler la cadence doublerait la bande passante pour rien.
+            if (serverTick % Protocol.CreatureStreamIntervalTicks == 0)
+            {
+                BroadcastCreatureSnapshots(serverTick, hostPlayer);
+            }
+
+            // Les véhicules voyagent à la même cadence que les créatures (10 Hz). La mesure du §30 a
+            // montré qu'un Seamoth à 20 m/s produit alors des pas de 2,15 m : c'est **l'interpolation
+            // côté client** qui rend le mouvement continu, pas une cadence plus élevée (voir
+            // `RemoteVehicleManager`).
+            if (serverTick % Protocol.VehicleStreamIntervalTicks == 0)
+            {
+                BroadcastVehicleSnapshots(serverTick, hostPlayer);
+            }
+
+            foreach (var recipientPair in _sessions)
+            {
+                var recipientSession = recipientPair.Value;
+                if (!recipientSession.Accepted)
+                {
+                    continue;
+                }
+
+                var otherCount = acceptedCount - 1 + (hasHostAvatar ? 1 : 0);
+                if (otherCount <= 0)
+                {
+                    continue;
+                }
+
+                var states = new PlayerStateEntry[otherCount];
+                var idx = 0;
+
+                foreach (var sourcePair in _sessions)
+                {
+                    var source = sourcePair.Value;
+                    if (!source.Accepted || sourcePair.Key == recipientPair.Key)
+                    {
+                        continue;
+                    }
+
+                    states[idx++] = new PlayerStateEntry
+                    {
+                        PlayerId = source.PlayerId,
+                        X = source.X,
+                        Y = source.Y,
+                        Z = source.Z,
+                        RotX = source.RotX,
+                        RotY = source.RotY,
+                        RotZ = source.RotZ,
+                        RotW = source.RotW,
+                        MoveSpeedX = source.MoveSpeedX,
+                        MoveSpeedY = source.MoveSpeedY,
+                        MoveSpeedZ = source.MoveSpeedZ,
+                        ViewPitch = source.ViewPitch,
+                        IsUnderwater = source.IsUnderwater,
+                        OnSurface = source.OnSurface,
+                        ActionFlags = source.ActionFlags,
+                    };
+                }
+
+                if (hasHostAvatar && idx < states.Length)
+                {
+                    var tr = hostPlayer.transform;
+                    var pos = tr.position;
+                    var rot = ViewDirection.Yaw(tr);
+                    var arms = hostPlayer.armsController;
+                    var vel = arms != null ? arms.GetSmoothedVelocity() : UnityEngine.Vector3.zero;
+                    var pitch = MainCameraControl.main != null ? MainCameraControl.main.GetCameraPitch() : 0f;
+                    var isUnderwater = hostPlayer.IsUnderwater() && hostPlayer.motorMode != Player.MotorMode.Vehicle;
+                    var waterLevel = hostPlayer.GetWaterLevel();
+                    var onSurface = pos.y > waterLevel - 1f && pos.y < waterLevel + 1f
+                                    && !hostPlayer.IsInside() && hostPlayer.IsUnderwaterForSwimming();
+
+                    // Mêmes sources que celles du client, relevées dans `ArmsController.Update` :
+                    // `using_pda` vient de `Player.GetPDA().isInUse`, `using_tool` et `using_tool_alt` de
+                    // `GUIHand.GetUsingTool()` / `GetAltAttacking()`, les véhicules de `inSeamoth` /
+                    // `inExosuit`.
+                    var hostFlags = PlayerActionFlags.None;
+                    var pda = hostPlayer.GetPDA();
+                    if (pda != null && pda.isInUse)
+                    {
+                        hostFlags |= PlayerActionFlags.UsingPda;
+                    }
+
+                    var guiHand = hostPlayer.guiHand;
+                    if (guiHand != null)
+                    {
+                        if (guiHand.GetUsingTool())
+                        {
+                            hostFlags |= PlayerActionFlags.UsingTool;
+                        }
+
+                        if (guiHand.GetAltAttacking())
+                        {
+                            hostFlags |= PlayerActionFlags.UsingToolAlt;
+                        }
+                    }
+
+                    if (hostPlayer.inSeamoth)
+                    {
+                        hostFlags |= PlayerActionFlags.InSeamoth;
+                    }
+
+                    if (hostPlayer.inExosuit)
+                    {
+                        hostFlags |= PlayerActionFlags.InExosuit;
+                    }
+
+                    states[idx++] = new PlayerStateEntry
+                    {
+                        PlayerId = 9999,
+                        X = pos.x,
+                        Y = pos.y,
+                        Z = pos.z,
+                        RotX = rot.x,
+                        RotY = rot.y,
+                        RotZ = rot.z,
+                        RotW = rot.w,
+                        MoveSpeedX = vel.x,
+                        MoveSpeedY = vel.y,
+                        MoveSpeedZ = vel.z,
+                        ViewPitch = pitch,
+                        IsUnderwater = isUnderwater,
+                        OnSurface = onSurface,
+                        ActionFlags = hostFlags,
+                    };
+                }
+
+                var snapshot = new PlayersSnapshotMessage
+                {
+                    ServerTick = serverTick,
+                    Players = states,
+                };
+
+                Send(recipientPair.Key, snapshot.Write, DeliveryMethod.Unreliable);
+                _snapshotsBroadcast++;
+            }
+        }
+
+        /// <summary>
+        /// Diffuse l'état des créatures que **le serveur** simule (M3).
+        ///
+        /// Le partage des rôles est celui du plan (§4) : le serveur simule, les clients suivent. Il
+        /// n'y a donc rien à recevoir ici, et rien à négocier — seulement à lire puis à envoyer.
+        ///
+        /// Le filtrage est un vrai relevancy, pas une coupe arbitraire : une créature n'est envoyée
+        /// que si elle est à moins de <see cref="Protocol.CreatureRelevancyRadiusMeters"/> d'un joueur
+        /// concerné. Envoyer tout le monde à tout le monde ne passerait pas le 20 Hz du §3.
+        /// </summary>
+        private void BroadcastCreatureSnapshots(long serverTick, Player hostPlayer)
+        {
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            if (_creatureCache == null || now - _creatureCacheRealtime >= CreatureCacheSeconds)
+            {
+                _creatureCache = UnityEngine.Object.FindObjectsOfType<Creature>();
+                _creatureCacheRealtime = now;
+                ReportCreatureIdentities();
+            }
+
+            if (_creatureCache == null || _creatureCache.Length == 0)
+            {
+                return;
+            }
+
+            var radiusSquared = Protocol.CreatureRelevancyRadiusMeters * Protocol.CreatureRelevancyRadiusMeters;
+
+            // Diagnostic : « 0 créature diffusée » a deux causes très différentes — le monde est vide
+            // autour du joueur, ou le rayon est trop petit. Sans cette mesure, les deux se
+            // ressemblent, et on réglerait un rayon au hasard.
+            ReportVehicles(hostPlayer, now);
+
+            if (now >= _nextCreatureDiagnostic)
+            {
+                _nextCreatureDiagnostic = now + 5f;
+                var nearest = NearestCreatures(hostPlayer, 3);
+                _log.LogInfo(
+                    nearest.Count == 0
+                        ? $"[net] créatures : {_creatureCache.Length} dans le monde, aucune position lisible"
+                        : $"[net] créatures : {_creatureCache.Length} dans le monde, les plus proches du point " +
+                          $"{nearest[0].Reference.ToString("F1")} : " +
+                          $"{string.Join(", ", nearest.Select(entry => $"'{entry.Name}' à {entry.Meters:F1} m"))} " +
+                          $"(rayon de diffusion {Protocol.CreatureRelevancyRadiusMeters:F0} m)");
+            }
+
+            foreach (var recipientPair in _sessions)
+            {
+                var recipientSession = recipientPair.Value;
+                if (!recipientSession.Accepted)
+                {
+                    continue;
+                }
+
+                _creatureBuffer.Clear();
+                _creatureCandidates.Clear();
+
+                // Le relevancy est celui du **destinataire**, pas celui de l'hôte : un client ne peut
+                // suivre que les créatures qui existent dans son propre monde, et son monde n'a de
+                // cellules chargées qu'autour de son joueur à lui.
+                //
+                // La première version prenait la plus petite distance à l'un ou l'autre (client ou
+                // hôte) : mesuré, cela ne diffusait que des créatures proches de l'hôte, dont le monde
+                // du client n'avait qu'une poignée — 128 appariements sur 36 452 états, et un avatar de
+                // créature adopté puis relâché aussitôt. Le repli sur la position de l'hôte ne sert
+                // donc plus qu'à un client qui n'a pas encore annoncé la sienne (juste après le
+                // handshake), pour qu'il reçoive quelque chose plutôt que rien.
+                var interestX = recipientSession.PositionsReceived > 0 ? recipientSession.X : 0f;
+                var interestY = recipientSession.PositionsReceived > 0 ? recipientSession.Y : 0f;
+                var interestZ = recipientSession.PositionsReceived > 0 ? recipientSession.Z : 0f;
+                var fromSession = recipientSession.PositionsReceived > 0;
+
+                if (!fromSession && hostPlayer != null && hostPlayer.gameObject != null)
+                {
+                    var hostPosition = hostPlayer.transform.position;
+                    interestX = hostPosition.x;
+                    interestY = hostPosition.y;
+                    interestZ = hostPosition.z;
+                }
+
+                for (var i = 0; i < _creatureCache.Length; i++)
+                {
+                    var creature = _creatureCache[i];
+                    if (creature == null || creature.transform == null)
+                    {
+                        continue;
+                    }
+
+                    var position = creature.transform.position;
+                    var dx = position.x - interestX;
+                    var dy = position.y - interestY;
+                    var dz = position.z - interestZ;
+                    var distanceSquared = dx * dx + dy * dy + dz * dz;
+
+                    if (distanceSquared > radiusSquared)
+                    {
+                        continue;
+                    }
+
+                    _creatureCandidates.Add(new KeyValuePair<float, int>(distanceSquared, i));
+                }
+
+                if (_creatureCandidates.Count == 0)
+                {
+                    continue;
+                }
+
+                // Les plus proches d'abord : quand le plafond mord, ce sont les créatures du bout du
+                // rayon qui sont sacrifiées, pas celles devant le joueur.
+                _creatureCandidates.Sort((left, right) => left.Key.CompareTo(right.Key));
+
+                var asKeyed = 0;
+                var asSpawn = 0;
+                var refused = 0;
+                var sentChunks = 0;
+                var serverMetres = 0f;
+                var serverSeconds = 0f;
+                var maxServerMovedMeters = 0f;
+                var maxServerMovedSeconds = 0f;
+                var maxServerMovedLabel = "aucune";
+
+                // Jusqu'où la diffusion est allée dans la liste (triée du plus proche au plus loin) : la
+                // différence avec le nombre de candidates est le nombre de créatures **sacrifiées au
+                // plafond**, c'est-à-dire jamais envoyées — leur IA continue de tourner chez le client.
+                var reached = 0;
+
+                // Un paquet ne peut pas porter plus de `MaxCreatureStates` créatures : la liste part
+                // donc en plusieurs paquets, sinon la queue du rayon n'est jamais diffusée et les
+                // créatures déjà suivies sortent de la liste puis y reviennent (IA coupée/rétablie en
+                // boucle, mesuré une fois par seconde avant ce découpage).
+                for (var chunk = 0; chunk < CreatureChunksPerTick; chunk++)
+                {
+                    var start = chunk * Protocol.MaxCreatureStates;
+                    if (start >= _creatureCandidates.Count)
+                    {
+                        break;
+                    }
+
+                    _creatureBuffer.Clear();
+                    var end = System.Math.Min(start + Protocol.MaxCreatureStates, _creatureCandidates.Count);
+
+                    for (var i = start; i < end; i++)
+                    {
+                        var creature = _creatureCache[_creatureCandidates[i].Value];
+                        var key = CreatureIdentity.KeyOf(creature, out var mechanism);
+                        if (key == 0L)
+                        {
+                            // Sans clé, le client ne pourrait pas la reconnaître : la diffuser ferait
+                            // correspondre n'importe quoi. Elle est comptée, jamais inventée.
+                            refused++;
+                            continue;
+                        }
+
+                        if (mechanism == CreatureIdentity.MechanismUniqueId)
+                        {
+                            asKeyed++;
+                        }
+                        else
+                        {
+                            asSpawn++;
+                        }
+
+                        var transform = creature.transform;
+                        var position = transform.position;
+                        var rotation = transform.rotation;
+
+                        // Déplacement du serveur depuis la dernière diffusion de **cette** créature. Le rythme
+                        // réel est mesuré, pas supposé : la diffusion passe tous les
+                        // `CreatureStreamIntervalTicks` ticks, mais un paquet non fiable peut manquer.
+                        if (_lastSentPositions.TryGetValue(key, out var previous))
+                        {
+                            var seconds = now - previous.Realtime;
+                            if (seconds > 0.001f)
+                            {
+                                var metres = UnityEngine.Vector3.Distance(previous.Position, position);
+                                serverMetres = metres;
+                                serverSeconds = seconds;
+                                if (metres > maxServerMovedMeters)
+                                {
+                                    maxServerMovedMeters = metres;
+                                    maxServerMovedSeconds = seconds;
+                                    maxServerMovedLabel = creature.gameObject != null ? creature.gameObject.name : "?";
+                                }
+                            }
+                        }
+
+                        _lastSentPositions[key] = new SentPosition { Position = position, Realtime = now };
+
+                        _creatureBuffer.Add(new CreatureStateEntry
+                        {
+                            Key = key,
+                            X = position.x,
+                            Y = position.y,
+                            Z = position.z,
+                            RotX = rotation.x,
+                            RotY = rotation.y,
+                            RotZ = rotation.z,
+                            RotW = rotation.w,
+                        });
+                    }
+
+                    if (_creatureBuffer.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    var snapshot = new CreatureSnapshotMessage
+                    {
+                        ServerTick = serverTick,
+                        Creatures = _creatureBuffer.ToArray(),
+                    };
+
+                    _writer.Reset();
+                    snapshot.Write(_writer);
+                    if (_writer.Length > Protocol.MaxUnreliablePayloadBytes)
+                    {
+                        _oversizedCreaturePackets++;
+                        if (_oversizedCreaturePackets <= 3)
+                        {
+                            _log.LogError(
+                                $"[net] paquet de créatures REFUSÉ : {_writer.Length} octets pour " +
+                                $"{_creatureBuffer.Count} créature(s), au-dessus de la limite non fiable de " +
+                                $"{Protocol.MaxUnreliablePayloadBytes} octets. LiteNetLib l'aurait jeté sans le dire " +
+                                "dans nos journaux.");
+                        }
+
+                        break;
+                    }
+
+                    recipientPair.Key.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.Unreliable);
+                    _creatureSnapshotsBroadcast++;
+                    _creatureStatesBroadcast += _creatureBuffer.Count;
+                    recipientSession.CreatureBytesSent += _writer.Length;
+                    recipientSession.CreatureStatesSent += _creatureBuffer.Count;
+                    recipientSession.CreaturePacketsSent++;
+                    reached = end;
+                    sentChunks++;
+                }
+
+                if (sentChunks == 0)
+                {
+                    continue;
+                }
+
+                if (now < recipientSession.NextCreatureReport)
+                {
+                    continue;
+                }
+
+                recipientSession.NextCreatureReport = now + CreatureReportSeconds;
+
+                // Clés partagées parmi les candidates : l'identité est-elle injective ? Un seul
+                // contre-exemple suffit à dire que « une clé = une créature » ne tient pas, et c'est
+                // l'hypothèse sur laquelle repose tout le suivi (cf. PLAN.md §28).
+                _creatureKeyTally.Clear();
+                var sharedKeys = 0;
+                for (var i = 0; i < _creatureCandidates.Count; i++)
+                {
+                    var candidate = _creatureCache[_creatureCandidates[i].Value];
+                    var candidateKey = CreatureIdentity.KeyOf(candidate, out _);
+                    if (candidateKey == 0L)
+                    {
+                        continue;
+                    }
+
+                    _creatureKeyTally.TryGetValue(candidateKey, out var already);
+                    if (already > 0)
+                    {
+                        sharedKeys++;
+                    }
+
+                    _creatureKeyTally[candidateKey] = already + 1;
+                }
+
+                var sacrificed = _creatureCandidates.Count - reached;
+
+                // La liste est triée du plus proche au plus loin, donc la première sacrifiée est la plus
+                // proche de toutes — c'est elle qui dit si le plafond mord dans ce que le joueur voit.
+                var closestSacrificed = sacrificed > 0
+                    ? (float)System.Math.Sqrt(_creatureCandidates[reached].Key)
+                    : 0f;
+
+                var bytesPerSecond = recipientSession.CreatureBytesSent / CreatureReportSeconds;
+
+                _log.LogInfo(
+                    $"[net] créatures : {_creatureCache.Length} dans le monde, " +
+                    $"{_creatureCandidates.Count} à moins de {Protocol.CreatureRelevancyRadiusMeters:F0} m " +
+                    // Le point d'intérêt est écrit parce que deux destinataires qui reçoivent des ensembles
+                    // différents ne disent rien tant qu'on ne sait pas **d'où** le rayon est compté :
+                    // position du client, ou repli sur l'hôte quand il n'en a pas encore annoncé.
+                    $"du point ({interestX:F1}, {interestY:F1}, {interestZ:F1}) " +
+                    $"[{(fromSession ? "position du client" : "repli position de l'hôte")}], " +
+                    $"{asSpawn + asKeyed} diffusée(s) en {sentChunks} paquet(s) à " +
+                    $"'{recipientSession.Username}'#{recipientSession.PlayerId} " +
+                    $"({asSpawn} par {CreatureIdentity.MechanismSpawnPosition}, " +
+                    $"{asKeyed} par {CreatureIdentity.MechanismUniqueId}, {refused} sans clé écartée(s)), " +
+                    $"{sacrificed} sacrifiée(s) au plafond de " +
+                    $"{CreatureChunksPerTick * Protocol.MaxCreatureStates}" +
+                    (CreatureChunksOverridden ? " (plafond ABAISSÉ pour éprouver la garde)" : string.Empty) +
+                    (sacrificed > 0 ? $" (la plus proche à {closestSacrificed:F0} m)" : string.Empty) + ", " +
+                    $"clés partagées={sharedKeys} (sur {_creatureCandidates.Count} candidates), " +
+                    // « non mesuré » et « 0 m » ne sont pas la même chose : le maximum vaut 0 quand aucune clé
+                    // n'a été diffusée deux fois dans la fenêtre (un destinataire qui vient de se connecter),
+                    // et l'annoncer comme « 0 m » ferait croire à un serveur immobile qui n'a pas été observé.
+                    (maxServerMovedSeconds > 0f
+                        ? $"déplacement serveur max={maxServerMovedMeters:F2} m en {maxServerMovedSeconds:F2} s " +
+                          $"({maxServerMovedMeters / maxServerMovedSeconds:F1} m/s, '{maxServerMovedLabel}'), "
+                        : "déplacement serveur : non mesuré (aucune clé diffusée deux fois dans la fenêtre), ") +
+                    $"débit={bytesPerSecond / 1024f:F1} Ko/s " +
+                    $"({recipientSession.CreatureStatesSent} état(s) en {recipientSession.CreaturePacketsSent} paquet(s) " +
+                    $"sur {CreatureReportSeconds:F0} s), " +
+                    $"total envoyé={_creatureSnapshotsBroadcast} snapshot(s) / {_creatureStatesBroadcast} état(s)" +
+                    (_oversizedCreaturePackets == 0
+                        ? string.Empty
+                        : $", {_oversizedCreaturePackets} paquet(s) REFUSÉ(S) pour dépassement de taille"));
+
+                // Le sacrifice est assumé : ce sont les créatures du **bout** du rayon (le tri est du plus
+                // proche au plus loin), dont l'IA continue de tourner chez le client. Mais si le plafond
+                // mord dans une créature que le joueur a sous les yeux, ce n'est plus le même compromis —
+                // et c'est exactement le genre de bascule qui ne doit pas se produire en silence.
+                if (sacrificed > 0 && closestSacrificed < CloseSacrificeMeters && _closeSacrificeWarnings < 3)
+                {
+                    _closeSacrificeWarnings++;
+                    _log.LogWarning(
+                        $"[net] créatures : une créature à {closestSacrificed:F0} m n'est PAS diffusée à " +
+                        $"'{recipientSession.Username}'#{recipientSession.PlayerId} — le plafond de " +
+                        $"{CreatureChunksPerTick * Protocol.MaxCreatureStates} est atteint alors que " +
+                        $"{_creatureCandidates.Count} créatures sont dans le rayon. Le compromis « on ne suit que " +
+                        "le proche » ne tient plus : il faut changer le plafond ou le rayon.");
+                }
+
+                recipientSession.CreatureBytesSent = 0;
+                recipientSession.CreatureStatesSent = 0;
+                recipientSession.CreaturePacketsSent = 0;
+            }
+        }
+
+        /// <summary>
+        /// Diffuse l'état des véhicules du monde serveur (M4), à la même cadence que les créatures.
+        ///
+        /// Ce que le message porte, et ce qu'il ne porte pas : **la position et l'orientation**, pas
+        /// l'énergie ni les modules. C'est ce que la mesure du §30 a demandé — un véhicule qui se déplace
+        /// — et c'est ce qui manquait au protocole. L'énergie et les upgrades restent hors de M4.
+        ///
+        /// Le filtrage est un relevancy par destinataire, comme les créatures : un véhicule n'est envoyé
+        /// qu'à un client à moins de <see cref="Protocol.VehicleRelevancyRadiusMeters"/> de lui. Le rayon
+        /// est plus large que celui des créatures (150 m contre 120 m), parce qu'un Seamoth se voit de
+        /// loin et surtout se conduit de loin.
+        ///
+        /// La clé vient de <see cref="VehicleIdentity.KeyOf"/>, calculée des deux côtés. Un véhicule sans
+        /// clé est **compté et nommé**, jamais diffusé avec une clé inventée : deux véhicules confondus
+        /// vaudraient moins bien qu'un véhicule non synchronisé.
+        /// </summary>
+        private void BroadcastVehicleSnapshots(long serverTick, Player hostPlayer)
+        {
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            if (_vehicleCache == null || now - _vehicleCacheRealtime >= VehicleCacheSeconds)
+            {
+                _vehicleCache = UnityEngine.Object.FindObjectsOfType<Vehicle>();
+                _vehicleCacheRealtime = now;
+                ReportVehicleIdentities();
+            }
+
+            if (_vehicleCache == null || _vehicleCache.Length == 0)
+            {
+                return;
+            }
+
+            var radiusSquared =
+                Protocol.VehicleRelevancyRadiusMeters * Protocol.VehicleRelevancyRadiusMeters;
+
+            foreach (var recipientPair in _sessions)
+            {
+                var recipientSession = recipientPair.Value;
+                if (!recipientSession.Accepted)
+                {
+                    continue;
+                }
+
+                // Même règle que pour les créatures : le relevancy est celui du **destinataire**. Un
+                // client ne peut suivre que les véhicules de son propre monde, et son monde n'a de
+                // cellules chargées qu'autour de lui. Repli sur l'hôte tant qu'il n'a pas annoncé sa
+                // position (juste après le handshake), pour qu'il reçoive quelque chose plutôt que rien.
+                var interestX = recipientSession.PositionsReceived > 0 ? recipientSession.X : 0f;
+                var interestY = recipientSession.PositionsReceived > 0 ? recipientSession.Y : 0f;
+                var interestZ = recipientSession.PositionsReceived > 0 ? recipientSession.Z : 0f;
+                var fromSession = recipientSession.PositionsReceived > 0;
+
+                if (!fromSession && hostPlayer != null && hostPlayer.gameObject != null)
+                {
+                    var hostPosition = hostPlayer.transform.position;
+                    interestX = hostPosition.x;
+                    interestY = hostPosition.y;
+                    interestZ = hostPosition.z;
+                }
+
+                _vehicleCandidates.Clear();
+                for (var i = 0; i < _vehicleCache.Length; i++)
+                {
+                    var vehicle = _vehicleCache[i];
+                    if (vehicle == null || vehicle.transform == null)
+                    {
+                        continue;
+                    }
+
+                    var position = vehicle.transform.position;
+                    var dx = position.x - interestX;
+                    var dy = position.y - interestY;
+                    var dz = position.z - interestZ;
+                    var distanceSquared = dx * dx + dy * dy + dz * dz;
+
+                    if (distanceSquared > radiusSquared)
+                    {
+                        continue;
+                    }
+
+                    _vehicleCandidates.Add(new KeyValuePair<float, int>(distanceSquared, i));
+                }
+
+                if (_vehicleCandidates.Count == 0)
+                {
+                    continue;
+                }
+
+                // Les plus proches d'abord : si le plafond mord un jour, ce sont les véhicules du bout
+                // du rayon qui sont écartés, pas celui devant le joueur.
+                _vehicleCandidates.Sort((left, right) => left.Key.CompareTo(right.Key));
+
+                _vehicleBuffer.Clear();
+                var asUniqueId = 0;
+                var asAnchor = 0;
+                var withoutKey = 0;
+
+                for (var i = 0; i < _vehicleCandidates.Count && i < Protocol.MaxVehicleStates; i++)
+                {
+                    var vehicle = _vehicleCache[_vehicleCandidates[i].Value];
+                    var key = VehicleIdentity.KeyOf(vehicle, out var mechanism);
+                    if (key == 0L)
+                    {
+                        withoutKey++;
+                        _vehiclesWithoutKey++;
+                        continue;
+                    }
+
+                    if (mechanism == VehicleIdentity.MechanismUniqueId)
+                    {
+                        asUniqueId++;
+                    }
+                    else
+                    {
+                        asAnchor++;
+                    }
+
+                    var transform = vehicle.transform;
+                    var position = transform.position;
+                    var rotation = transform.rotation;
+
+                    _vehicleBuffer.Add(new VehicleStateEntry
+                    {
+                        Key = key,
+                        X = position.x,
+                        Y = position.y,
+                        Z = position.z,
+                        RotX = rotation.x,
+                        RotY = rotation.y,
+                        RotZ = rotation.z,
+                        RotW = rotation.w,
+                    });
+                }
+
+                if (_vehicleBuffer.Count == 0)
+                {
+                    if (withoutKey > 0 && now >= recipientSession.NextVehicleReport)
+                    {
+                        recipientSession.NextVehicleReport = now + VehicleStreamReportSeconds;
+                        _log.LogWarning(
+                            $"[net] véhicules : {withoutKey} véhicule(s) à moins de " +
+                            $"{Protocol.VehicleRelevancyRadiusMeters:F0} m de " +
+                            $"'{recipientSession.Username}'#{recipientSession.PlayerId} n'ont **aucune clé** — " +
+                            "le protocole les a écartés plutôt que de les confondre avec un autre.");
+                    }
+
+                    continue;
+                }
+
+                var snapshot = new VehicleSnapshotMessage
+                {
+                    ServerTick = serverTick,
+                    Vehicles = _vehicleBuffer.ToArray(),
+                };
+
+                _writer.Reset();
+                snapshot.Write(_writer);
+                if (_writer.Length > Protocol.MaxUnreliablePayloadBytes)
+                {
+                    _oversizedVehiclePackets++;
+                    if (_oversizedVehiclePackets <= 3)
+                    {
+                        _log.LogError(
+                            $"[net] paquet de véhicules REFUSÉ : {_writer.Length} octets pour " +
+                            $"{_vehicleBuffer.Count} véhicule(s), au-dessus de la limite non fiable de " +
+                            $"{Protocol.MaxUnreliablePayloadBytes} octets. LiteNetLib l'aurait jeté sans le dire " +
+                            "dans nos journaux.");
+                    }
+
+                    continue;
+                }
+
+                recipientPair.Key.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.Unreliable);
+                _vehicleSnapshotsBroadcast++;
+                _vehicleStatesBroadcast += _vehicleBuffer.Count;
+                recipientSession.VehicleBytesSent += _writer.Length;
+                recipientSession.VehicleStatesSent += _vehicleBuffer.Count;
+                recipientSession.VehiclePacketsSent++;
+
+                if (now < recipientSession.NextVehicleReport)
+                {
+                    continue;
+                }
+
+                recipientSession.NextVehicleReport = now + VehicleStreamReportSeconds;
+
+                var truncated = System.Math.Max(0, _vehicleCandidates.Count - Protocol.MaxVehicleStates);
+                var bytesPerSecond = recipientSession.VehicleBytesSent / VehicleStreamReportSeconds;
+
+                _log.LogInfo(
+                    $"[net] véhicules : {_vehicleCache.Length} dans le monde, " +
+                    $"{_vehicleCandidates.Count} à moins de {Protocol.VehicleRelevancyRadiusMeters:F0} m " +
+                    $"du point ({interestX:F1}, {interestY:F1}, {interestZ:F1}) " +
+                    $"[{(fromSession ? "position du client" : "repli position de l'hôte")}], " +
+                    $"{_vehicleBuffer.Count} diffusé(s) à '{recipientSession.Username}'#{recipientSession.PlayerId} " +
+                    $"({asUniqueId} par {VehicleIdentity.MechanismUniqueId}, {asAnchor} par " +
+                    $"{VehicleIdentity.MechanismSpawnPosition}, {withoutKey} sans clé écarté(s))" +
+                    (truncated > 0 ? $", {truncated} au-delà du plafond de {Protocol.MaxVehicleStates}" : string.Empty) +
+                    $", débit={bytesPerSecond / 1024f:F1} Ko/s " +
+                    $"({recipientSession.VehicleStatesSent} état(s) en {recipientSession.VehiclePacketsSent} paquet(s) " +
+                    $"sur {VehicleStreamReportSeconds:F0} s), total envoyé={_vehicleSnapshotsBroadcast} snapshot(s) / " +
+                    $"{_vehicleStatesBroadcast} état(s)" +
+                    (_oversizedVehiclePackets == 0
+                        ? string.Empty
+                        : $", {_oversizedVehiclePackets} paquet(s) REFUSÉ(S) pour dépassement de taille"));
+
+                recipientSession.VehicleBytesSent = 0;
+                recipientSession.VehicleStatesSent = 0;
+                recipientSession.VehiclePacketsSent = 0;
+            }
+        }
+
+        /// <summary>
+        /// Journalise **une fois** de quoi sont faites les identités des véhicules du monde.
+        ///
+        /// Le chiffre qui compte est la part du repli : si tous les véhicules passent par
+        /// l'identifiant du jeu, la clé est stable par construction ; si une partie passe par la position
+        /// d'apparition, la synchronisation dépend de l'instant où les deux instances les ont vus — et
+        /// c'est écrit, pas supposé.
+        /// </summary>
+        private void ReportVehicleIdentities()
+        {
+            var cached = _vehicleCache ?? Array.Empty<Vehicle>();
+            var byUniqueId = 0;
+            var byAnchor = 0;
+            var none = 0;
+            var names = new List<string>();
+
+            for (var i = 0; i < cached.Length; i++)
+            {
+                var vehicle = cached[i];
+                if (vehicle == null)
+                {
+                    continue;
+                }
+
+                var key = VehicleIdentity.KeyOf(vehicle, out var mechanism);
+                if (key == 0L || mechanism == VehicleIdentity.MechanismNone)
+                {
+                    none++;
+                }
+                else if (mechanism == VehicleIdentity.MechanismUniqueId)
+                {
+                    byUniqueId++;
+                }
+                else
+                {
+                    byAnchor++;
+                }
+
+                if (names.Count < 4)
+                {
+                    names.Add(VehicleIdentity.Describe(vehicle));
+                }
+            }
+
+            var report =
+                $"{cached.Length} véhicule(s) : {byUniqueId} par {VehicleIdentity.MechanismUniqueId}, " +
+                $"{byAnchor} par {VehicleIdentity.MechanismSpawnPosition}, {none} sans clé" +
+                (names.Count == 0 ? string.Empty : $" — {string.Join(" · ", names)}");
+
+            if (cached.Length == 0)
+            {
+                report = "aucun véhicule dans le monde";
+            }
+
+            if (string.Equals(report, _lastVehicleIdentityReport, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastVehicleIdentityReport = report;
+            _log.LogInfo($"[net] identités de véhicules : {report}");
+        }
+
+        /// <summary>
+        /// Distance (m) de la créature la plus proche d'un point de référence, et son nom.
+        ///
+        /// Renvoie une valeur avec <c>Exists = false</c> s'il n'y a rien à mesurer ou rien de
+        /// lisible : c'est distinct de « 0 m », et confondre les deux ferait croire à une créature
+        /// collée au joueur.
+        /// </summary>
+        private List<(string Name, float Meters, UnityEngine.Vector3 Reference)> NearestCreatures(Player hostPlayer, int count)
+        {
+            var result = new List<(string, float, UnityEngine.Vector3)>();
+            var cached = _creatureCache ?? Array.Empty<Creature>();
+            if (cached.Length == 0)
+            {
+                return result;
+            }
+
+            UnityEngine.Vector3? origin = null;
+            if (hostPlayer != null && hostPlayer.gameObject != null)
+            {
+                origin = hostPlayer.transform.position;
+            }
+            else
+            {
+                foreach (var session in _sessions.Values)
+                {
+                    if (!session.Accepted)
+                    {
+                        continue;
+                    }
+
+                    origin = new UnityEngine.Vector3(session.X, session.Y, session.Z);
+                    break;
+                }
+            }
+
+            if (origin == null)
+            {
+                return result;
+            }
+
+            var reference = origin.Value;
+            var measured = new List<(string Name, float Meters, UnityEngine.Vector3 Reference)>();
+
+            for (var i = 0; i < cached.Length; i++)
+            {
+                var creature = cached[i];
+                if (creature == null || creature.transform == null)
+                {
+                    continue;
+                }
+
+                measured.Add((
+                    creature.gameObject != null ? creature.gameObject.name : "?",
+                    UnityEngine.Vector3.Distance(creature.transform.position, reference),
+                    reference));
+            }
+
+            measured.Sort((left, right) => left.Meters.CompareTo(right.Meters));
+            for (var i = 0; i < measured.Count && i < count; i++)
+            {
+                result.Add(measured[i]);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Journalise **une fois** de quoi sont faites les identités des créatures du monde.
+        ///
+        /// C'est la mesure qui décide de la suite : si le jeu a posé un `UniqueIdentifier` sur
+        /// toutes les créatures, la clé est stable par construction ; si une partie n'en a pas, le
+        /// repli par position d'apparition prend le relais — et le compte dit lequel des deux porte
+        /// réellement la synchronisation. Les créatures sans aucune clé sont **nommées** : sans ça,
+        /// « 200 créatures non diffusées » ne dirait pas lesquelles, ni pourquoi.
+        /// </summary>
+        /// <summary>
+        /// Dit ce que la sauvegarde contient comme **véhicules**, avec leur distance et leur vitesse.
+        ///
+        /// Pourquoi ce relevé précède le code de M4 au lieu de le suivre : la mesure qui décide de la forme
+        /// de M4 — cadence d'envoi ou interpolation — porte sur un véhicule **en mouvement à 20 m/s**. Si la
+        /// sauvegarde n'en contient aucun (le cas le plus probable ici), aucune ligne de M4 ne pourra être
+        /// mesurée avant d'en avoir fait apparaître un, et mieux vaut l'apprendre par une ligne de journal
+        /// que par un run qui ne mesure rien.
+        /// </summary>
+        private void ReportVehicles(Player hostPlayer, float now)
+        {
+            if (now < _nextVehicleDiagnostic)
+            {
+                return;
+            }
+
+            _nextVehicleDiagnostic = now + VehicleReportSeconds;
+
+            var vehicles = UnityEngine.Object.FindObjectsOfType<Vehicle>();
+            if (vehicles == null || vehicles.Length == 0)
+            {
+                _log.LogInfo(
+                    "[net] véhicules : aucun dans le monde — M4 (Seamoth autoritaire) n'a donc **rien à mesurer** " +
+                    "dans cette sauvegarde : le flux `VehicleSnapshot` n'enverra rien tant qu'un véhicule n'y " +
+                    "apparaît pas (cadence et interpolation sont tranchées par la mesure du §30, appliquées au §33).");
+                return;
+            }
+
+            // Les trois plus proches de l'hôte, nommées et situées : c'est assez pour savoir si M4 a de quoi
+            // mesurer. Leur **vitesse** n'est pas relevée ici, et c'est délibéré : un véhicule immobile
+            // donnerait `0 m/s` — un chiffre qui n'apprend rien et qu'on prendrait pour une mesure. Elle
+            // viendra d'un état de véhicule, le jour où il y en aura un à suivre.
+            var nearest = vehicles
+                .Where(vehicle => vehicle != null && vehicle.transform != null)
+                .Select(vehicle => new
+                {
+                    Name = vehicle.name,
+                    Distance = hostPlayer != null && hostPlayer.transform != null
+                        ? UnityEngine.Vector3.Distance(hostPlayer.transform.position, vehicle.transform.position)
+                        : 0f,
+                })
+                .OrderBy(entry => entry.Distance)
+                .Take(3)
+                .Select(entry =>
+                    $"'{entry.Name}' à {entry.Distance.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} m");
+
+            _log.LogInfo(
+                $"[net] véhicules : {vehicles.Length} dans le monde, les plus proches de l'hôte : " +
+                $"{string.Join(", ", nearest)}. Un véhicule à 20 m/s balaie 2 m par annonce à 10 Hz : c'est le " +
+                "pas que l'interpolation cliente doit absorber (mesuré au §33 : 0,27 m par image au maximum).");
+        }
+
+        private void ReportCreatureIdentities()
+        {
+            var cached = _creatureCache ?? Array.Empty<Creature>();
+            var byUniqueId = 0;
+            var bySpawn = 0;
+            var none = 0;
+            var withoutKeyNames = new List<string>();
+
+            for (var i = 0; i < cached.Length; i++)
+            {
+                var creature = cached[i];
+                if (creature == null)
+                {
+                    continue;
+                }
+
+                CreatureIdentity.KeyOf(creature, out var mechanism);
+                if (mechanism == CreatureIdentity.MechanismUniqueId)
+                {
+                    byUniqueId++;
+                }
+                else if (mechanism == CreatureIdentity.MechanismSpawnPosition)
+                {
+                    bySpawn++;
+                }
+                else
+                {
+                    none++;
+                    if (withoutKeyNames.Count < 5 && creature.gameObject != null)
+                    {
+                        withoutKeyNames.Add(creature.gameObject.name);
+                    }
+                }
+            }
+
+            var report =
+                $"{cached.Length} créature(s) : {bySpawn} par {CreatureIdentity.MechanismSpawnPosition}, " +
+                $"{byUniqueId} par {CreatureIdentity.MechanismUniqueId}, {none} sans clé" +
+                (withoutKeyNames.Count == 0
+                    ? string.Empty
+                    : $" (ex. : {string.Join(", ", withoutKeyNames)})");
+
+            if (string.Equals(report, _lastCreatureIdentityReport, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastCreatureIdentityReport = report;
+            _log.LogInfo($"[net] identités de créatures : {report}");
         }
 
         private void Send(NetPeer peer, Action<PacketWriter> write, DeliveryMethod method)

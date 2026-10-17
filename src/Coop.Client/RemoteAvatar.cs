@@ -36,16 +36,6 @@ namespace Coop.Client
         public const string CloneName = "Coop.RemoteAvatar";
 
         /// <summary>
-        /// Composants conservés sur la copie : de quoi être dessiné, et rien de plus.
-        /// `Transform` en fait partie car il ressort de <c>GetComponents</c> comme les autres.
-        /// </summary>
-        private static bool IsVisual(Type type) =>
-            type == typeof(Transform) ||
-            typeof(Renderer).IsAssignableFrom(type) ||
-            type == typeof(MeshFilter) ||
-            type == typeof(Animator);
-
-        /// <summary>
         /// Composants dont la seule présence dans le sous-arbre interdit la copie. Ce ne sont pas des
         /// précautions de style : chacun d'eux, dupliqué, casserait quelque chose de précis
         /// (autorité du joueur, rendu, audio du client).
@@ -157,7 +147,10 @@ namespace Coop.Client
             }
 
             var skinnedCount = candidate.GetComponentsInChildren<SkinnedMeshRenderer>(true).Length;
-            Log.LogInfo($"[avatar] corps candidat : '{Path(candidate)}' — {skinnedCount} SkinnedMeshRenderer");
+            Log.LogInfo(
+                $"[avatar] corps candidat : '{Path(candidate)}' — {skinnedCount} SkinnedMeshRenderer, " +
+                $"localPosition={candidate.localPosition.ToString("F3")}, localEuler={candidate.localEulerAngles.ToString("F1")}, " +
+                $"deltaWorld={(candidate.position - playerRoot.position).ToString("F3")}");
 
             if (!IsSafeToClone(candidate, out var reason))
             {
@@ -201,6 +194,111 @@ namespace Coop.Client
             // `Viewmodel`, propre à la vue première personne. Un avatar mondial doit être ailleurs,
             // mais ce choix se mesure (voir AvatarProbeBehaviour) plutôt que de se décider à l'aveugle.
             return clone;
+        }
+
+        /// <summary>
+        /// Calcule la pose mondiale exacte que doit prendre la racine du corps copié (<c>Player/body</c>)
+        /// pour un joueur dont le <c>Player.mainObject</c> est à <paramref name="networkRootPosition"/>
+        /// et <paramref name="networkRootRotation"/>.
+        ///
+        /// Sur le joueur local, <c>Player/body</c> est un enfant de <c>Player.mainObject</c> et possède
+        /// son propre décalage local (<c>localPosition</c>) par rapport au centre de la capsule physique.
+        /// Appliquer directement <c>Player.mainObject.transform.position</c> à
+        /// <c>clone.transform.position</c> supprimait ce décalage local et faisait flotter ou s'enfoncer
+        /// l'avatar par rapport aux pieds du joueur local.
+        ///
+        /// En revanche, la **rotation locale du corps n'est pas réappliquée** : elle porte le lacet de la
+        /// vue du joueur local, et la multiplier par la rotation réseau réinjectait ce lacet dans tous les
+        /// avatars distants (constaté en jeu : les corps tournaient avec la caméra du receveur). La
+        /// rotation réseau est désormais le lacet du regard de l'émetteur (`Shared/ViewDirection.cs`),
+        /// donc elle s'applique telle quelle.
+        /// </summary>
+        public static void ComputeBodyWorldPose(
+            Transform localPlayerRoot,
+            Vector3 networkRootPosition,
+            Quaternion networkRootRotation,
+            out Vector3 bodyWorldPosition,
+            out Quaternion bodyWorldRotation,
+            out Vector3 bodyLocalPosition)
+        {
+            bodyLocalPosition = Vector3.zero;
+            if (localPlayerRoot != null)
+            {
+                var candidate = FindBodyRoot(localPlayerRoot);
+                if (candidate != null)
+                {
+                    bodyLocalPosition = candidate.localPosition;
+                    bodyWorldPosition = networkRootPosition + networkRootRotation * candidate.localPosition;
+                    bodyWorldRotation = networkRootRotation;
+                    return;
+                }
+            }
+
+            bodyWorldPosition = networkRootPosition;
+            bodyWorldRotation = networkRootRotation;
+        }
+
+        /// <summary>
+        /// Mesure en coordonnées mondiales la hauteur minimale (pieds) et maximale (sommet de la tête)
+        /// des sommets cuits (<c>BakeMesh</c>) des <see cref="SkinnedMeshRenderer"/> actifs d'une racine.
+        /// Permet de comparer directement la hauteur des pieds de l'avatar distant à celle du joueur local.
+        /// </summary>
+        public static bool TryMeasureWorldVerticalSpan(Transform root, out float minY, out float maxY)
+        {
+            minY = float.MaxValue;
+            maxY = float.MinValue;
+            if (root == null)
+            {
+                return false;
+            }
+
+            var found = false;
+            var mesh = new Mesh();
+            try
+            {
+                foreach (var skinned in root.GetComponentsInChildren<SkinnedMeshRenderer>(false))
+                {
+                    if (skinned == null || !skinned.enabled || !skinned.gameObject.activeInHierarchy || skinned.sharedMesh == null)
+                    {
+                        continue;
+                    }
+
+                    // Ignorer les maillages très petits (yeux, accessoires) pour mesurer le corps/pieds.
+                    if (skinned.sharedMesh.vertexCount < 200)
+                    {
+                        continue;
+                    }
+
+                    skinned.BakeMesh(mesh);
+                    var verts = mesh.vertices;
+                    var tr = skinned.transform;
+                    for (var i = 0; i < verts.Length; i++)
+                    {
+                        var wy = tr.TransformPoint(verts[i]).y;
+                        if (wy < minY)
+                        {
+                            minY = wy;
+                        }
+
+                        if (wy > maxY)
+                        {
+                            maxY = wy;
+                        }
+
+                        found = true;
+                    }
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                UnityEngine.Object.Destroy(mesh);
+            }
+
+            return found;
         }
 
         /// <summary>
@@ -312,66 +410,24 @@ namespace Coop.Client
         }
 
         /// <summary>
-        /// Retire de la copie tout ce qui n'est pas visuel.
+        /// Retire de la copie tout ce qui n'est pas visuel, **dépendants d'abord**.
         ///
-        /// **En deux passes, et le compte rendu est vérifié.** Unity refuse de retirer un composant
-        /// dont un autre dépend encore (`Can't remove ConditionRules because ArmsController depends
-        /// on it`) : une seule passe laissait des composants en place tout en les annonçant retirés.
-        /// Le journal est donc établi en relisant la copie après coup — ce qui est écrit correspond
-        /// à ce qui reste, pas à ce qu'on a tenté.
+        /// L'ordre vient de `[RequireComponent]` : c'est lui qui fait disparaître l'erreur native
+        /// `Can't remove ConditionRules because ArmsController depends on it`, qu'Unity écrivait quand un
+        /// composant requis tombait avant celui qui l'exige (voir <see cref="RemoteAvatarComponents"/> et le
+        /// relevé du §26). Le corps copié garde son `Animator` — sans lui les os restent figés.
+        ///
+        /// Le compte rendu est **vérifié** : il est établi en relisant la copie après coup, donc ce qui est
+        /// écrit correspond à ce qui reste, pas à ce qu'on a tenté.
         /// </summary>
         private static void StripNonVisualComponents(GameObject clone)
         {
-            var before = new List<string>();
-            foreach (var component in clone.GetComponentsInChildren<Component>(true))
-            {
-                if (component != null && !IsVisual(component.GetType()))
-                {
-                    before.Add(component.GetType().Name);
-                }
-            }
+            var report = RemoteAvatarComponents.Strip(clone, keepAnimator: true);
 
-            for (var pass = 0; pass < 3; pass++)
-            {
-                var removedThisPass = 0;
-
-                foreach (var component in clone.GetComponentsInChildren<Component>(true))
-                {
-                    if (component == null || IsVisual(component.GetType()))
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        UnityEngine.Object.DestroyImmediate(component);
-                        removedThisPass++;
-                    }
-                    catch (Exception exception)
-                    {
-                        Log.LogWarning($"[avatar] impossible de retirer {component.GetType().Name} : {exception.Message}");
-                    }
-                }
-
-                if (removedThisPass == 0)
-                {
-                    break;
-                }
-            }
-
-            var remaining = new List<string>();
-            foreach (var component in clone.GetComponentsInChildren<Component>(true))
-            {
-                if (component != null && !IsVisual(component.GetType()))
-                {
-                    remaining.Add(component.GetType().Name);
-                }
-            }
-
-            Log.LogInfo(before.Count == 0
+            Log.LogInfo(report.Detected == 0
                 ? "[avatar] aucun composant de gameplay à retirer de la copie."
-                : $"[avatar] composants de gameplay : {before.Count} détecté(s) -> {before.Count - remaining.Count} retiré(s)" +
-                  (remaining.Count == 0 ? ", 0 restant" : $", restants : {string.Join(", ", remaining)}"));
+                : $"[avatar] composants de gameplay : {report.Detected} détecté(s) -> {report.Removed} retiré(s)" +
+                  (report.Remaining.Count == 0 ? ", 0 restant" : $", restants : {string.Join(", ", report.Remaining)}"));
         }
 
         /// <summary>
@@ -640,6 +696,798 @@ namespace Coop.Client
             }
 
             return builder.ToString();
+        }
+    }
+
+    /// <summary>
+    /// Gère le cycle de vie des avatars distants en fonction des événements réseau
+    /// (<see cref="Coop.Model.PlayerJoinedMessage"/>, <see cref="Coop.Model.PlayerLeftMessage"/>,
+    /// <see cref="Coop.Model.PlayersSnapshotMessage"/>) et interpole leurs positions/rotations
+    /// entre deux ticks serveur (20 Hz).
+    ///
+    /// Dépend de la présence du joueur local dans le monde (<c>Player.main</c> et <c>Player.main.head</c>)
+    /// puisque la fabrique copie le corps local. Tant que le monde n'est pas chargé, les joueurs
+    /// distants connus sont conservés en mémoire et leurs avatars sont instanciés dès que le
+    /// corps local devient disponible.
+    /// </summary>
+    internal sealed class RemotePlayerManager
+    {
+        /// <summary>
+        /// Id du personnage virtuel de l'hôte (le serveur lui-même) dans les messages de joueur.
+        /// Recopié de `ServerNetwork` (qui l'écrit en clair à plusieurs endroits) : c'est une constante du
+        /// protocole, pas une valeur de sonde.
+        /// </summary>
+        private const ushort HostAvatarPlayerId = 9999;
+        private sealed class RemoteEntry
+        {
+            public ushort PlayerId;
+            public string Username;
+            public long LastServerTick;
+            public bool HasPosition;
+            public Vector3 PreviousPosition;
+            public Quaternion PreviousRotation = Quaternion.identity;
+            public Vector3 TargetPosition;
+            public Quaternion TargetRotation = Quaternion.identity;
+            public Vector3 CurrentRootPosition;
+            public Quaternion CurrentRootRotation = Quaternion.identity;
+            public Vector3 PreviousMoveSpeed;
+            public Vector3 TargetMoveSpeed;
+            public float PreviousViewPitch;
+            public float TargetViewPitch;
+            public bool IsUnderwater;
+            public bool OnSurface;
+            public Coop.Model.PlayerActionFlags ActionFlags;
+            public float LastSnapshotRealtime;
+            public string[] Equipment;
+
+            /// <summary>Couleur assignée par le serveur ; <see cref="HasColor"/> dit si elle est arrivée.</summary>
+            public byte ColorIndex;
+            public bool HasColor;
+
+            public bool HasHeldItem;
+            public string HeldItemName = string.Empty;
+            public string[] HoldingParams = Array.Empty<string>();
+            public RemoteAvatarHeldItem HeldItem;
+            public GameObject Avatar;
+            public Animator Animator;
+            public SkinnedMeshRenderer BodyRenderer;
+            public Vector3[] BaselineVertices;
+            public bool LoggedFirstAnimatedMovement;
+            public bool LoggedBoneDisplacement;
+            public float FirstAnimatedMovementTime;
+        }
+
+        /// <summary>Durée nominale d'interpolation (un intervalle de tick à 20 Hz = 50 ms).</summary>
+        private const float InterpolationWindowSeconds = 0.05f;
+
+        /// <summary>Au-delà de cette distance (m), on téléporte au lieu d'interpoler (ex. spawn initial).</summary>
+        private const float TeleportThresholdMeters = 10f;
+
+        private readonly Dictionary<ushort, RemoteEntry> _remotes = new Dictionary<ushort, RemoteEntry>();
+        private readonly ManualLogSource _log;
+
+        // — Relevés pour les sondes (`-coopdebug=presence`) ————————————————————
+        //
+        // Ils ne servent à **rien** dans le jeu : aucun de ces champs n'est lu par le chemin normal. Ils
+        // existent parce qu'une sonde doit mesurer ce que le client a réellement reçu, pas ce qu'il aurait
+        // dû recevoir. Un relevé reconstruit par la sonde mesurerait la sonde.
+        private int _equipmentRevision;
+        private ushort _lastEquipmentId;
+        private string[] _lastEquipmentTypes = Array.Empty<string>();
+        private int _heldItemRevision;
+        private ushort _lastHeldItemId;
+        private string _lastHeldItemName = string.Empty;
+        private string[] _lastHoldingParams = Array.Empty<string>();
+
+        public RemotePlayerManager(ManualLogSource log)
+        {
+            _log = log;
+        }
+
+        public int RemoteCount => _remotes.Count;
+
+        public int SpawnedAvatarCount
+        {
+            get
+            {
+                var count = 0;
+                foreach (var entry in _remotes.Values)
+                {
+                    if (entry.Avatar != null)
+                    {
+                        count++;
+                    }
+                }
+
+                return count;
+            }
+        }
+
+        public void OnPlayerJoined(Coop.Model.PlayerJoinedMessage msg)
+        {
+            if (!_remotes.TryGetValue(msg.PlayerId, out var entry))
+            {
+                entry = new RemoteEntry
+                {
+                    PlayerId = msg.PlayerId,
+                    Username = msg.Username ?? $"Joueur#{msg.PlayerId}",
+                };
+                _remotes[msg.PlayerId] = entry;
+            }
+            else
+            {
+                entry.Username = msg.Username ?? entry.Username;
+            }
+
+            var pos = new Vector3(msg.X, msg.Y, msg.Z);
+            var rot = NormalizeQuaternion(new Quaternion(msg.RotX, msg.RotY, msg.RotZ, msg.RotW));
+            if (pos.sqrMagnitude > 0.0001f)
+            {
+                entry.PreviousPosition = pos;
+                entry.TargetPosition = pos;
+                entry.PreviousRotation = rot;
+                entry.TargetRotation = rot;
+                entry.HasPosition = true;
+                entry.LastSnapshotRealtime = Time.realtimeSinceStartup;
+            }
+
+            _log.LogInfo(
+                $"[presence] joueur rejoint : '{entry.Username}' (id={entry.PlayerId}) " +
+                $"pos=({msg.X:F2}, {msg.Y:F2}, {msg.Z:F2}) — total distants={_remotes.Count}");
+        }
+
+        public void OnPlayerLeft(Coop.Model.PlayerLeftMessage msg)
+        {
+            if (!_remotes.TryGetValue(msg.PlayerId, out var entry))
+            {
+                return;
+            }
+
+            _remotes.Remove(msg.PlayerId);
+            entry.HeldItem?.Dispose();
+            entry.HeldItem = null;
+            if (entry.Avatar != null)
+            {
+                UnityEngine.Object.Destroy(entry.Avatar);
+                entry.Avatar = null;
+            }
+
+            _log.LogInfo(
+                $"[presence] joueur parti : '{entry.Username}' (id={msg.PlayerId}, raison={msg.Reason}) " +
+                $"— avatar détruit, total distants={_remotes.Count}");
+        }
+
+        public void OnSnapshot(Coop.Model.PlayersSnapshotMessage snapshot)
+        {
+            if (snapshot.Players == null)
+            {
+                return;
+            }
+
+            var now = Time.realtimeSinceStartup;
+            for (var i = 0; i < snapshot.Players.Length; i++)
+            {
+                var state = snapshot.Players[i];
+                if (!_remotes.TryGetValue(state.PlayerId, out var entry))
+                {
+                    // Filet de sécurité si un snapshot arrive avant ou sans PlayerJoined.
+                    entry = new RemoteEntry
+                    {
+                        PlayerId = state.PlayerId,
+                        Username = $"Joueur#{state.PlayerId}",
+                    };
+                    _remotes[state.PlayerId] = entry;
+                    _log.LogInfo($"[presence] joueur découvert via snapshot : id={state.PlayerId}");
+                }
+
+                if (entry.HasPosition && snapshot.ServerTick < entry.LastServerTick)
+                {
+                    continue;
+                }
+
+                entry.LastServerTick = snapshot.ServerTick;
+                var newPos = new Vector3(state.X, state.Y, state.Z);
+                var newRot = NormalizeQuaternion(new Quaternion(state.RotX, state.RotY, state.RotZ, state.RotW));
+                var newSpeed = new Vector3(state.MoveSpeedX, state.MoveSpeedY, state.MoveSpeedZ);
+
+                if (!entry.HasPosition || Vector3.Distance(entry.TargetPosition, newPos) > TeleportThresholdMeters)
+                {
+                    entry.PreviousPosition = newPos;
+                    entry.TargetPosition = newPos;
+                    entry.CurrentRootPosition = newPos;
+                    entry.PreviousRotation = newRot;
+                    entry.TargetRotation = newRot;
+                    entry.CurrentRootRotation = newRot;
+                    entry.PreviousMoveSpeed = newSpeed;
+                    entry.TargetMoveSpeed = newSpeed;
+                    entry.PreviousViewPitch = state.ViewPitch;
+                    entry.TargetViewPitch = state.ViewPitch;
+                    entry.HasPosition = true;
+                }
+                else
+                {
+                    // Point de départ de la nouvelle fenêtre d'interpolation : la position racine
+                    // interpolée courante (sans mélanger l'espace de Player.mainObject et celui de Player/body).
+                    entry.PreviousPosition = entry.Avatar != null ? entry.CurrentRootPosition : entry.TargetPosition;
+                    entry.PreviousRotation = entry.Avatar != null ? entry.CurrentRootRotation : entry.TargetRotation;
+                    entry.TargetPosition = newPos;
+                    entry.TargetRotation = newRot;
+                    entry.PreviousMoveSpeed = entry.TargetMoveSpeed;
+                    entry.TargetMoveSpeed = newSpeed;
+                    entry.PreviousViewPitch = entry.TargetViewPitch;
+                    entry.TargetViewPitch = state.ViewPitch;
+                }
+
+                entry.IsUnderwater = state.IsUnderwater;
+                entry.OnSurface = state.OnSurface;
+                entry.ActionFlags = state.ActionFlags;
+                entry.LastSnapshotRealtime = now;
+            }
+        }
+
+        /// <summary>
+        /// Couleur d'un joueur distant, décidée par le serveur (§27).
+        ///
+        /// Même cycle que l'équipement : appliquée tout de suite si l'avatar existe, mémorisée sinon
+        /// pour la création. Le client ne décide rien — c'est ce qui garantit que deux joueurs ne
+        /// portent pas la même couleur.
+        /// </summary>
+        public void OnPlayerColor(Coop.Model.PlayerColorMessage msg)
+        {
+            if (!_remotes.TryGetValue(msg.PlayerId, out var entry))
+            {
+                entry = new RemoteEntry
+                {
+                    PlayerId = msg.PlayerId,
+                    Username = $"Joueur#{msg.PlayerId}",
+                };
+                _remotes[msg.PlayerId] = entry;
+            }
+
+            entry.ColorIndex = msg.ColorIndex;
+            entry.HasColor = true;
+            Coop.Model.Protocol.PlayerColorAt(msg.ColorIndex, out var r, out var g, out var b);
+
+            if (entry.Avatar != null)
+            {
+                var report = RemoteAvatarColor.Apply(entry.Avatar, msg.ColorIndex);
+                _log.LogInfo(
+                    $"[presence] couleur appliquée sur l'avatar de '{entry.Username}' (id={entry.PlayerId}) : " +
+                    $"indice {msg.ColorIndex} rgb({r},{g},{b}) -> {report}");
+            }
+            else
+            {
+                _log.LogInfo(
+                    $"[presence] couleur mémorisée pour '{entry.Username}' (id={msg.PlayerId}, avatar en attente) : " +
+                    $"indice {msg.ColorIndex} rgb({r},{g},{b})");
+            }
+        }
+
+        /// <summary>
+        /// Nombre de joueurs distants connus — pour la sonde : c'est ce qui distingue « personne n'est là »
+        /// (une mesure impossible) de « un joueur est là mais aucun avatar » (un défaut).
+        /// </summary>
+        internal int KnownRemoteCountForProbe => _remotes.Count;
+
+        /// <summary>
+        /// Dernier équipement **reçu du serveur** : son identifiant effectif et sa liste.
+        ///
+        /// C'est ce qui rend la réécriture du `PlayerId` mesurable côté client : une sonde annonce un
+        /// équipement sous l'id d'un autre joueur, et l'autre client relève ici **sous quel id** le relais
+        /// l'a diffusé. La valeur vient du gestionnaire, pas de la sonde.
+        /// </summary>
+        internal bool TryGetLastEquipmentForProbe(out ushort playerId, out string[] types, out int revision)
+        {
+            playerId = _lastEquipmentId;
+            types = _lastEquipmentTypes;
+            revision = _equipmentRevision;
+            return _equipmentRevision > 0;
+        }
+
+        /// <summary>Dernier objet tenu reçu du serveur, avec son identifiant effectif.</summary>
+        internal bool TryGetLastHeldItemForProbe(
+            out ushort playerId,
+            out string techTypeName,
+            out string[] holdingParams,
+            out int revision)
+        {
+            playerId = _lastHeldItemId;
+            techTypeName = _lastHeldItemName;
+            holdingParams = _lastHoldingParams;
+            revision = _heldItemRevision;
+            return _heldItemRevision > 0;
+        }
+
+        /// <summary>
+        /// Première entrée distante qui est un **autre client**, l'hôte (id 9999, avatar virtuel du serveur)
+        /// exclu.
+        ///
+        /// Pourquoi l'exclusion est nécessaire et non cosmétique : avec un hôte et deux clients, le
+        /// gestionnaire contient trois entrées, et `TryGetFirstAvatarForProbe` peut rendre celle de l'hôte.
+        /// Une sonde qui enverrait sa falsification à l'hôte n'aurait aucun observateur (le serveur ne
+        /// retourne jamais un message à son émetteur et ne lance pas la sonde), et une nage mesurée sur
+        /// l'avatar de l'hôte serait toujours immobile — deux faux négatifs parfaitement silencieux.
+        /// </summary>
+        internal bool TryGetPeerAvatarForProbe(
+            out ushort playerId,
+            out string username,
+            out GameObject avatar)
+        {
+            foreach (var pair in _remotes)
+            {
+                var entry = pair.Value;
+                if (pair.Key == HostAvatarPlayerId || entry.Avatar == null)
+                {
+                    continue;
+                }
+
+                playerId = pair.Key;
+                username = entry.Username;
+                avatar = entry.Avatar;
+                return true;
+            }
+
+            playerId = 0;
+            username = null;
+            avatar = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Mouvement d'un joueur distant **précis** tel que le client l'applique : vitesse cible (celle qui
+        /// pilote l'animateur) et position cible. La variante « premier trouvé » ne suffit pas dès qu'il y a
+        /// un hôte dans le monde : elle rendrait la sienne, toujours immobile.
+        /// </summary>
+        internal bool TryGetMotionForProbe(
+            ushort playerId,
+            out float moveSpeed,
+            out Vector3 position,
+            out bool isUnderwater)
+        {
+            if (_remotes.TryGetValue(playerId, out var entry) && entry.HasPosition)
+            {
+                moveSpeed = entry.TargetMoveSpeed.magnitude;
+                position = entry.TargetPosition;
+                isUnderwater = entry.IsUnderwater;
+                return true;
+            }
+
+            moveSpeed = 0f;
+            position = Vector3.zero;
+            isUnderwater = false;
+            return false;
+        }
+
+        /// <summary>
+        /// Mouvement d'un joueur distant tel que le client l'applique : vitesse cible (celle qui pilote
+        /// l'animateur) et position cible. Sert à vérifier qu'un vrai déplacement **arrive** et qu'il
+        /// s'arrête, au lieu de croire l'animateur sur parole.
+        /// </summary>
+        internal bool TryGetFirstMotionForProbe(
+            out ushort playerId,
+            out float moveSpeed,
+            out Vector3 position,
+            out bool isUnderwater)
+        {
+            foreach (var pair in _remotes)
+            {
+                var entry = pair.Value;
+                if (!entry.HasPosition)
+                {
+                    continue;
+                }
+
+                playerId = pair.Key;
+                moveSpeed = entry.TargetMoveSpeed.magnitude;
+                position = entry.TargetPosition;
+                isUnderwater = entry.IsUnderwater;
+                return true;
+            }
+
+            playerId = 0;
+            moveSpeed = 0f;
+            position = Vector3.zero;
+            isUnderwater = false;
+            return false;
+        }
+
+        /// <summary>
+        /// Premier avatar distant **réellement instancié et coloré** — et son indice, celui du serveur.
+        ///
+        /// Exposé à la sonde de présence (<c>-coopdebug=presence</c>) parce que la branche « couleur reçue
+        /// alors que l'avatar existe déjà » est inatteignable par le cours normal des messages : la couleur
+        /// part à l'admission, l'avatar naît plus tard (mesuré : `couleur mémorisée … avatar en attente`).
+        /// </summary>
+        internal bool TryGetFirstAvatarForProbe(
+            out ushort playerId,
+            out string username,
+            out byte colorIndex,
+            out GameObject avatar)
+        {
+            foreach (var pair in _remotes)
+            {
+                var entry = pair.Value;
+                if (entry.Avatar == null || !entry.HasColor)
+                {
+                    continue;
+                }
+
+                playerId = pair.Key;
+                username = entry.Username;
+                colorIndex = entry.ColorIndex;
+                avatar = entry.Avatar;
+                return true;
+            }
+
+            playerId = 0;
+            username = null;
+            colorIndex = 0;
+            avatar = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Applique un équipement reçu au joueur local, en le faisant passer par le gestionnaire :
+        /// la sonde mesure le même chemin qu'un message du serveur, elle ne le réimplémente pas.
+        /// </summary>
+        internal void ProbeApplyEquipment(ushort playerId, string[] types) =>
+            OnPlayerEquipment(new Coop.Model.PlayerEquipmentMessage
+            {
+                PlayerId = playerId,
+                TechTypeNames = types,
+            });
+
+        /// <summary>
+        /// Rejoue **le chemin réel** d'un message de couleur pour la sonde, au lieu de le réimplémenter :
+        /// c'est <see cref="OnPlayerColor"/> qui s'exécute, donc exactement le code que le serveur déclenche.
+        ///
+        /// Le client ne décide rien pour autant : c'est la sonde qui décide, elle le journalise, et elle
+        /// remet ensuite l'indice assigné par le serveur (et le vérifie).
+        /// </summary>
+        internal void ProbeReplayColor(ushort playerId, byte colorIndex) =>
+            OnPlayerColor(new Coop.Model.PlayerColorMessage
+            {
+                PlayerId = playerId,
+                ColorIndex = colorIndex,
+            });
+
+        public void OnPlayerEquipment(Coop.Model.PlayerEquipmentMessage msg)
+        {
+            if (!_remotes.TryGetValue(msg.PlayerId, out var entry))
+            {
+                entry = new RemoteEntry
+                {
+                    PlayerId = msg.PlayerId,
+                    Username = $"Joueur#{msg.PlayerId}",
+                };
+                _remotes[msg.PlayerId] = entry;
+            }
+
+            entry.Equipment = msg.TechTypeNames ?? Array.Empty<string>();
+            _equipmentRevision++;
+            _lastEquipmentId = msg.PlayerId;
+            _lastEquipmentTypes = entry.Equipment;
+
+            var desc = entry.Equipment.Length == 0
+                ? "(sans équipement)"
+                : string.Join(", ", entry.Equipment);
+
+            if (entry.Avatar != null)
+            {
+                RemoteAvatarFactory.ApplyEquipment(entry.Avatar, entry.Equipment);
+                var activeNodes = RemoteAvatarEquipment.ActiveGovernedNodes(entry.Avatar);
+                _log.LogInfo(
+                    $"[presence] équipement appliqué sur l'avatar de '{entry.Username}' (id={entry.PlayerId}) : " +
+                    $"{entry.Equipment.Length} pièce(s) [{desc}] -> {activeNodes.Count} nœud(s) actif(s) [{string.Join(", ", activeNodes)}]");
+            }
+            else
+            {
+                _log.LogInfo(
+                    $"[presence] équipement mémorisé pour '{entry.Username}' (id={entry.PlayerId}, avatar en attente) : " +
+                    $"{entry.Equipment.Length} pièce(s) [{desc}]");
+            }
+        }
+
+        /// <summary>
+        /// Objet tenu d'un joueur distant : l'outil en main et les paramètres d'animation que le jeu a
+        /// posés pour lui. Reçu en fiable (le changement d'outil est rare), appliqué immédiatement si
+        /// l'avatar existe, mémorisé sinon pour la création de l'avatar.
+        /// </summary>
+        public void OnPlayerHeldItem(Coop.Model.PlayerHeldItemMessage msg)
+        {
+            if (!_remotes.TryGetValue(msg.PlayerId, out var entry))
+            {
+                entry = new RemoteEntry
+                {
+                    PlayerId = msg.PlayerId,
+                    Username = $"Joueur#{msg.PlayerId}",
+                };
+                _remotes[msg.PlayerId] = entry;
+            }
+
+            entry.HasHeldItem = true;
+            entry.HeldItemName = msg.TechTypeName ?? string.Empty;
+            entry.HoldingParams = msg.HoldingParams ?? Array.Empty<string>();
+            _heldItemRevision++;
+            _lastHeldItemId = msg.PlayerId;
+            _lastHeldItemName = entry.HeldItemName;
+            _lastHoldingParams = entry.HoldingParams;
+
+            var label = entry.HeldItemName.Length == 0 ? "(rien en main)" : entry.HeldItemName;
+
+            if (entry.HeldItem != null)
+            {
+                entry.HeldItem.Apply(entry.HeldItemName, entry.HoldingParams);
+                _log.LogInfo(
+                    $"[presence] objet tenu appliqué sur l'avatar de '{entry.Username}' (id={entry.PlayerId}) : " +
+                    $"{entry.HeldItem.Describe()}");
+            }
+            else
+            {
+                _log.LogInfo(
+                    $"[presence] objet tenu mémorisé pour '{entry.Username}' (id={entry.PlayerId}, avatar en attente) : " +
+                    $"{label} ({entry.HoldingParams.Length} paramètre(s) `holding_*`)");
+            }
+        }
+
+        /// <summary>
+        /// Appelé à chaque frame côté client : crée les avatars en attente dès que le joueur local
+        /// est prêt dans le monde, et interpole les transformations de chaque avatar actif.
+        /// </summary>
+        public void UpdateAvatars()
+        {
+            if (_remotes.Count == 0)
+            {
+                return;
+            }
+
+            var localReady = Player.main != null && Player.mainObject != null && Player.main.head != null;
+            var now = Time.realtimeSinceStartup;
+
+            foreach (var entry in _remotes.Values)
+            {
+                if (!entry.HasPosition)
+                {
+                    continue;
+                }
+
+                if (entry.Avatar == null && localReady)
+                {
+                    var root = Player.mainObject.transform;
+                    RemoteAvatarFactory.ComputeBodyWorldPose(
+                        root,
+                        entry.TargetPosition,
+                        entry.TargetRotation,
+                        out var initialBodyPos,
+                        out var initialBodyRot,
+                        out var bodyLocalOffset);
+
+                    var clone = RemoteAvatarFactory.TryCreate(root, initialBodyPos, root, out var failure);
+                    if (clone != null)
+                    {
+                        clone.name = $"{RemoteAvatarFactory.CloneName}.{entry.PlayerId}.{entry.Username}";
+                        clone.transform.position = initialBodyPos;
+                        clone.transform.rotation = initialBodyRot;
+                        entry.CurrentRootPosition = entry.TargetPosition;
+                        entry.CurrentRootRotation = entry.TargetRotation;
+
+                        var moved = RemoteAvatarFactory.MoveRenderersToWorldLayer(clone);
+                        if (entry.Equipment != null)
+                        {
+                            RemoteAvatarFactory.ApplyEquipment(clone, entry.Equipment);
+                        }
+
+                        // La couleur vient **après** la tenue : les règles de tenue activent ou masquent
+                        // des nœuds, et teinter un renderer masqué n'a pas d'intérêt — c'est la
+                        // combinaison visible qu'on colore.
+                        var colorReport = string.Empty;
+                        if (entry.HasColor)
+                        {
+                            colorReport = RemoteAvatarColor.Apply(clone, entry.ColorIndex);
+                        }
+
+                        var activeNodes = RemoteAvatarEquipment.ActiveGovernedNodes(clone);
+                        entry.Avatar = clone;
+                        entry.Animator = clone.GetComponentInChildren<Animator>(true);
+                        entry.BodyRenderer = FindMainBodyRenderer(clone);
+                        entry.BaselineVertices = BakeVertices(entry.BodyRenderer);
+
+                        // L'objet tenu a sa propre vie : il pose la pose `holding_*`, monte le modèle
+                        // de l'outil sous `attach1` et sort le PDA quand il faut. Créé même sans objet
+                        // reçu, pour que le premier `PlayerHeldItem` qui arrive trouve quelqu'un.
+                        entry.HeldItem = new RemoteAvatarHeldItem(clone, entry.Animator);
+                        if (entry.HasHeldItem)
+                        {
+                            entry.HeldItem.Apply(entry.HeldItemName, entry.HoldingParams);
+                        }
+
+                        var alignmentReport = string.Empty;
+                        var localBody = RemoteAvatarFactory.FindBodyRoot(root);
+                        if (localBody != null &&
+                            RemoteAvatarFactory.TryMeasureWorldVerticalSpan(localBody, out var localMinY, out var localMaxY) &&
+                            RemoteAvatarFactory.TryMeasureWorldVerticalSpan(clone.transform, out var cloneMinY, out var cloneMaxY))
+                        {
+                            var localFeetRelRoot = localMinY - root.position.y;
+                            var cloneFeetRelRoot = cloneMinY - entry.TargetPosition.y;
+                            var feetError = cloneFeetRelRoot - localFeetRelRoot;
+                            alignmentReport =
+                                $", offsetCorpsLocal={bodyLocalOffset.ToString("F3")}, " +
+                                $"piedsRelRoot: local={localFeetRelRoot:F3}m avatar={cloneFeetRelRoot:F3}m (écart={feetError:F4}m, taille={cloneMaxY - cloneMinY:F2}m)";
+                        }
+
+                        _log.LogInfo(
+                            $"[presence] avatar instancié pour '{entry.Username}' (id={entry.PlayerId}) " +
+                            $"root={entry.TargetPosition.ToString("F2")} -> body={initialBodyPos.ToString("F2")} " +
+                            $"({moved} renderers sur Default, animator={(entry.Animator != null ? entry.Animator.name : "absent")}, " +
+                            $"tenue={entry.Equipment?.Length ?? 0} pièce(s), {activeNodes.Count} nœud(s) actif(s) [{string.Join(", ", activeNodes)}]" +
+                            (colorReport.Length == 0 ? string.Empty : $", {colorReport}") +
+                            $"{alignmentReport})");
+                    }
+                    else
+                    {
+                        _log.LogWarning(
+                            $"[presence] échec création avatar pour '{entry.Username}' (id={entry.PlayerId}) : {failure}");
+                    }
+                }
+
+                if (entry.Avatar != null)
+                {
+                    var t = Mathf.Clamp01((now - entry.LastSnapshotRealtime) / InterpolationWindowSeconds);
+                    entry.CurrentRootPosition = Vector3.Lerp(entry.PreviousPosition, entry.TargetPosition, t);
+                    entry.CurrentRootRotation = Quaternion.Slerp(entry.PreviousRotation, entry.TargetRotation, t);
+
+                    var root = Player.mainObject != null ? Player.mainObject.transform : null;
+                    RemoteAvatarFactory.ComputeBodyWorldPose(
+                        root,
+                        entry.CurrentRootPosition,
+                        entry.CurrentRootRotation,
+                        out var bodyPos,
+                        out var bodyRot,
+                        out _);
+
+                    entry.Avatar.transform.position = bodyPos;
+                    entry.Avatar.transform.rotation = bodyRot;
+
+                    if (entry.Animator != null)
+                    {
+                        var speed = Vector3.Lerp(entry.PreviousMoveSpeed, entry.TargetMoveSpeed, t);
+                        var pitch = Mathf.Lerp(entry.PreviousViewPitch, entry.TargetViewPitch, t);
+                        var mag = speed.magnitude;
+
+                        SafeAnimator.SetFloat(entry.Animator, "move_speed", mag);
+                        SafeAnimator.SetFloat(entry.Animator, "move_speed_x", speed.x);
+                        SafeAnimator.SetFloat(entry.Animator, "move_speed_y", speed.y);
+                        SafeAnimator.SetFloat(entry.Animator, "move_speed_z", speed.z);
+                        SafeAnimator.SetFloat(entry.Animator, "view_pitch", pitch);
+                        SafeAnimator.SetBool(entry.Animator, "is_underwater", entry.IsUnderwater);
+                        SafeAnimator.SetBool(entry.Animator, "on_surface", entry.OnSurface);
+
+                        // Actions instantanées : elles voyagent à 20 Hz avec la position, donc elles
+                        // suivent le geste sans faire porter un aller-retour à chaque clic.
+                        var flags = entry.ActionFlags;
+                        SafeAnimator.SetBool(entry.Animator, "using_pda", (flags & Coop.Model.PlayerActionFlags.UsingPda) != 0);
+                        SafeAnimator.SetBool(entry.Animator, "using_tool", (flags & Coop.Model.PlayerActionFlags.UsingTool) != 0);
+                        SafeAnimator.SetBool(entry.Animator, "using_tool_alt", (flags & Coop.Model.PlayerActionFlags.UsingToolAlt) != 0);
+                        SafeAnimator.SetBool(entry.Animator, "in_seamoth", (flags & Coop.Model.PlayerActionFlags.InSeamoth) != 0);
+                        SafeAnimator.SetBool(entry.Animator, "in_exosuit", (flags & Coop.Model.PlayerActionFlags.InExosuit) != 0);
+
+                        if (!entry.LoggedFirstAnimatedMovement && mag > 0.1f)
+                        {
+                            entry.LoggedFirstAnimatedMovement = true;
+                            entry.FirstAnimatedMovementTime = now;
+                            _log.LogInfo(
+                                $"[presence] animation active sur '{entry.Username}' (id={entry.PlayerId}) : " +
+                                $"move_speed={mag:F2} v=({speed.x:F2},{speed.y:F2},{speed.z:F2}) " +
+                                $"view_pitch={pitch:F1} is_underwater={entry.IsUnderwater} on_surface={entry.OnSurface}");
+                        }
+                        else if (entry.LoggedFirstAnimatedMovement && !entry.LoggedBoneDisplacement &&
+                                 now - entry.FirstAnimatedMovementTime >= 0.4f)
+                        {
+                            entry.LoggedBoneDisplacement = true;
+                            var currentVertices = BakeVertices(entry.BodyRenderer);
+                            var displacement = AverageVertexDistance(entry.BaselineVertices, currentVertices);
+                            _log.LogInfo(
+                                $"[presence] déformation squelettique mesurée sur '{entry.Username}' (id={entry.PlayerId}) : " +
+                                $"déplacement moyen des sommets={displacement:F4} m (maillage='{entry.BodyRenderer?.name ?? "aucun"}')");
+                        }
+                    }
+
+                    // L'objet tenu est avancé après la pose : `Tick` fait progresser les demandes de
+                    // prefab (asynchrones) et `SetPdaVisible` suit le drapeau reçu à 20 Hz.
+                    if (entry.HeldItem != null)
+                    {
+                        entry.HeldItem.SetPdaVisible(
+                            (entry.ActionFlags & Coop.Model.PlayerActionFlags.UsingPda) != 0);
+                        entry.HeldItem.Tick();
+                    }
+                }
+            }
+        }
+
+        public void ClearAll()
+        {
+            foreach (var entry in _remotes.Values)
+            {
+                entry.HeldItem?.Dispose();
+                entry.HeldItem = null;
+                if (entry.Avatar != null)
+                {
+                    UnityEngine.Object.Destroy(entry.Avatar);
+                    entry.Avatar = null;
+                }
+            }
+
+            _remotes.Clear();
+        }
+
+        private static Quaternion NormalizeQuaternion(Quaternion q)
+        {
+            var magSq = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+            if (magSq < 0.0001f || float.IsNaN(magSq))
+            {
+                return Quaternion.identity;
+            }
+
+            var inv = 1f / Mathf.Sqrt(magSq);
+            return new Quaternion(q.x * inv, q.y * inv, q.z * inv, q.w * inv);
+        }
+
+        private static SkinnedMeshRenderer FindMainBodyRenderer(GameObject clone)
+        {
+            SkinnedMeshRenderer best = null;
+            foreach (var r in clone.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (r.sharedMesh == null)
+                {
+                    continue;
+                }
+
+                if (best == null || r.sharedMesh.vertexCount > best.sharedMesh.vertexCount)
+                {
+                    best = r;
+                }
+            }
+
+            return best;
+        }
+
+        private static Vector3[] BakeVertices(SkinnedMeshRenderer renderer)
+        {
+            if (renderer == null || renderer.sharedMesh == null)
+            {
+                return null;
+            }
+
+            var mesh = new Mesh();
+            try
+            {
+                renderer.BakeMesh(mesh);
+                return mesh.vertices;
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                UnityEngine.Object.Destroy(mesh);
+            }
+        }
+
+        private static float AverageVertexDistance(Vector3[] a, Vector3[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length || a.Length == 0)
+            {
+                return -1f;
+            }
+
+            var sum = 0f;
+            for (var i = 0; i < a.Length; i++)
+            {
+                sum += Vector3.Distance(a[i], b[i]);
+            }
+
+            return sum / a.Length;
         }
     }
 }

@@ -31,6 +31,13 @@ namespace Coop.Server
         internal static ServerNetwork Network;
         internal static InstanceLogFile InstanceLog;
 
+        /// <summary>
+        /// Vrai si cette instance est un **serveur dédié** : lancée en `-batchmode` (sans fenêtre), elle ne
+        /// doit pas exposer de personnage joueur. Unity expose ce drapeau lui-même, donc aucun argument
+        /// supplémentaire à retenir côté launcher : `-batchmode` suffit.
+        /// </summary>
+        internal static bool Dedicated => Application.isBatchMode;
+
         private void Awake()
         {
             Log = Logger;
@@ -47,6 +54,14 @@ namespace Coop.Server
             // Avant tout le reste : tout ce qui suit doit atterrir dans le log de cette instance,
             // et pas seulement dans le fichier partagé des deux processus.
             InstanceLog = InstanceLogFile.Attach(Log, "server");
+
+            // Journalisé **après** le branchement du journal d'instance : sinon la ligne qui dit si le
+            // serveur est dédié n'atterrit que dans le `LogOutput.log` partagé, et pas dans le journal
+            // qu'on relit.
+            Log.LogInfo($"[boot] batchmode={Application.isBatchMode} — " +
+                (Dedicated
+                    ? "serveur dédié : aucun personnage joueur ne sera exposé aux clients."
+                    : "serveur fenêtré : le joueur de l'hôte est diffusé comme id=9999."));
 
             var port = Config.Bind("Reseau", "Port", Protocol.DefaultPort, "Port UDP d'écoute du serveur.");
 
@@ -78,7 +93,63 @@ namespace Coop.Server
             // voit sa sauvegarde protégée par SaveGuard.
             go.AddComponent<AutoLoadBehaviour>();
 
+            // Autotest de la sauvegarde **côté hôte** : la garde est purement cliente, et le fait que
+            // l'hôte puisse encore sauvegarder n'était prouvé par aucune tentative réelle.
+            if (IsDebugFlagSet("save"))
+            {
+                Log.LogWarning("[boot] autotest de la sauvegarde serveur activé (-coopdebug=save).");
+                go.AddComponent<HostSaveProbeBehaviour>();
+            }
+
+            // Canal de contrôle du launcher (bouton « Sauvegarder ») : un fichier dans BepInEx/coop/, relu
+            // toutes les demi-secondes. Toujours branché — c'est une fonction du serveur, pas un autotest.
+            go.AddComponent<ServerControlBehaviour>();
+
+            // Serveur dédié : le joueur local de l'instance est retiré du monde (inactif) et n'est plus
+            // diffusé. Sans ça, une instance sans fenêtre resterait un personnage immobile à la capsule.
+            if (Dedicated)
+            {
+                go.AddComponent<DedicatedServerBehaviour>();
+            }
+
+            // Sonde de M4 (a) : le monde de test ne contient **aucun** véhicule, et c'est ce qui bloquait la
+            // décision cadence/interpolation. La sonde fait apparaître un Seamoth, le déplace et mesure.
+            if (IsDebugFlagSet("vehicle"))
+            {
+                Log.LogWarning("[boot] sonde de véhicule activée (-coopdebug=vehicle).");
+                go.AddComponent<VehicleProbeBehaviour>();
+            }
+
+            // Met un Seamoth **dans la sauvegarde** de l'hôte, pour que l'étape K mesure la clé nominale
+            // (identifiant sérialisé, identique des deux côtés) au lieu du rattachement par proximité.
+            if (IsDebugFlagSet("vpersist"))
+            {
+                Log.LogWarning("[boot] sonde de véhicule persistant activée (-coopdebug=vpersist).");
+                go.AddComponent<VehiclePersistProbeBehaviour>();
+            }
+
             Log.LogInfo("[boot] GameObject 'Coop.Server.Bootstrap' créé (DontDestroyOnLoad).");
+        }
+
+        /// <summary>
+        /// Vrai si <c>-coopdebug=&lt;nom&gt;</c> est présent sur la ligne de commande.
+        ///
+        /// Même convention que le plugin client : un autotest ne tourne que sur demande explicite, et
+        /// jamais à cause d'un réglage partagé par les deux instances.
+        /// </summary>
+        internal static bool IsDebugFlagSet(string name)
+        {
+            var expected = "-coopdebug=" + name;
+
+            foreach (var argument in Environment.GetCommandLineArgs())
+            {
+                if (string.Equals(argument, expected, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // NOTE : surtout PAS de OnDestroy ici qui arrêterait le réseau. Subnautica détruit le
@@ -172,6 +243,7 @@ namespace Coop.Server
                 steps++;
                 _tick++;
                 Ticks = (int)_tick;
+                CoopServerPlugin.Network?.BroadcastSnapshots(_tick);
                 Tick?.Invoke(_tick);
             }
 

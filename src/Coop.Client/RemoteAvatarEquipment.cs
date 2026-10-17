@@ -317,18 +317,48 @@ namespace Coop.Client
         /// Renvoie une liste vide et <paramref name="failure"/> renseigné si l'équipement n'est pas
         /// lisible : mieux vaut un paquet sans équipement qu'une exception dans la boucle réseau.
         /// </summary>
-        public static IReadOnlyList<string> ReadLocalEquipment(out string failure)
+        public static IReadOnlyList<string> ReadLocalEquipment(out string failure, bool logResult = true)
+        {
+            var types = ReadLocalEquipmentTypes(out failure, logResult: false);
+            var names = types.Select(type => type.ToString()).ToList();
+
+            if (logResult)
+            {
+                Log.LogInfo(names.Count == 0
+                    ? "[avatar] équipement local : rien de porté."
+                    : $"[avatar] équipement local : {names.Count} pièce(s) : {string.Join(", ", names)}");
+            }
+
+            return names;
+        }
+
+        /// <summary>
+        /// La même lecture, mais sous forme de `TechType` — c'est-à-dire **avant** la conversion en noms
+        /// qui partira sur le réseau.
+        ///
+        /// Les deux formes existent parce qu'elles ne servent pas au même usage, et que les confondre a
+        /// déjà coûté une preuve : l'émission a besoin de noms (`ReadLocalEquipment`), et le contrôle de
+        /// cette émission a besoin d'une référence que les noms ne fournissent pas — comparer
+        /// `ApplyNames(noms)` à `Apply(types)` est exactement ce qui vérifie que le voyage en noms ne perd
+        /// rien. Renvoyer les noms seuls rendait ce contrôle impossible, et la sonde comparait alors à
+        /// l'**état brut du modèle local**, qui n'est pas une fonction de l'équipement (cf. `PLAN.md`).
+        /// </summary>
+        public static IReadOnlyList<TechType> ReadLocalEquipmentTypes(out string failure, bool logResult = true)
         {
             failure = null;
-            var names = new List<string>();
+            var types = new List<TechType>();
 
             var inventory = Inventory.main;
             var equipment = inventory != null ? inventory.equipment : null;
             if (equipment == null)
             {
                 failure = inventory == null ? "Inventory.main absent" : "Inventory.equipment absent";
-                Log.LogWarning($"[avatar] équipement local illisible ({failure}) : rien à envoyer.");
-                return names;
+                if (logResult)
+                {
+                    Log.LogWarning($"[avatar] équipement local illisible ({failure}) : rien à envoyer.");
+                }
+
+                return types;
             }
 
             try
@@ -346,7 +376,7 @@ namespace Coop.Client
                         continue;
                     }
 
-                    names.Add(pickupable.GetTechType().ToString());
+                    types.Add(pickupable.GetTechType());
                 }
             }
             catch (Exception exception)
@@ -355,10 +385,14 @@ namespace Coop.Client
                 Log.LogError($"[avatar] équipement local : énumération interrompue ({exception.Message}).");
             }
 
-            Log.LogInfo(names.Count == 0
-                ? "[avatar] équipement local : rien de porté."
-                : $"[avatar] équipement local : {names.Count} pièce(s) : {string.Join(", ", names)}");
-            return names;
+            if (logResult)
+            {
+                Log.LogInfo(types.Count == 0
+                    ? "[avatar] équipement local : rien de porté."
+                    : $"[avatar] équipement local : {types.Count} pièce(s) : {string.Join(", ", types)}");
+            }
+
+            return types;
         }
 
         /// <summary>Les nœuds que ces règles pilotent, dans l'ordre des gestionnaires ci-dessus.</summary>
@@ -406,7 +440,7 @@ namespace Coop.Client
         /// figure dans les chemins transcrits, donc c'est lui qui doit définir l'origine, et les deux
         /// hypothèses ne peuvent pas diverger en silence.
         /// </summary>
-        private static Transform FindModelRoot(GameObject clone)
+        internal static Transform FindModelRoot(GameObject clone)
         {
             foreach (var transform in clone.GetComponentsInChildren<Transform>(true))
             {

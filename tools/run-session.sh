@@ -1,0 +1,433 @@
+#!/bin/bash
+# tools/run-session.sh — lance un hôte et un client, attend les marqueurs du journal, rend la main.
+#
+# Pourquoi ce script existe : lancer les deux instances puis « dormir 160 s, dormir 300 s » coûtait
+# 460 s de marge pour 26 s de travail réel (mesuré : client lancé 00:36:57, monde chargé 00:37:08,
+# sonde finie 00:37:23). Ici, chaque étape attend la ligne qui **prouve** qu'elle est terminée :
+#   - hôte   : « MONDE CHARGÉ »       (≈ 20 s après le lancement, mesuré à 00:34:37)
+#   - client : marqueur de fin de sonde, ou de connexion sans sonde (≈ 26 s)
+# Un run complet tient donc en une cinquantaine de secondes, et une étape qui n'arrive pas est
+# **annoncée** : code de sortie 1, journal affiché, et les instances **du run** arrêtées. Jamais un
+# succès silencieux.
+#
+# Usage :
+#   tools/run-session.sh                              # hôte + client avec la sonde d'avatar
+#   tools/run-session.sh --client-args="-coopdebug=avatar"
+#   tools/run-session.sh --keep                       # laisse les deux instances tourner
+#   tools/run-session.sh --kill-all                   # arrêt d'urgence : TOUS les Subnautica.exe
+#   tools/run-session.sh --no-build                   # ne rebâtit pas, ne redéploie pas
+#   tools/run-session.sh --together                   # lance tous les clients **avant** d'attendre leurs
+#                                                     # marqueurs (nécessaire aux sondes qui se mesurent
+#                                                     # mutuellement : l'un doit déjà être là)
+#   tools/run-session.sh --help
+#
+# Les marqueurs sont des expressions régulières étendues, cherchées **après l'en-tête du run courant**
+# (l'en-tête « === Coop client — … === » que chaque instance réécrit au démarrage) : une ligne laissée
+# par le run précédent ne peut donc pas passer pour un succès.
+#
+# **Ce script n'arrête que les instances qu'il a lancées.** Chaque lancement retient le PID Windows du
+# processus — le PID MSYS rendu par `$!` est traduit par `ps -W`, avec quelques essais, parce qu'un
+# processus met un instant à apparaître — et l'écrit dans `BepInEx/logs/.coop-session-pids`. Un run
+# suivant relit ce fichier pour arrêter ce qu'un run précédent a laissé derrière lui (plantage, `--keep`),
+# et rien d'autre : une session de jeu ouverte à côté **survit** à un run de test. L'arrêt global
+# (`taskkill //F //IM Subnautica.exe`) reste possible, mais il faut le demander : `--kill-all`, et le
+# script dit alors qu'il arrête tout.
+#
+# Limite dit franchement : Windows recycle les numéros de PID. Si un PID enregistré avait été repris par
+# une autre instance de Subnautica lancée à la main entre-temps, cette instance serait arrêtée à tort. Le
+# fichier est donc effacé dès que le script s'en sert (`prepare()` et la fin de run), et il ne survit
+# qu'entre deux runs.
+
+set -o pipefail
+set -u
+
+# Dossier du jeu. Surchargeable : SUBNAUTICA_GAME_DIR=/c/autre/chemin tools/run-session.sh
+GAME_DIR_BASH="${SUBNAUTICA_GAME_DIR:-/c/Program Files (x86)/Steam/steamapps/common/Subnautica}"
+
+HOST_ARGS="-coopmode=server"
+CLIENT_ARGS="-coopmode=client -coopdebug=avatar"
+HOST_MARKER="MONDE CHARGÉ"
+CLIENT_MARKER=""
+
+# Motif attendu dans le journal du **serveur** après le lancement des clients. Vide = rien à attendre.
+# Sert aux autotests qui tournent sur l'hôte et finissent après la connexion des clients (la sauvegarde
+# de l'hôte, par exemple) : sans cette attente, le harnais rendrait la main avant leur verdict.
+WAIT_SERVER_MARKER=""
+CLIENTS=1
+STEP_TIMEOUT=90
+KEEP=0
+BUILD=1
+KILL_ALL=0
+TOGETHER=0
+# Écart (s) entre deux lancements de clients en mode `--together`.
+CLIENT_STAGGER=6
+
+# Marqueur de « le monde est chargé » d'un client — sert à ne pas lancer le suivant pendant ce chargement.
+CLIENT_WORLD_MARKER="MONDE CHARGÉ"
+HOST_ENV=""
+
+# Motif dont la présence dans un journal de client fait **échouer** le run. Par défaut : un verdict de sonde
+# qui vaut False. Sans ça, « le run s'est terminé » se lit comme « tout va bien », alors qu'un verdict False
+# est justement le cas où il faut s'arrêter et regarder.
+FAIL_IF="verdict=False"
+
+usage() {
+    # En-tête du fichier, jusqu'à la première ligne de code : la documentation est à un seul endroit.
+    awk 'NR > 1 && /^set -/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"
+    cat <<'OPTIONS'
+
+Options :
+  --host-args="…"       arguments de l'hôte        (défaut : -coopmode=server)
+  --client-args="…"     arguments du client        (défaut : -coopmode=client -coopdebug=avatar)
+  --host-marker=REGEX   ce qui prouve que l'hôte a chargé son monde (défaut : MONDE CHARGÉ)
+  --wait-server-marker=REGEX  ligne du journal **serveur** attendue après les clients (autotest de l'hôte)
+  --client-marker=REGEX ce qu'on attend du client  (défaut : fin de sonde si -coopdebug, sinon connexion)
+  --clients=N           nombre de clients à lancer   (défaut : 1 ; les suivants écrivent coop-client<i>.log)
+  --host-env=VARIABLE=VALEUR   variable d'environnement pour l'hôte (ex. COOP_CREATURE_CHUNKS=1)
+  --fail-if=REGEX       motif qui fait échouer le run (défaut : verdict=False ; "" pour désactiver)
+  --timeout=SECONDES    délai maximal **par étape**  (défaut : 90)
+  --together            lance tous les clients (sans chevaucher leurs chargements de monde)
+  --keep                ne tue pas les instances à la fin (leurs PID restent enregistrés)
+  --kill-all            arrête TOUS les Subnautica.exe de la machine, pas seulement ceux lancés ici
+  --no-build            ne reconstruit pas et ne redéploie pas les DLL
+OPTIONS
+}
+
+for argument in "$@"; do
+    case "$argument" in
+        --host-args=*) HOST_ARGS="${argument#*=}" ;;
+        --client-args=*) CLIENT_ARGS="${argument#*=}" ;;
+        --host-marker=*) HOST_MARKER="${argument#*=}" ;;
+        --wait-server-marker=*) WAIT_SERVER_MARKER="${argument#*=}" ;;
+        --client-marker=*) CLIENT_MARKER="${argument#*=}" ;;
+        --clients=*) CLIENTS="${argument#*=}" ;;
+        --host-env=*) HOST_ENV="${argument#*=}" ;;
+        --fail-if=*) FAIL_IF="${argument#*=}" ;;
+        --timeout=*) STEP_TIMEOUT="${argument#*=}" ;;
+        --together) TOGETHER=1 ;;
+        --keep) KEEP=1 ;;
+        --kill-all) KILL_ALL=1 ;;
+        --no-build) BUILD=0 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "option inconnue : $argument (--help)" >&2; exit 2 ;;
+    esac
+done
+
+# Sans marqueur imposé : une sonde se termine par son relevé final, une session ordinaire par la
+# connexion au serveur (et, quand l'autre joueur est là, par l'avatar instancié).
+if [ -z "$CLIENT_MARKER" ]; then
+    case "$CLIENT_ARGS" in
+        *-coopdebug=*) CLIENT_MARKER='\[sonde\] capture écrite' ;;
+        *) CLIENT_MARKER='connecté au serveur|avatar instancié pour' ;;
+    esac
+fi
+
+LOG_DIR="$GAME_DIR_BASH/BepInEx/logs"
+PLUGINS="$GAME_DIR_BASH/BepInEx/plugins/Coop"
+SERVER_LOG="$LOG_DIR/coop-server.log"
+CLIENT_LOG="$LOG_DIR/coop-client.log"
+
+elapsed_since() { # $1 = instant de départ en secondes
+    echo "$(( $(date +%s) - $1 ))s"
+}
+
+# PID Windows des instances lancées par ce script — et par les runs précédents : une ligne par PID.
+#
+# Ce fichier n'est pas un confort : sans lui, `prepare()` ne peut pas savoir quelles instances traîner
+# d'un run précédent sans arrêter **toutes** celles de la machine, y compris une session que le joueur a
+# ouverte pour jouer. C'est exactement ce que le script faisait avant.
+PID_STATE="$LOG_DIR/.coop-session-pids"
+
+# Vrai si ce PID Windows appartient encore au jeu (garde avant un `taskkill` : Windows recycle les PID,
+# et un PID enregistré peut désigner un tout autre programme si l'instance est morte depuis longtemps).
+#
+# `***` est accepté parce que MSYS ne sait pas toujours nommer un processus natif : refuser ce cas
+# laisserait des instances vivantes derrière nous, ce qui est le défaut que ce fichier corrige.
+is_game_pid() {
+    local winpid="$1"
+    [ -n "$winpid" ] || return 1
+    ps -W 2>/dev/null | awk -v p="$winpid" '
+        $4 == p { found = 1; if ($NF ~ /Subnautica/ || $NF == "***") named = 1 }
+        END { exit (found && named) ? 0 : 1 }
+    '
+}
+
+# Traduit un PID MSYS (celui que rend `$!`) en PID Windows (celui qu'accepte `taskkill`).
+#
+# Les deux ne sont pas les mêmes nombres : MSYS tient sa propre table de processus, et `ps -W` est le seul
+# outil présent ici qui les donne tous les deux (wmic a été retiré de Windows 11). D'où les quelques
+# essais : le processus met un instant à apparaître dans cette table.
+winpid_of() {
+    local msys_pid="$1" attempt=0 winpid=""
+    while [ "$attempt" -lt 20 ]; do
+        winpid=$(ps -W 2>/dev/null | awk -v p="$msys_pid" '$1 == p { print $4; exit }')
+        if [ -n "$winpid" ]; then
+            echo "$winpid"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.25
+    done
+    return 1
+}
+
+# Lance une instance du jeu et **retient son PID Windows**.
+#
+# $1 = variable d'environnement à poser (vide = aucune), $2 = arguments du jeu, $3 = étiquette.
+launch_instance() {
+    local env_pair="$1" args="$2" label="$3"
+    local msys_pid winpid
+
+    # Le `cd` est fait dans le shell courant puis défait, et non dans un sous-shell : `( … & )` rendrait le
+    # PID du sous-shell, pas celui de l'exécutable, et on arrêterait le mauvais processus. `env` remplace
+    # son propre processus (exec), donc le PID rendu par `$!` reste bien celui du jeu.
+    pushd "$GAME_DIR_BASH" >/dev/null || return 1
+    if [ -n "$env_pair" ]; then
+        env "$env_pair" ./Subnautica.exe $args >/dev/null 2>&1 &
+    else
+        ./Subnautica.exe $args >/dev/null 2>&1 &
+    fi
+    msys_pid=$!
+    popd >/dev/null
+
+    if ! winpid=$(winpid_of "$msys_pid"); then
+        echo "[avertissement] $label : PID Windows introuvable pour le PID MSYS $msys_pid — cette instance" >&2
+        echo "                ne sera pas arrêtée par ce script (la retrouver avec --kill-all)." >&2
+        return 1
+    fi
+
+    mkdir -p "$LOG_DIR"
+    echo "$winpid" >> "$PID_STATE"
+    echo "      $label lancé (PID Windows $winpid)"
+    return 0
+}
+
+# Arrête les instances **lancées par ce script** — celles enregistrées dans $PID_STATE — puis efface le
+# fichier. Aucun autre `Subnautica.exe` n'est touché : c'est la garantie qui manquait.
+kill_instances() {
+    if [ "$KILL_ALL" = "1" ]; then
+        echo "[arrêt] --kill-all : TOUS les Subnautica.exe de la machine sont arrêtés, pas seulement ceux du run." >&2
+        taskkill //F //IM Subnautica.exe >/dev/null 2>&1 || true
+        rm -f "$PID_STATE"
+        return
+    fi
+
+    if [ ! -s "$PID_STATE" ]; then
+        return
+    fi
+
+    local pid
+    while read -r pid; do
+        [ -n "$pid" ] || continue
+        if ! is_game_pid "$pid"; then
+            echo "[arrêt] PID $pid ignoré : plus un Subnautica.exe en vie sous ce numéro."
+            continue
+        fi
+
+        if taskkill //F //PID "$pid" >/dev/null 2>&1; then
+            echo "[arrêt] instance arrêtée (PID Windows $pid)."
+        else
+            echo "[arrêt] PID $pid : taskkill a échoué (instance déjà fermée ?)." >&2
+        fi
+    done < "$PID_STATE"
+
+    rm -f "$PID_STATE"
+}
+
+# Arrête les instances laissées par un run précédent (celles de $PID_STATE), construit, déploie, et
+# **efface les journaux**.
+#
+# L'effacement n'est pas un détail : sans lui, la première seconde d'un run voyait encore le fichier du
+# run précédent, et un marqueur périmé passait pour un succès — un run de 4 s déclarait « marqueurs
+# atteints » en citant les heures du run d'avant. Le jeu réécrit de toute façon ces fichiers au
+# démarrage (FileMode.Create), donc les effacer ne perd rien : tout ce qui sera lu ensuite appartient
+# au run courant.
+prepare() {
+    echo "[1/3] arrêt des instances du run précédent (PID enregistrés), déploiement des DLL, journaux effacés"
+    kill_instances
+    sleep 2
+    # Tous les journaux de client, y compris suffixés : un run à deux clients relit les deux, et un ancien
+    # fichier non effacé ferait passer un marqueur périmé pour un succès (déjà vu, cf. plus haut).
+    rm -f "$SERVER_LOG" "$LOG_DIR"/coop-client*.log
+
+    if [ "$BUILD" = "1" ]; then
+        dotnet build src/Coop.Client/Coop.Client.csproj -v q --nologo || return 1
+        dotnet build src/Coop.Server/Coop.Server.csproj -v q --nologo || return 1
+        dotnet build src/Coop.Model/Coop.Model.csproj -v q --nologo || return 1
+    fi
+
+    cp -f src/Coop.Client/bin/Debug/Coop.Client.dll "$PLUGINS/" || return 1
+    cp -f src/Coop.Server/bin/Debug/Coop.Server.dll "$PLUGINS/" || return 1
+    cp -f src/Coop.Model/bin/Debug/Coop.Model.dll "$PLUGINS/" || return 1
+}
+
+# Attend un marqueur **après l'en-tête du run courant**. Le fichier est réécrit au démarrage de
+# l'instance (FileMode.Create) : chercher à partir du dernier en-tête évite qu'une ligne du run
+# précédent, encore présente pendant les premières millisecondes, fasse croire à un succès.
+wait_for_marker() {
+    local log="$1" pattern="$2" label="$3"
+    local deadline=$(( $(date +%s) + STEP_TIMEOUT ))
+
+    while :; do
+        if [ -s "$log" ]; then
+            local header
+            header=$(grep -n '^=== Coop .* — ' "$log" | tail -1 | cut -d: -f1)
+            if [ -n "$header" ] && tail -n "+$((header + 1))" "$log" | grep -qE "$pattern"; then
+                tail -n "+$((header + 1))" "$log" | grep -E "$pattern" | tail -1
+                return 0
+            fi
+        fi
+
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "[échec] $label : « $pattern » n'est pas apparu en ${STEP_TIMEOUT}s" >&2
+            if [ -s "$log" ]; then
+                echo "--- dernières lignes de $(basename "$log") ---" >&2
+                tail -15 "$log" >&2
+            else
+                # Un journal vide est une information en soi : l'instance n'a pas démarré (ou pas dans
+                # ce rôle), ce n'est pas la même panne qu'un marqueur qui tarde.
+                echo "--- $(basename "$log") est vide : l'instance n'a rien écrit ---" >&2
+            fi
+            return 1
+        fi
+        sleep 0.25
+    done
+}
+
+started=$(date +%s)
+
+prepare || { echo "[échec] construction ou déploiement" >&2; exit 2; }
+
+echo "[2/3] hôte : $HOST_ARGS ${HOST_ENV:+(env $HOST_ENV)} — attente de « $HOST_MARKER »"
+host_start=$(date +%s)
+# Une variable par processus : c'est ce qui permet de faire varier le serveur (plafond de diffusion
+# abaissé pour éprouver sa garde, par exemple) sans toucher aux clients ni à la configuration partagée.
+launch_instance "$HOST_ENV" "$HOST_ARGS" "hôte" || true
+wait_for_marker "$SERVER_LOG" "$HOST_MARKER" "hôte" || { kill_instances; exit 1; }
+echo "      hôte prêt en $(elapsed_since "$host_start")"
+
+echo "[3/3] $CLIENTS client(s) : $CLIENT_ARGS — attente de « $CLIENT_MARKER »"
+
+# Par défaut les clients sont lancés **l'un après l'autre**, chacun attendu sur son propre marqueur : les
+# mondes arrivent ainsi séparément et on sait lequel est prêt.
+#
+# `--together` lance tous les clients avant d'attendre leurs marqueurs : c'est la seule façon de mesurer ce
+# qui se mesure **entre deux clients**. Un harnais qui n'ouvre le second client qu'après le verdict du premier
+# ne lui laisse qu'un désert à mesurer (constaté : « aucun joueur distant », puis un verdict False parfaitement
+# correct et parfaitement inutile).
+#
+# Mais les **chargements de monde**, eux, restent séparés : le client suivant n'est lancé qu'une fois le
+# précédent entré dans le monde. Deux instances qui chargent la même sauvegarde en même temps se disputent le
+# dossier `TempSave` du jeu — mesuré : `IOException: Sharing violation on path …/TempSave/tmp…/scene-objects.bin`
+# — et la seconde termine parfois au point d'origine (2.1, -2.6, -0.7) au lieu du point de la sauvegarde, à
+# 128 m de là. Ce n'était pas un défaut du suivi des créatures mais un monde chargé de travers, et les deux
+# se ressemblaient : le client recevait les créatures d'un rayon où il n'était pas.
+client_logs=()
+client_suffixes=()
+client_starts=()
+
+for index in $(seq 1 "$CLIENTS"); do
+    if [ "$index" = "1" ]; then
+        client_logs+=("$CLIENT_LOG")
+        client_suffixes+=("")
+    else
+        # Sans suffixe, le second client réécrirait le journal du premier (même rôle « client », même
+        # dossier de jeu) : on ne saurait plus lequel a écrit quoi. Le nom du fichier est **le même
+        # suffixe** que la variable d'environnement — `coop-client-2.log` et non `coop-client2.log` :
+        # les deux formes ont coexisté une fois, et le harnais a attendu 200 s un fichier qui n'existait
+        # pas pendant que le client écrivait à côté.
+        client_logs+=("$LOG_DIR/coop-client-$index.log")
+        client_suffixes+=("-$index")
+    fi
+    client_starts+=("0")
+done
+
+launch_client() { # $1 = index
+    local index="$1" suffix="${client_suffixes[$((index - 1))]}"
+    client_starts[$((index - 1))]=$(date +%s)
+
+    if [ -n "$suffix" ]; then
+        launch_instance "COOP_LOG_SUFFIX=$suffix" "$CLIENT_ARGS" "client $index" || true
+    else
+        launch_instance "" "$CLIENT_ARGS" "client $index" || true
+    fi
+}
+
+wait_client() { # $1 = index
+    local index="$1" log="${client_logs[$((index - 1))]}" start="${client_starts[$((index - 1))]}"
+    wait_for_marker "$log" "$CLIENT_MARKER" "client $index" || { kill_instances; exit 1; }
+    echo "      client $index prêt en $(elapsed_since "$start") ($(basename "$log"))"
+}
+
+if [ "$TOGETHER" = "1" ]; then
+    # Écart volontaire entre deux lancements : deux `Subnautica.exe` démarrés dans le même dixième de
+    # seconde n'aboutissent pas tous les deux (mesuré : le premier processus reste vivant sans jamais
+    # écrire une ligne de log). Quelques secondes suffisent, et restent très en dessous de ce qu'une
+    # sonde mutuelle peut tolérer.
+    for index in $(seq 1 "$CLIENTS"); do
+        [ "$index" -gt 1 ] && sleep "$CLIENT_STAGGER"
+        launch_client "$index"
+
+        # Le monde du client précédent doit être chargé avant de lancer le suivant : voir l'en-tête
+        # (`TempSave` partagé). Le lancement reste « groupé » — tous les clients vivent pendant les sondes —
+        # mais les chargements ne se chevauchent plus.
+        if [ "$index" -lt "$CLIENTS" ]; then
+            previous_log="${client_logs[$((index - 1))]}"
+            wait_for_marker "$previous_log" "$CLIENT_WORLD_MARKER" "client $index (monde chargé)" || { kill_instances; exit 1; }
+        fi
+    done
+    for index in $(seq 1 "$CLIENTS"); do
+        wait_client "$index"
+    done
+else
+    for index in $(seq 1 "$CLIENTS"); do
+        launch_client "$index"
+        wait_client "$index"
+    done
+fi
+
+# Autotest de l'hôte : il se déclenche après la connexion des clients et finit bien après. Sans cette
+# attente, le harnais rendrait la main, `verify.sh` copierait les journaux, et le verdict — écrit plus tard —
+# ne serait pas dans la copie.
+if [ -n "$WAIT_SERVER_MARKER" ]; then
+    echo "[4/4] côté serveur : attente de « $WAIT_SERVER_MARKER »"
+    wait_for_marker "$SERVER_LOG" "$WAIT_SERVER_MARKER" "serveur (autotest)" || { kill_instances; exit 1; }
+fi
+
+echo "run complet en $(elapsed_since "$started") (marqueurs atteints)"
+
+# Vérification : un marqueur atteint dit que le run est allé au bout, pas qu'il a réussi. Ce qui échoue
+# vraiment, c'est un verdict de sonde à False — et c'est au harnais de le dire, avec un code de sortie que
+# personne n'a à interpréter.
+failed_marker=0
+if [ -n "$FAIL_IF" ]; then
+    for index in $(seq 1 "$CLIENTS"); do
+        if [ "$index" = "1" ]; then
+            client_log="$CLIENT_LOG"
+        else
+            client_log="$LOG_DIR/coop-client-$index.log"
+        fi
+
+        if [ -s "$client_log" ] && grep -qE "$FAIL_IF" "$client_log"; then
+            failed_marker=1
+            echo "--- $(basename "$client_log") : « $FAIL_IF » présent ---" >&2
+            grep -E "$FAIL_IF" "$client_log" | tail -5 >&2
+        fi
+    done
+fi
+
+if [ "$failed_marker" = "1" ]; then
+    echo "run EN ÉCHEC : un verdict de sonde est faux (motif « $FAIL_IF »)" >&2
+    kill_instances
+    exit 1
+fi
+
+echo "aucun « $FAIL_IF » dans les journaux de client"
+
+if [ "$KEEP" = "1" ]; then
+    echo "instances laissées en marche (--keep) : un prochain run les arrêtera (PID enregistrés dans"
+    echo "                                   « $PID_STATE »), sinon « tools/run-session.sh --kill-all »"
+else
+    kill_instances
+    echo "instances arrêtées"
+fi

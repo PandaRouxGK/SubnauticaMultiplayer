@@ -28,12 +28,33 @@
       <HintPath>$(SubnauticaManaged)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Assembly-CSharp-firstpass porte les types de base du jeu (`ModelPlug`, dont dérive
+         `PlayerTool`) ainsi que `UWE.PrefabDatabase` : sans cette référence, lire l'objet tenu de
+         l'hôte ne compile pas, même si `PlayerTool` vient d'Assembly-CSharp. -->
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(SubnauticaManaged)\Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine">
       <HintPath>$(SubnauticaManaged)\UnityEngine.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
       <HintPath>$(SubnauticaManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- AnimationModule : les paramètres `holding_*` de l'hôte sont **lus** sur son `Animator`
+         (AnimatorControllerParameterType / GetBool) au lieu d'être dérivés, exactement comme le
+         fait le client pour lui-même. Deux sources différentes pour la même donnée finiraient par
+         diverger sans que rien ne le signale. -->
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- PhysicsModule : `Rigidbody` est *forwardé* depuis UnityEngine.dll et ne se résout pas sans lui.
+         Nécessaire à la sonde de véhicule (M4), qui neutralise le Rigidbody avant de piloter le transform. -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
@@ -49,6 +70,9 @@
     <Compile Include="..\Shared\BepInExModList.cs" Link="BepInExModList.cs" />
     <Compile Include="..\Shared\InstanceLogFile.cs" Link="InstanceLogFile.cs" />
     <Compile Include="..\Shared\AutoLoadBehaviour.cs" Link="AutoLoadBehaviour.cs" />
+    <Compile Include="..\Shared\CreatureIdentity.cs" Link="CreatureIdentity.cs" />
+    <Compile Include="..\Shared\VehicleIdentity.cs" Link="VehicleIdentity.cs" />
+    <Compile Include="..\Shared\ViewDirection.cs" Link="ViewDirection.cs" />
   </ItemGroup>
 
 </Project>
