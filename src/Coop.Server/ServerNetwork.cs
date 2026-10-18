@@ -315,6 +315,33 @@ namespace Coop.Server
         private float _vehicleCacheRealtime = float.NegativeInfinity;
         private const float VehicleCacheSeconds = 2f;
 
+        // — Création d'entité (v10, M6) ————————————————————————————————————————
+
+        /// <summary>Clés de véhicules déjà annoncées (ou déjà présentes au premier balayage).</summary>
+        private readonly HashSet<long> _knownVehicles = new HashSet<long>();
+
+        /// <summary>Faux tant que le premier balayage n'a pas eu lieu : il **enregistre** sans annoncer.</summary>
+        private bool _vehicleBaselineDone;
+
+        /// <summary>
+        /// Entités **fabriquées depuis le dernier démarrage**, par clé. Sert à rejouer l'annonce auprès d'un
+        /// client qui se connecte après coup : sans ça, une entité créée pendant que personne n'était là (ou
+        /// avant l'arrivée du deuxième client) n'existerait que chez ceux qui étaient connectés à cet instant.
+        /// </summary>
+        private readonly Dictionary<long, EntitySpawnMessage> _spawnedEntities =
+            new Dictionary<long, EntitySpawnMessage>();
+
+        /// <summary>Ordre d'ajout dans le carnet, pour que l'éviction retire bien la **plus ancienne**.</summary>
+        private readonly Queue<long> _spawnOrder = new Queue<long>();
+
+        /// <summary>Borne du carnet d'entités fabriquées : une partie longue ne doit pas le faire grossir sans fin.</summary>
+        private const int MaxRememberedSpawns = 256;
+
+        private int _entitySpawnsSent;
+        private int _entitySpawnsReplayed;
+
+        public int EntitySpawnsSent => _entitySpawnsSent;
+
         /// <summary>Intervalle (s) du rapport de flux de véhicules, par client.</summary>
         private const float VehicleStreamReportSeconds = 5f;
 
@@ -788,6 +815,10 @@ namespace Coop.Server
                     ColorIndex = session.ColorIndex,
                 }.Write(w), DeliveryMethod.ReliableOrdered);
             }
+
+            // 3. Ce qui a été fabriqué avant son arrivée. Après les joueurs : un client qui reçoit l'annonce
+            //    d'une entité doit déjà connaître l'état du monde auquel elle se rattache.
+            SendSpawnedEntities(peer, session);
         }
 
         /// <summary>
@@ -2123,6 +2154,159 @@ namespace Coop.Server
         /// clé est **compté et nommé**, jamais diffusé avec une clé inventée : deux véhicules confondus
         /// vaudraient moins bien qu'un véhicule non synchronisé.
         /// </summary>
+        /// <summary>
+        /// Annonce les véhicules **apparus depuis le dernier balayage** (v10, M6).
+        ///
+        /// Un véhicule fabriqué à l'exécution (`spawn`, épave qui se détache, futur objet de contenu) n'est
+        /// pas dans la sauvegarde : les clients ne l'ont pas, et le flux de positions ne leur donnait
+        /// jusqu'ici qu'une clé sans objet à déplacer. Le premier balayage **enregistre** les véhicules
+        /// déjà présents sans rien annoncer — sans quoi un client qui se connecte verrait arriver une
+        /// annonce pour chaque Seamoth de la carte.
+        ///
+        /// Une entité sans identifiant n'est pas annoncée : le client ne pourrait pas la faire correspondre,
+        /// et une entité en double est pire qu'une entité absente. C'est journalisé.
+        /// </summary>
+        private void BroadcastNewVehicles()
+        {
+            if (_vehicleCache == null)
+            {
+                return;
+            }
+
+            var baseline = !_vehicleBaselineDone;
+            _vehicleBaselineDone = true;
+            var announced = 0;
+
+            foreach (var vehicle in _vehicleCache)
+            {
+                if (vehicle == null || vehicle.gameObject == null)
+                {
+                    continue;
+                }
+
+                var key = VehicleIdentity.KeyOf(vehicle, out _);
+                if (key == 0L || !_knownVehicles.Add(key))
+                {
+                    continue;
+                }
+
+                if (baseline)
+                {
+                    continue;
+                }
+
+                if (!VehicleIdentity.TryGetUniqueId(vehicle, out var uniqueId))
+                {
+                    _log.LogWarning(
+                        $"[net] apparition : '{vehicle.gameObject.name}' (clé=0x{key:x16}) sans identifiant " +
+                        "d'entité — NON annoncée : le client ne pourrait pas la faire correspondre.");
+                    continue;
+                }
+
+                // `CraftData.GetTechType` lit le `TechTag` du prefab : c'est l'espèce (`SeaMoth`), pas le nom
+                // de l'instance (`SeaMoth(Clone)`), et c'est ce que le client sait résoudre pour instancier.
+                var tech = CraftData.GetTechType(vehicle.gameObject).ToString();
+                if (tech.Length > Protocol.MaxTechTypeNameLength)
+                {
+                    _log.LogWarning(
+                        $"[net] apparition : nom d'espèce trop long pour '{vehicle.gameObject.name}' — non annoncée.");
+                    continue;
+                }
+
+                var transform = vehicle.transform;
+                var position = transform != null ? transform.position : UnityEngine.Vector3.zero;
+                var rotation = transform != null ? transform.rotation : UnityEngine.Quaternion.identity;
+
+                var message = new EntitySpawnMessage
+                {
+                    Key = key,
+                    UniqueId = uniqueId,
+                    TechTypeName = tech,
+                    X = position.x,
+                    Y = position.y,
+                    Z = position.z,
+                    RotX = rotation.x,
+                    RotY = rotation.y,
+                    RotZ = rotation.z,
+                    RotW = rotation.w,
+                };
+
+                // Mémorisé **avant** l'envoi : un client qui se connecte pendant la diffusion doit trouver
+                // l'entité dans le carnet, sinon il ne la verrait jamais.
+                RememberSpawn(message);
+
+                var sent = 0;
+                foreach (var pair in _sessions)
+                {
+                    if (!pair.Value.Accepted)
+                    {
+                        continue;
+                    }
+
+                    Send(pair.Key, message.Write, DeliveryMethod.ReliableOrdered);
+                    sent++;
+                }
+
+                _entitySpawnsSent++;
+                announced++;
+
+                _log.LogInfo(
+                    $"[net] apparition : clé=0x{key:x16} '{vehicle.gameObject.name}' ({tech}) — " +
+                    $"diffusée à {sent} client(s), pos=({position.x:F1}, {position.y:F1}, {position.z:F1}), " +
+                    $"identité '{uniqueId}'.");
+            }
+
+            if (announced > 0)
+            {
+                _log.LogInfo($"[net] apparition : {announced} entité(s) annoncée(s) ce balayage.");
+            }
+        }
+
+        /// <summary>Range une annonce dans le carnet, en évinçant la plus ancienne au-delà de la borne.</summary>
+        private void RememberSpawn(EntitySpawnMessage message)
+        {
+            if (!_spawnedEntities.ContainsKey(message.Key))
+            {
+                if (_spawnOrder.Count >= MaxRememberedSpawns)
+                {
+                    var oldest = _spawnOrder.Dequeue();
+                    _spawnedEntities.Remove(oldest);
+                    _log.LogWarning(
+                        $"[net] apparition : carnet plein ({MaxRememberedSpawns}) — clé=0x{oldest:x16} oubliée " +
+                        "(un client qui se connecte maintenant ne la recevra pas).");
+                }
+
+                _spawnOrder.Enqueue(message.Key);
+            }
+
+            _spawnedEntities[message.Key] = message;
+        }
+
+        /// <summary>
+        /// Rejoue à un client qui vient d'être admis les entités fabriquées avant son arrivée.
+        ///
+        /// Pourquoi c'est nécessaire : les entités de la **sauvegarde** existent déjà chez lui (il charge la
+        /// même partie), une entité **fabriquée** non. Mesuré à l'étape N : le deuxième client se connecte
+        /// après l'annonce et ne reçoit rien — verdict False à 150 s, alors que le premier a tout créé.
+        /// </summary>
+        private void SendSpawnedEntities(NetPeer peer, ClientSession session)
+        {
+            if (_spawnedEntities.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var message in _spawnedEntities.Values)
+            {
+                Send(peer, message.Write, DeliveryMethod.ReliableOrdered);
+                _entitySpawnsReplayed++;
+            }
+
+            _log.LogInfo(
+                $"[net] apparition : {_spawnedEntities.Count} entité(s) fabriquée(s) rejouée(s) pour " +
+                $"'{session.Username}'#{session.PlayerId} (arrivé après leur création).");
+        }
+
         private void BroadcastVehicleSnapshots(long serverTick, Player hostPlayer)
         {
             var now = UnityEngine.Time.realtimeSinceStartup;
@@ -2131,6 +2315,7 @@ namespace Coop.Server
                 _vehicleCache = UnityEngine.Object.FindObjectsOfType<Vehicle>();
                 _vehicleCacheRealtime = now;
                 ReportVehicleIdentities();
+                BroadcastNewVehicles();
             }
 
             if (_vehicleCache == null || _vehicleCache.Length == 0)

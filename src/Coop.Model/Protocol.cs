@@ -8,6 +8,10 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **10** : ajout de la **création d'entité** (`EntitySpawn`, M6) : le serveur annonce le véhicule
+        /// qu'il vient de fabriquer, et le client l'instancie au même endroit avec la **même** identité.
+        /// Sans ce message, un `spawn` côté serveur n'existe pas chez les clients — ils le voient dans le
+        /// flux de positions (clé inconnue) mais n'ont aucun objet à déplacer.
         /// **9** : ajout de la **conduite autoritaire** d'un véhicule (`VehicleControl` /
         /// `VehicleControlResult`, M4). Un client v8 ne saurait pas envoyer son état de conduite : le
         /// serveur garderait le véhicule immobile chez les autres pendant que son conducteur le simule.
@@ -18,13 +22,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 9;
+        public const int Version = 10;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v9";
+        public const string ConnectionKey = "coop-subnautica-v10";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -59,6 +63,9 @@ namespace Coop.Model
         /// (`VehicleSnapshot`), inutile de faire plus vite que ce que le serveur rediffuse.
         /// </summary>
         public const int VehicleControlIntervalMs = 100;
+
+        /// <summary>Longueur maximale d'un identifiant d'entité transporté dans un <see cref="EntitySpawnMessage"/>.</summary>
+        public const int MaxEntityIdLength = 64;
 
         /// <summary>Intervalle de vérification des changements d'équipement local côté client, en millisecondes.</summary>
         public const int EquipmentCheckIntervalMs = 250;
@@ -275,6 +282,9 @@ namespace Coop.Model
 
         /// <summary>Décision du serveur sur une conduite, envoyée au seul demandeur (ReliableOrdered, v9).</summary>
         VehicleControlResult = 18,
+
+        /// <summary>Annonce d'une entité fabriquée par le serveur (ReliableOrdered, v10, M6).</summary>
+        EntitySpawn = 19,
     }
 
     /// <summary>

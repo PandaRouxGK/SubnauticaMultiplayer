@@ -976,6 +976,87 @@ namespace Coop.Model
         }
     }
 
+    /// <summary>
+    /// Annonce d'une entité **fabriquée par le serveur** (ReliableOrdered, v10, M6) : « ce véhicule vient
+    /// d'apparaître, voici son identité, sa position et son orientation ».
+    ///
+    /// Pourquoi l'identité voyage dans le message : une entité créée à l'exécution reçoit un
+    /// `UniqueIdentifier` **neuf dans chaque instance** (mesuré en J : deux `spawn` de Seamoth donnent deux
+    /// clés différentes). Sans ça, le client créerait un objet impossible à apparier aux positions
+    /// suivantes. Le client **écrit** l'id du serveur sur son exemplaire, et les deux clés coïncident.
+    ///
+    /// `TechTypeName` est le nom d'espèce (`SeaMoth`), pas celui du prefab : c'est ce que le client sait
+    /// résoudre pour instancier.
+    /// </summary>
+    public sealed class EntitySpawnMessage
+    {
+        public long Key;
+        public string UniqueId;
+        public string TechTypeName;
+        public float X, Y, Z;
+        public float RotX, RotY, RotZ, RotW;
+
+        public void Write(PacketWriter writer)
+        {
+            var id = UniqueId ?? string.Empty;
+            if (id.Length > Protocol.MaxEntityIdLength)
+            {
+                throw new ProtocolException($"identifiant d'entité trop long ({id.Length} > {Protocol.MaxEntityIdLength})");
+            }
+
+            var name = TechTypeName ?? string.Empty;
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException($"nom de TechType trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
+            writer.WriteByte((byte)MessageType.EntitySpawn);
+            writer.WriteLong(Key);
+            writer.WriteString(id);
+            writer.WriteString(name);
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteFloat(RotX);
+            writer.WriteFloat(RotY);
+            writer.WriteFloat(RotZ);
+            writer.WriteFloat(RotW);
+        }
+
+        public static EntitySpawnMessage Read(PacketReader reader)
+        {
+            var msg = new EntitySpawnMessage
+            {
+                Key = reader.ReadLong(),
+                UniqueId = reader.ReadString(),
+                TechTypeName = reader.ReadString(),
+                X = reader.ReadFloat(),
+                Y = reader.ReadFloat(),
+                Z = reader.ReadFloat(),
+                RotX = reader.ReadFloat(),
+                RotY = reader.ReadFloat(),
+                RotZ = reader.ReadFloat(),
+                RotW = reader.ReadFloat(),
+            };
+
+            if (msg.UniqueId.Length > Protocol.MaxEntityIdLength)
+            {
+                throw new ProtocolException($"identifiant d'entité reçu trop long ({msg.UniqueId.Length})");
+            }
+
+            if (msg.TechTypeName.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException($"nom de TechType reçu trop long ({msg.TechTypeName.Length})");
+            }
+
+            PlayerPositionMessage.EnsureFinite(
+                msg.X, msg.Y, msg.Z,
+                msg.RotX, msg.RotY, msg.RotZ, msg.RotW);
+
+            return msg;
+        }
+    }
+
     public static class MessageCodec
     {
         public static byte[] Encode(Action<PacketWriter> write, PacketWriter reusable = null)

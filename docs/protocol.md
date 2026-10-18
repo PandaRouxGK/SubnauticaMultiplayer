@@ -12,8 +12,8 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `9` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v9` | `Protocol.ConnectionKey` |
+| Version du protocole | `10` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v10` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
 | Encodage | little-endian, tampons réutilisables, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
@@ -55,8 +55,9 @@ et encodé en UTF-8.
 | 16 | `PickupResult` | serveur → demandeur | ReliableOrdered | `ItemKey` long, `TechTypeName` string, `Granted` bool, `HolderId` ushort, `ClaimedBy` ushort |
 | 17 | `VehicleControl` | client → serveur | Unreliable (10 Hz) | `PlayerId` ushort (revendiqué, falsifiable), `VehicleKey` long, `Sequence` int, position et rotation (7 floats), vitesse (3 floats) |
 | 18 | `VehicleControlResult` | serveur → demandeur | ReliableOrdered | `VehicleKey` long, `Granted` bool, `DriverId` ushort |
+| 19 | `EntitySpawn` | serveur → client | ReliableOrdered | `Key` long, `UniqueId` string, `TechTypeName` string, position (3 floats), quaternion (4 floats) |
 
-Quatre points de contrat que ces messages portent :
+Cinq points de contrat que ces messages portent :
 
 - **Le serveur force `PlayerId`** sur ce qu'il rediffuse (#10, #11, #12) : un client ne peut donc pas se faire
   passer pour un autre ni choisir sa couleur (voir `docs/authority.md`).
@@ -68,6 +69,11 @@ Quatre points de contrat que ces messages portent :
   `PlayerId` du message n'est jamais recopié : la décision est attribuée à la session, et l'écart est
   compté (`ForgedPickupIds`) — la même règle que #10/#11/#12, appliquée à une **décision** et non à un
   relais.
+- **L'annonce d'une entité fabriquée transporte son identité (#19, v10).** Le serveur diffuse la clé
+  **et** l'identifiant du jeu (`UniqueIdentifier.Id`) du véhicule qu'il vient de fabriquer, et le client
+  **écrit cet identifiant** sur son exemplaire : sans lui, deux instances d'un même `spawn` calculeraient
+  deux clés différentes (mesuré en J) et le flux #14 n'aurait aucun objet à déplacer. Une entité sans
+  identifiant n'est **pas** annoncée — c'est journalisé — plutôt que de laisser le client inventer une clé.
 - **Les flux #9, #13 et #14 sont filtrés par destinataire.** #13 n'est pas « toutes les créatures du
   monde » mais « celles qui comptent pour toi », dans le rayon ci-dessous (`ServerNetwork`,
   `BroadcastCreatureSnapshots`) ; #14 suit la même règle pour les véhicules, dans un rayon plus large
@@ -151,6 +157,7 @@ distingue en décalant la teinte de sa texture dans la bande 5°–45° (`HsvSwa
 | `MaxClients` | `10` | `Protocol.MaxClients` |
 | `HandshakeTimeoutSeconds` | `10` | au-delà, un pair qui n'a pas fini son handshake est éjecté |
 | `ServerHostPlayerId` | `0` | identifiant réservé au personnage de l'instance serveur |
+| `MaxEntityIdLength` | `64` | longueur maximale d'un `UniqueId` dans `EntitySpawn` (#19) : un identifiant du jeu fait 36 caractères, `64` laisse de la marge sans permettre un paquet démesuré (écriture et lecture refusent au-delà) |
 | Identifiant de l'hôte vu par un client | `9999` | `ServerNetwork.BroadcastSnapshots` : l'hôte est inclus comme joueur virtuel pour qu'un client seul voie aussi son personnage |
 
 ---
@@ -202,6 +209,31 @@ journal — même type, **un seul** véhicule local non suivi à moins de `30 m`
 
 ---
 
+## 4 ter. Création d'entité : ce que l'annonce promet
+
+Un véhicule fabriqué à l'exécution (`spawn`, épave qui se détache) n'est pas dans la sauvegarde : les
+clients ne l'ont pas, et le flux #14 ne leur donnait qu'une clé sans objet à déplacer. La v10 ajoute donc
+une annonce (#19) et trois décisions qui méritent d'être dites :
+
+1. **Le serveur est la seule source d'apparition.** Il balaie ses véhicules à la cadence du flux de
+   positions (`VehicleCacheSeconds = 2 s`) et annonce ceux dont la clé est **nouvelle**. Le premier
+   balayage **enregistre** sans annoncer : sans ça, un client qui se connecte verrait arriver une annonce
+   pour chaque Seamoth de la carte, y compris ceux qu'il a déjà chargés.
+2. **L'espèce voyage en clair, l'objet est instancié par le client.** `TechTypeName` est le nom d'espèce
+   (`Seamoth`), pas celui du prefab (`SeaMoth(Clone)`) : c'est ce que `CraftData.GetPrefabForTechTypeAsync`
+   sait résoudre chez le client. Une espèce inconnue est **comptée et refusée** — le client n'invente pas de
+   prefab.
+3. **Rien n'est créé avant que le monde ne soit chargé.** Le client se connecte au **menu principal** : une
+   annonce reçue à ce moment-là reste en file (`EntitySpawner`) jusqu'à `AutoLoadBehaviour.WorldLoaded`.
+   Mesuré à l'étape N : sans cette attente, le Seamoth était fabriqué dans la scène du menu, que le
+   chargement décharge ensuite — l'objet créé n'était plus retrouvé trois secondes plus tard.
+
+Ce que l'annonce ne fait pas : **aucun retrait**. Détruire un véhicule côté serveur ne dit rien aux clients
+(`EntityDespawn` n'existe pas), le carnet des entités fabriquées est borné à `256` (`MaxRememberedSpawns`),
+et une entité oubliée n'est plus rejouée aux clients suivants (c'est journalisé).
+
+---
+
 ## 5. Admission et refus
 
 `ServerNetwork.Validate` (`src/Coop.Server/ServerNetwork.cs`) refuse un handshake, **en donnant la raison en
@@ -218,8 +250,12 @@ clair** dans un `HandshakeResponse.Accepted = false`, en ReliableOrdered, puis l
 | — | version de jeu différente (même comparaison) |
 
 À l'acceptation, le serveur : attribue un `PlayerId`, assigne la couleur, envoie au nouvel arrivant un
-`PlayerJoined` + sa couleur + l'équipement et l'objet tenu des joueurs déjà présents, puis annonce son
-arrivée aux autres (`ServerNetwork.HandleHandshake`).
+`PlayerJoined` + sa couleur + l'équipement et l'objet tenu des joueurs déjà présents, annonce son arrivée
+aux autres (`ServerNetwork.HandleHandshake`), puis lui **rejoue les annonces d'entités fabriquées avant son
+arrivée** (`SendSpawnedEntities`). Ce dernier point n'est pas un confort : les entités d'une sauvegarde
+existent déjà chez lui, une entité fabriquée non. Mesuré à l'étape N : le second client se connecte après
+le `spawn` de l'hôte et, sans ce rejeu, ne reçoit rien — verdict False à 150 s alors que le premier avait
+tout créé.
 
 ---
 
@@ -233,9 +269,9 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   moins de `10 m`, et qu'aucun autre joueur ne conduisait déjà, puis applique et rediffuse (#18 rend la
   décision au demandeur). Ne sont **pas** transportés : l'énergie, les modules, les dégâts — un client qui
   conduit et un serveur qui ne simule pas le véhicule ne peuvent pas décider d'une panne. Il n'y a **pas
-  de libération** du véhicule : le conducteur garde la main jusqu'à sa déconnexion (`PLAN.md` §40). La
-  synchronisation suppose aussi un véhicule **présent dans la sauvegarde des deux côtés** : la création
-  d'entité n'est pas dans le protocole (même famille de limite que M6).
+  de libération** du véhicule : le conducteur garde la main jusqu'à sa déconnexion (`PLAN.md` §40). La  synchronisation suppose aussi un véhicule **présent dans la sauvegarde des deux côtés** : la création
+d'entité est arrivée avec la v10 (#19, section 4 ter), mais **aucun retrait** ne l'accompagne — un véhicule
+détruit côté serveur continue d'exister chez les clients.
 - **Le ramassage est autoritaire, mais son effet sur le monde ne l'est pas** : depuis la v8 et la fin de
   M5, le serveur accorde ou refuse une clé **d'un objet réel** (il la résout dans son propre monde, et
   refuse ce qu'il ne trouve pas ou qui est à plus de `6 m` du joueur), et le client **bloque** le geste de
@@ -245,5 +281,5 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   à tort, et les objets **sans clé** ne sont pas arbitrés. Les collisions de clé sont comptées, pas
   résolues. Aucun autre arbitrage de ressource (récolte, craft, dégâts) n'existe.
 - **Aucun transport de contenu** : pas d'AssetBundle, pas de définition d'objet envoyée au client (M6).
-- **Version 9** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
+- **Version 10** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
   tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

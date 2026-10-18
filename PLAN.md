@@ -143,7 +143,7 @@ serveur qu'une valeur falsifiée est rejetée.
 | **M3** | **Une créature synchro, IA client coupée** | position identique chez les 2 clients, IA uniquement serveur | **élevé — valide le modèle** |
 | **M4** | Un véhicule (Seamoth) | **position diffusée à 10 Hz et interpolée côté client (fait, §33)** ; énergie/upgrades et conduite autoritaire restent ouverts | moyen |
 | **M5** | Première action autoritaire | pickup : refus serveur si déjà réclamé | moyen |
-| **M6** | Pipeline de contenu | item custom ajouté côté serveur, AssetBundle livré au client | moyen |
+| **M6** | Pipeline de contenu | **création d'entité faite (§41)** : l'hôte fabrique, les clients instancient avec la clé du serveur ; reste l'item **custom** et son AssetBundle livré au client | moyen |
 
 M3 est le vrai test : si une créature pilotée serveur avec IA client désactivée rend
 correctement chez 2 clients, l'architecture est bonne pour tout le reste.
@@ -3012,3 +3012,80 @@ client 2 résultat : accordée=False conduite par 1 ; verdict=True (refus=2, acc
 - **Rien n'est transporté d'autre** : ni énergie, ni modules, ni dégâts (M4 « le reste », §2 de
   `docs/authority.md`). Un client qui conduit et un serveur qui ne simule pas le véhicule ne peuvent pas
   décider d'une panne de batterie.
+
+## 41. M6 (a) : une entité fabriquée par l'hôte existe chez les clients, avec la **même** clé (2026-10-18)
+
+### Le problème, dit par la mesure
+
+Jusqu'à la v9, un `spawn Seamoth` fait chez l'hôte était **invisible** chez les clients : le serveur
+diffusait bien sa position (`VehicleSnapshot`), mais sous une clé que le client ne pouvait rattacher à rien.
+L'étape J l'avait déjà montré sans le nommer : `clé inconnue=378`, et le seul rattachement observé
+(`rattachés par proximité=1`) était précisément ce Seamoth fabriqué, dont le `UniqueIdentifier` est **neuf
+dans chaque instance**. Ce n'est pas un défaut du suivi : c'est que personne ne **crée** l'objet côté
+client. Aucun flux de positions ne peut créer ce qui n'existe pas.
+
+### Le choix : le serveur annonce, le client instancie, l'identité voyage
+
+- **`EntitySpawn` (#19, serveur → client, ReliableOrdered, protocole v10)** : clé, `UniqueIdentifier.Id`,
+  nom d'espèce (`Seamoth`), position et rotation. La clé seule ne suffisait pas : elle est **calculée** à
+  partir de l'identifiant, et le client qui instancie reçoit un identifiant neuf. Le message transporte donc
+  l'identifiant du serveur, et le client **écrit cet identifiant** sur son exemplaire — c'est ce qui rend
+  les deux clés égales, et le suivi possible sans rattachement par proximité.
+- **Serveur** : un balayage à la cadence du cache de véhicules (`2 s`) annonce les clés **nouvelles**. Le
+  premier balayage **enregistre** sans annoncer, sinon un client qui se connecte verrait arriver une annonce
+  par Seamoth de la carte, y compris ceux qu'il a déjà chargés. Une entité sans identifiant n'est **pas**
+  annoncée (journalisé) : une entité en double vaudrait moins qu'une entité absente.
+- **Client** : `EntitySpawner` instancie par `CraftData.GetPrefabForTechTypeAsync` (l'espèce, pas le nom du
+  prefab), écrit l'identifiant, pose position et rotation, puis laisse `RemoteVehicleManager` l'apparier par
+  sa clé comme n'importe quel véhicule. Une espèce inconnue est **comptée et refusée** — le client n'invente
+  pas de prefab.
+
+### Deux défauts que seule la mesure a montrés
+
+1. **Le second client ne recevait rien.** Le premier run de l'étape N l'a mesuré sans ambiguïté : le client 1
+   crée l'entité (`verdict=True`), le client 2 attend 150 s et rend `verdict=False — aucune entité créée`
+   alors que le serveur a bien annoncé. Cause : l'annonce est **diffusée une fois**, aux sessions présentes
+   à cet instant ; un client qui se connecte après ne l'a jamais. Correction : le serveur **garde** les
+   annonces (`_spawnedEntities`, borné à `256`) et **les rejoue** au client qu'il vient d'admettre
+   (`SendSpawnedEntities`) — journalisé `1 entité(s) fabriquée(s) rejouée(s) pour 'killi'#2 (arrivé après
+   leur création)`. La sonde de l'hôte a aussi été rendue **déterministe** : elle attend qu'un client soit
+   connecté avant de fabriquer, pour que « le second arrive après » soit le cas nominal et non un hasard.
+2. **Un client connecté depuis le menu fabriquait dans la scène du menu.** Deuxième run : le client 2 crée
+   l'objet (`créées=1`) et ne le retrouve **plus** trois secondes plus tard
+   (`objet local retrouvé par sa clé=False`). Un client se connecte au **menu principal** : l'objet naissait
+   dans la scène du menu, que le chargement du monde décharge. Correction : `EntitySpawner` ne draine sa
+   file qu'une fois `AutoLoadBehaviour.WorldLoaded`, et la sonde cliente attend le monde avant de juger.
+
+### La mesure (étape N de `tools/verify.sh`, 2026-10-18)
+
+```
+serveur  [sonde] apparition : 1 véhicule(s) avant la fabrication.
+         [sonde] apparition : 1 client(s) connecté(s) avant la fabrication.
+         [sonde] apparition : commande console « spawn Seamoth » (tentative 1).
+         [sonde] apparition : véhicule fabriqué — 'SeaMoth(Clone)' (clé=0x7ce3b6a1e8e7e312, identifiant) après 1 tentative(s)
+         [net] apparition : clé=0x7ce3b6a1e8e7e312 'SeaMoth(Clone)' (Seamoth) — diffusée à 1 client(s),
+               pos=(-118.4, -13.4, -52.9), identité '0a472465-f9e8-4780-8b3e-a308429250ce'.
+         [net] apparition : 1 entité(s) fabriquée(s) rejouée(s) pour 'killi'#2 (arrivé après leur création).
+client 1 [net] apparition reçue : clé=0x7ce3b6a1e8e7e312 'Seamoth' identité '0a472465-…'
+         [spawn] entité créée : clé=0x7ce3b6a1e8e7e312 'SeaMoth(Clone)' (Seamoth) pos=(-118.4, -13.4, -52.9)
+               — identifiant du serveur '0a472465-…' écrit (oui), clé locale 0x7ce3b6a1e8e7e312, créées=1
+client 2 les deux mêmes lignes, après son chargement de monde
+les deux [sonde] apparition : verdict=True — entités créées=1, écartées (déjà présentes)=0, échecs=0,
+          clés divergentes=0 ; dernière clé=0x7ce3b6a1e8e7e312 'SeaMoth(Clone)' — objet local retrouvé par sa clé=True
+```
+
+`étape N : OK (79s)`, `VERDICT GLOBAL : tout est vert`. La clé locale est **la clé annoncée** : le Seamoth
+fabriqué se suit désormais sans rattachement par proximité.
+
+### Ce que cette moitié de M6 ne fait pas
+
+- **Aucun retrait.** `EntityDespawn` n'existe pas : détruire un véhicule chez l'hôte ne dit rien aux
+  clients, qui gardent l'objet. Le carnet de rejeu est borné à `256` ; au-delà, la plus ancienne annonce est
+  oubliée et un client qui se connecte ne la reçoit plus (journalisé).
+- **Seuls les véhicules.** Un objet (`Pickupable`) ou une créature fabriqués chez l'hôte ne sont pas
+  annoncés : la clé d'une créature est sa position d'apparition, et l'annonce d'un objet demanderait de
+  choisir ce qui identifie un objet créé à l'exécution.
+- **Un seul sens.** Un `spawn` fait **chez un client** n'existe pas dans le monde du serveur, donc pas chez
+  les autres. Le déplacer demanderait un message client → serveur et un arbitrage d'existence (M6 b).
+- **Rien de custom.** L'espèce annoncée doit exister dans la base du client : c'est le préfabriqué du jeu,
+  pas un AssetBundle (M6 « contenu »).

@@ -120,6 +120,14 @@ namespace Coop.Server
                 go.AddComponent<VehicleProbeBehaviour>();
             }
 
+            // M6 : fabrication d'une entité qui n'existe pas dans la sauvegarde, pour que l'annonce
+            // d'apparition ait quelque chose à transporter.
+            if (IsDebugFlagSet("spawn"))
+            {
+                Log.LogWarning("[boot] sonde d'apparition activée (-coopdebug=spawn).");
+                go.AddComponent<EntitySpawnProbeBehaviour>();
+            }
+
             // Met un Seamoth **dans la sauvegarde** de l'hôte, pour que l'étape K mesure la clé nominale
             // (identifiant sérialisé, identique des deux côtés) au lieu du rattachement par proximité.
             if (IsDebugFlagSet("vpersist"))

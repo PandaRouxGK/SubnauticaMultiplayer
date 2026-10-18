@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les douze étapes, et ce que chacune prouve :
+# Les quatorze étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -50,10 +50,17 @@
 #      `rattachée par proximité`, aucune `contrepartie locale` fabriquée). Deux runs : une préparation qui
 #      fabrique le Seamoth (dans le monde **chargé** : `joueur=(-1xx…`, pas la scène de menu) et sauvegarde
 #      la partie de l'hôte, puis la mesure à deux clients.
+#   M  deux clients, sonde de conduite -> le premier **conduit** (le serveur applique et rediffuse son état),
+#      le second se voit **refuser** le volant, et le refus lui est **rendu** (`VehicleControlResult`).
+#      C'est le premier transfert d'autorité sur une entité du monde (M4 b, protocole v9).
+#   N  deux clients, sonde d'apparition -> l'hôte **fabrique** un Seamoth par la commande du jeu, le serveur
+#      l'annonce (clé **et** identifiant), et les **deux** clients le créent avec la **même** clé — dont un
+#      client arrivé après la fabrication, qui ne peut le recevoir que parce que le serveur rejoue l'annonce
+#      (`EntitySpawn`, protocole v10).
 #
 # Usage :
-#   tools/verify.sh                    # les douze étapes
-#   tools/verify.sh --only=B           # une seule étape (A..K, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les quatorze étapes
+#   tools/verify.sh --only=B           # une seule étape (A..N, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -120,9 +127,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKLM,]*)
+    *[!ABCDEFGHIJKLMN,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, N, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -470,6 +477,27 @@ assert_k() {
     expect K "$c2" '\[sonde\] véhicule client : verdict=True' "client 2 : l'interpolation conclut True"
 }
 
+assert_n() {
+    local server="$WORK_DIR/N/coop-server.log"
+    local c1="$WORK_DIR/N/coop-client.log"
+    local c2="$WORK_DIR/N/coop-client-2.log"
+
+    expect N "$server" 'commande console « spawn Seamoth »' "l'hôte fabrique le véhicule par la commande du jeu"
+    expect N "$server" '\[sonde\] apparition : véhicule fabriqué' "la sonde constate le véhicule nouveau"
+    expect N "$server" "apparition : clé=0x[0-9a-f]+ '.*' \\(Seamoth\\) — diffusée à [1-9][0-9]* client\\(s\\)" \
+        "le serveur annonce l'entité avec son identité"
+    expect N "$server" 'apparition : [1-9][0-9]* entité\(s\) fabriquée\(s\) rejouée\(s\) pour' \
+        "le second client, arrivé après la création, reçoit l'annonce rejouée"
+
+    expect N "$c1" '\[net\] apparition reçue : clé=0x[0-9a-f]+' "client 1 : l'annonce arrive"
+    expect N "$c1" "\\[spawn\\] entité créée : clé=0x[0-9a-f]+ '.*' \\(Seamoth\\)" "client 1 : l'entité est créée"
+    expect N "$c1" '\[sonde\] apparition : verdict=True' "client 1 : la clé locale correspond à la clé annoncée"
+
+    expect N "$c2" '\[net\] apparition reçue : clé=0x[0-9a-f]+' "client 2 : l'annonce arrive"
+    expect N "$c2" "\\[spawn\\] entité créée : clé=0x[0-9a-f]+ '.*' \\(Seamoth\\)" "client 2 : l'entité est créée"
+    expect N "$c2" '\[sonde\] apparition : verdict=True' "client 2 : la clé locale correspond à la clé annoncée"
+}
+
 assert_m() {
     local server="$WORK_DIR/M/coop-server.log"
     local c1="$WORK_DIR/M/coop-client.log"
@@ -585,9 +613,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N}"
 fi
 
 if wanted A "$ONLY"; then
@@ -780,6 +808,19 @@ if wanted J "$ONLY"; then
         args+=(--no-build)
     fi
     step J "véhicule : diffusion serveur à 10 Hz et interpolation cliente mesurée image par image" assert_j "${args[@]}"
+fi
+
+if wanted N "$ONLY"; then
+    # M6 / v10 : l'hôte **fabrique** un véhicule absent de la sauvegarde ; les deux clients doivent le
+    # créer avec la **même** identité, sinon le flux de positions n'a rien à déplacer chez eux.
+    args=(--clients=2 --together --timeout=300
+        "--host-args=-coopmode=server -coopdebug=spawn"
+        "--client-args=-coopmode=client -coopdebug=spawn"
+        "--client-marker=\\[sonde\\] apparition : verdict=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step N "création d'entité : un véhicule fabriqué chez l'hôte existe et se suit chez les clients" assert_n "${args[@]}"
 fi
 
 if wanted M "$ONLY"; then

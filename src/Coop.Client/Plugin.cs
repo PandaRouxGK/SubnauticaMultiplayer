@@ -72,6 +72,10 @@ namespace Coop.Client
             // rien tant que le joueur ne pilote pas, donc elle vit avec le client et pas avec une sonde.
             go.AddComponent<VehicleDriverBehaviour>();
 
+            // Création d'entité (v10) : instancie ce que le serveur annonce. Toujours actif : un client qui
+            // ne crée pas une entité annoncée la voit dans le flux de positions sans objet à déplacer.
+            go.AddComponent<EntitySpawner>();
+
             if (saveGuardInstalled)
             {
                 // Même composant que côté serveur (src/Shared) : le client entre dans le monde.
@@ -125,6 +129,13 @@ namespace Coop.Client
                 // active la sonde de l'hôte : c'est le couple qui produit la preuve de bout en bout.
                 Log.LogWarning("[boot] sonde de véhicule cliente activée (-coopdebug=vehicle).");
                 go.AddComponent<VehicleClientProbeBehaviour>();
+            }
+
+            if (IsDebugFlagSet("spawn"))
+            {
+                // M6 / v10 : attend qu'une entité annoncée par l'hôte soit créée localement, clé comprise.
+                Log.LogWarning("[boot] sonde d'apparition activée (-coopdebug=spawn).");
+                go.AddComponent<EntitySpawnProbeBehaviour>();
             }
 
             if (IsDebugFlagSet("drive"))
@@ -1015,6 +1026,16 @@ namespace Coop.Client
                     _vehicleSnapshotsReceived++;
                     _vehicleStatesReceived += vehicles.Vehicles != null ? vehicles.Vehicles.Length : 0;
                     _vehicles?.OnSnapshot(vehicles);
+                    break;
+                }
+
+                case MessageType.EntitySpawn:
+                {
+                    var spawn = EntitySpawnMessage.Read(reader);
+                    CoopClientPlugin.Log.LogInfo(
+                        $"[net] apparition reçue : clé=0x{spawn.Key:x16} '{spawn.TechTypeName}' " +
+                        $"identité '{spawn.UniqueId}'");
+                    EntitySpawner.Enqueue(spawn);
                     break;
                 }
 
