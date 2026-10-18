@@ -128,6 +128,14 @@ namespace Coop.Server
                 go.AddComponent<EntitySpawnProbeBehaviour>();
             }
 
+            // M6 / v11 : fabrique puis **détruit** un véhicule, pour que le retrait ait quelque chose à
+            // annoncer (l'étape O : création chez les clients, puis disparition).
+            if (IsDebugFlagSet("despawn"))
+            {
+                Log.LogWarning("[boot] sonde de disparition activée (-coopdebug=despawn).");
+                go.AddComponent<EntityDespawnProbeBehaviour>();
+            }
+
             // Met un Seamoth **dans la sauvegarde** de l'hôte, pour que l'étape K mesure la clé nominale
             // (identifiant sérialisé, identique des deux côtés) au lieu du rattachement par proximité.
             if (IsDebugFlagSet("vpersist"))

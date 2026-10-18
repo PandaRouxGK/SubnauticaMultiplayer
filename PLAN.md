@@ -143,7 +143,7 @@ serveur qu'une valeur falsifiée est rejetée.
 | **M3** | **Une créature synchro, IA client coupée** | position identique chez les 2 clients, IA uniquement serveur | **élevé — valide le modèle** |
 | **M4** | Un véhicule (Seamoth) | **position diffusée à 10 Hz et interpolée côté client (fait, §33)** ; énergie/upgrades et conduite autoritaire restent ouverts | moyen |
 | **M5** | Première action autoritaire | pickup : refus serveur si déjà réclamé | moyen |
-| **M6** | Pipeline de contenu | **création d'entité faite (§41)** : l'hôte fabrique, les clients instancient avec la clé du serveur ; reste l'item **custom** et son AssetBundle livré au client | moyen |
+| **M6** | Pipeline de contenu | **création et retrait d'entité faits (§41, §42)** : l'hôte fabrique, les clients instancient avec la clé du serveur ; un retrait et un ramassage se répercutent ; reste l'item **custom** et son AssetBundle livré au client | moyen |
 
 M3 est le vrai test : si une créature pilotée serveur avec IA client désactivée rend
 correctement chez 2 clients, l'architecture est bonne pour tout le reste.
@@ -3089,3 +3089,75 @@ fabriqué se suit désormais sans rattachement par proximité.
   les autres. Le déplacer demanderait un message client → serveur et un arbitrage d'existence (M6 b).
 - **Rien de custom.** L'espèce annoncée doit exister dans la base du client : c'est le préfabriqué du jeu,
   pas un AssetBundle (M6 « contenu »).
+
+## 42. M6 (b) et la fin de M4 : ce qui existe **cesse** d'exister, et un volant se **libère** (2026-10-18)
+
+### Le problème, dans les deux cas
+
+Deux propriétés manquaient, et toutes deux se voient à l'usage :
+
+- **La v10 savait créer, pas retirer.** Un Seamoth détruit chez l'hôte restait chez tous les clients,
+  immobile, et le flux `VehicleSnapshot` continuait à l'animer. Un objet ramassé restait **visible et
+  réclamable** par les autres : le serveur accordait une clé qui ne désignait plus rien.
+- **Le volant ne revenait jamais.** Un véhicule restait attribué à son dernier conducteur **jusqu'à sa
+  déconnexion**. Un joueur qui descendait d'un Seamoth le rendait donc inutilisable — le refus renvoyait
+  les autres à quelqu'un qui n'était plus dedans.
+
+### Ce qui est en place
+
+- **`EntityDespawn` (#20, serveur → client, ReliableOrdered, v11)** : clé, espèce (`véhicule` / `objet`) et
+  motif. Deux sources, et une seule décision (le serveur) : le balayage des véhicules (une clé connue qui
+  n'est plus dans le monde) et un ramassage accordé (l'objet est retiré du monde simulé).
+- **Le détenteur est exclu de son propre retrait** : son exemplaire est déjà dans son inventaire, et c'est
+  son geste — pas un message — qui le retire de son monde.
+- **Le client applique, il ne décide pas** : `EntityDespawner` détruit la copie locale, ou le note comme
+  absent. Rien n'est retiré avant `WorldLoaded` : un retrait reçu au menu serait défait par la sauvegarde.
+- **`VehicleRelease` (#21, client → serveur, ReliableOrdered, v12)** : le conducteur qui descend rend le
+  volant immédiatement ; un silence de `VehicleSilenceReleaseSeconds` (3 s) le libère aussi, et la
+  déconnexion libère tout ce que le joueur conduisait.
+
+### Ce que la mesure a corrigé (trois défauts, tous trouvés en jouant)
+
+1. **Le détenteur perdait son objet.** Premier run de L avec le retrait : serveur `ACCORDÉE`, client
+   `objet dans l'inventaire=False`. Cause : le retrait était diffusé **à tout le monde**, y compris celui qui
+   venait de ramasser, avant que son geste ne range l'objet. Correction : diffusion qui exclut le détenteur.
+2. **Une clé accordée devenait « inconnue ».** Le second client recevait `REFUSÉE (objet inconnu)` au lieu de
+   `(déjà tenue par 'killi'#1)` : le retrait avait déjà vidé l'index. Correction : la carte des réclamations
+   passe **avant** la résolution du monde — c'est le registre durable.
+3. **L'objet revenait avec la sauvegarde.** Le retrait arrivait 10 s avant le chargement du second client ;
+   il ne trouvait rien, puis le monde se chargeait avec l'objet intact. Correction : retraits mis en file
+   jusqu'à `WorldLoaded`, et `EntitySpawner` refuse de créer une clé déjà annoncée disparue (`IsGone`) —
+   sinon un fantôme survivrait à la destruction.
+
+### La mesure
+
+```
+étape O (v11)   serveur  [sonde] disparition : véhicule 'SeaMoth(Clone)' (clé=0x…) détruit après 40s
+                         [net] disparition : clé=0x… (véhicule) — annoncée à 2 client(s), motif « véhicule détruit chez le serveur »
+                clients  [disparition] véhicule retiré : clé=0x… 'SeaMoth(Clone)'
+                         [sonde] disparition : verdict=True — véhicules retirés=1 … cette instance avait l'objet et
+                         l'a détruit, dernière clé retirée=0x5ebbcd3d006fb60c encore présente=False, entités créées ici=1
+
+étape L (v11)   serveur  [net] pickup : clé=0x10ee181a0699267d 'PowerCell' retirée du monde serveur (…) — ramassée par 'killi'#1.
+                         [net] disparition : clé=0x10ee181a0699267d (objet) — annoncée à 1 client(s), … sauf au détenteur (id 1)
+                client 2 [disparition] objet retiré : clé=0x10ee181a0699267d ('PowerCell(Clone)' (PowerCell) …)
+
+étape M (v12)   serveur  conduite : clé=0xe16d82d1f441441c — prise par 'killi'#1 (…)
+                         conduite : clé=0xe16d82d1f441441c réclamée par 'killi'#2 -> REFUSÉE (déjà conduite par 'killi'#1)
+                         conduite : clé=0xe16d82d1f441441c libérée par 'killi'#1 — le volant est libre (libérations=1, total=1)
+                         conduite : clé=0xe16d82d1f441441c — prise par 'killi'#2 (…)      ← 0,65 s plus tard
+                client 2 refus=2, accords=0 … après libération par le conducteur : accords=1 en 9 tentative(s)
+```
+
+`N : OK (78s)`, `O : OK (113s)`, `M : OK (119s)`, `L : OK (99s)`, `VERDICT GLOBAL : tout est vert`.
+
+### Ce que la libération ne fait pas, et ce que le retrait ne fait pas
+
+- **La libération par silence n'est mesurée que côté serveur** : la sonde fait **descendre** le conducteur
+  (message #21). Le chemin « client planté, silence de 3 s » est écrit et journalisé, jamais exercé.
+- **Le retrait ne vient que du serveur.** Un objet détruit **chez un client** ne disparaît pas ailleurs ;
+  c'est la même asymétrie que la création (M6 b, non entamée).
+- **La garde de ramassage n'est plus le rempart principal.** Depuis la v11, l'objet accordé à un autre est
+  souvent retiré **avant** que le refusé ne clique : l'étape L accepte donc « geste bloqué » ou « objet déjà
+  retiré », et nomme lequel des deux a joué. L'assertion n'a pas été affaiblie à l'aveugle : les deux issues
+  sont écrites par la sonde, et l'objet ne rentre pas dans l'inventaire dans les deux cas.

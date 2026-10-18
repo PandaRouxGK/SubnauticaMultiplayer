@@ -1057,6 +1057,119 @@ namespace Coop.Model
         }
     }
 
+    /// <summary>
+    /// Libération du volant (ReliableOrdered, v12, M4) : « je ne conduis plus ce véhicule ».
+    ///
+    /// Pourquoi un message alors que le serveur pourrait se contenter du silence : le silence est
+    /// indiscernable d'une latence tant qu'il dure, alors qu'une descente du véhicule est un fait immédiat.
+    /// Le message rend le volant **tout de suite** ; le silence reste le filet de sécurité, au bout de
+    /// `VehicleSilenceReleaseSeconds` (`PLAN.md` §42).
+    ///
+    /// Aucun champ d'identité de joueur : c'est la session qui libère, jamais « au nom de » quelqu'un.
+    /// </summary>
+    public sealed class VehicleReleaseMessage
+    {
+        public long VehicleKey;
+
+        public void Write(PacketWriter writer)
+        {
+            writer.WriteByte((byte)MessageType.VehicleRelease);
+            writer.WriteLong(VehicleKey);
+        }
+
+        public static VehicleReleaseMessage Read(PacketReader reader)
+        {
+            return new VehicleReleaseMessage
+            {
+                VehicleKey = reader.ReadLong(),
+            };
+        }
+    }
+
+    /// <summary>
+    /// Espèce d'entité qu'un <see cref="EntityDespawnMessage"/> désigne.
+    ///
+    /// Pourquoi un octet plutôt qu'un message par espèce : la clé d'un véhicule et celle d'un objet sont
+    /// deux hachages de formes différentes, et sans cette étiquette le client devrait essayer les deux
+    /// index. La valeur `0` est réservée pour qu'un paquet tronqué ne se lise pas comme « véhicule ».
+    /// </summary>
+    public static class EntityKind
+    {
+        /// <summary>Valeur non écrite : un message qui la porte est refusé à la lecture.</summary>
+        public const byte None = 0;
+
+        /// <summary>Véhicule : clé de <c>VehicleIdentity</c>.</summary>
+        public const byte Vehicle = 1;
+
+        /// <summary>Objet ramassable : clé de <c>ItemIdentity</c>.</summary>
+        public const byte Item = 2;
+    }
+
+    /// <summary>
+    /// Annonce de la **disparition** d'une entité (ReliableOrdered, v11, M6) : « ce véhicule a été détruit »,
+    /// « cet objet a été ramassé ».
+    ///
+    /// Pourquoi ce message existe alors que la v10 savait créer : une entité créée reste sinon chez tout le
+    /// monde après sa destruction chez l'hôte, et un objet ramassé par un joueur reste **visible et
+    /// réclamable** par les autres — le serveur accordait alors une clé qui ne désignait plus rien. La
+    /// décision de retrait est prise **par le serveur seul** : le message part de lui, ne se demande pas,
+    /// et `Reason` ne sert qu'au journal.
+    ///
+    /// Aucun champ de position : un retrait n'a pas de lieu. Une clé `0` est refusée à l'écriture, comme
+    /// pour l'apparition.
+    /// </summary>
+    public sealed class EntityDespawnMessage
+    {
+        public long Key;
+
+        /// <summary><see cref="EntityKind.Vehicle"/> ou <see cref="EntityKind.Item"/>.</summary>
+        public byte Kind;
+
+        /// <summary>Motif lisible, pour le journal du receveur · jamais interprété.</summary>
+        public string Reason;
+
+        public void Write(PacketWriter writer)
+        {
+            if (Kind != EntityKind.Vehicle && Kind != EntityKind.Item)
+            {
+                throw new ProtocolException($"espèce d'entité invalide ({Kind}) dans une disparition");
+            }
+
+            var reason = Reason ?? string.Empty;
+            if (reason.Length > Protocol.MaxDespawnReasonLength)
+            {
+                throw new ProtocolException($"motif de disparition trop long ({reason.Length} > {Protocol.MaxDespawnReasonLength})");
+            }
+
+            writer.WriteByte((byte)MessageType.EntityDespawn);
+            writer.WriteLong(Key);
+            writer.WriteByte(Kind);
+            writer.WriteString(reason);
+        }
+
+        public static EntityDespawnMessage Read(PacketReader reader)
+        {
+            var msg = new EntityDespawnMessage
+            {
+                Key = reader.ReadLong(),
+                Kind = reader.ReadByte(),
+                Reason = reader.ReadString(),
+            };
+
+            if (msg.Kind != EntityKind.Vehicle && msg.Kind != EntityKind.Item)
+            {
+                throw new ProtocolException($"espèce d'entité inconnue ({msg.Kind}) dans une disparition");
+            }
+
+            if (msg.Reason.Length > Protocol.MaxDespawnReasonLength)
+            {
+                throw new ProtocolException($"motif de disparition reçu trop long ({msg.Reason.Length})");
+            }
+
+            return msg;
+        }
+    }
+
     public static class MessageCodec
     {
         public static byte[] Encode(Action<PacketWriter> write, PacketWriter reusable = null)

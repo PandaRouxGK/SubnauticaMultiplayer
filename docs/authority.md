@@ -30,7 +30,10 @@ et signale franchement les systèmes où il n'y a rien.
 
 | **Création d'entité (M6, première moitié)** | **ce qui existe dans le monde** : une entité qui n'est pas dans la sauvegarde n'apparaît que si le **serveur** le dit, et c'est le serveur qui en fixe l'identité. Le client ne fabrique rien de sa propre initiative | `Coop.Server/ServerNetwork.cs` (`BroadcastNewVehicles`, `SendSpawnedEntities`, carnet `_spawnedEntities`) · `Coop.Model/Messages.cs` (`EntitySpawn` #19, protocole **v10**) · `Coop.Client/EntitySpawner.cs` (instanciation, identifiant du serveur **écrit** sur l'exemplaire local, rien avant `WorldLoaded`) | serveur : `[net] apparition : clé=0x… 'SeaMoth(Clone)' (Seamoth) — diffusée à 1 client(s), pos=(…), identité '…'` puis `1 entité(s) annoncée(s) ce balayage` ; à l'arrivée d'un client plus tardif, `1 entité(s) fabriquée(s) rejouée(s) pour '<pseudo>'#2` ; client : `[net] apparition reçue : clé=0x… 'Seamoth' identité '…'`, puis `[spawn] entité créée : clé=0x… 'SeaMoth(Clone)' (Seamoth) pos=(…) — identifiant du serveur '…' écrit (oui), clé locale 0x…` ; **verdict** `[sonde] apparition : verdict=True — entités créées=1, écartées (déjà présentes)=0, échecs=0, clés divergentes=0 ; … objet local retrouvé par sa clé=True` chez **les deux** clients (étape N de `tools/verify.sh`). **Limites mesurées** : aucun **retrait** (`EntityDespawn` n'existe pas), le carnet de rejeu est borné à `256`, et la création ne porte que sur les véhicules — un objet ou une créature fabriqués ne sont pas annoncés |
 
-**Les verdicts automatisés sont ceux des six sondes** : `-coopdebug=creature` (sept critères, une erreur
+| **Retrait d'entité (M6, seconde moitié)** | **ce qui n'existe plus** : un véhicule détruit ou un objet ramassé disparaît chez tous les clients, décidé par le serveur seul. Aucun client ne peut demander un retrait, et celui qui a ramassé l'objet est exclu de son propre retrait | `Coop.Server/ServerNetwork.cs` (`BroadcastDespawn`, balayage de disparition dans `BroadcastNewVehicles`, `RemoveGrantedItem`) · `Coop.Model/Messages.cs` (`EntityDespawn` #20, protocole **v11**) · `Coop.Client/EntityDespawner.cs` (application différée après chargement, `IsGone`) | serveur : `[net] disparition : clé=0x… (véhicule) — annoncée à 2 client(s), motif « … »`, `[net] pickup : clé=0x… 'PowerCell' retirée du monde serveur (…) — ramassée par 'killi'#1.` ; client : `[disparition] véhicule retiré : clé=0x… 'SeaMoth(Clone)'`, `[disparition] objet retiré : clé=0x…`, et si le retrait précède le chargement du monde : `retrait de 0x… mis en attente — le monde n'est pas encore chargé` puis `1 retrait(s) en attente appliqué(s)` ; **verdicts** `[sonde] disparition : verdict=True` chez les **deux** clients (étape O) et `[disparition] objet retiré` chez l'autre joueur à l'étape L. **Limites mesurées** : seuls les véhicules sont *créés* par annonce (un objet fabriqué chez l'hôte n'est pas annoncé) ; un objet que le serveur n'a pas accordé ne disparaît pas ; le détenteur garde son exemplaire, seul son geste le retire de son monde |
+| **Volant d'un véhicule (libération, M4)** | **combien de temps un joueur conduit** : le serveur attribue le volant au premier, le **libère** quand le conducteur descend (#21, **v12**) ou après un silence de `3 s`, et le libère aussi à sa déconnexion | `Coop.Server/ServerNetwork.cs` (`HandleVehicleRelease`, `ReleaseSilentDrivers`, nettoyage dans `OnPeerDisconnected`) · `Coop.Model/Messages.cs` (`VehicleRelease` #21) · `Coop.Client/VehicleDriverBehaviour.cs` | serveur : `[net] conduite : clé=0x… libérée par 'killi'#1 — le volant est libre (libérations=1, total=1)`, `… libérée (silence de 3.0 s)`, puis `… — prise par 'killi'#2` ; client : `[conduite] véhicule quitté — l'envoi s'arrête, libération envoyée=True (clé=0x…)` ; **verdict** `[sonde] conduite : verdict=True` des deux côtés, avec chez le second `refus=2, accords=0` puis `après libération par le conducteur : accords=1 en 9 tentative(s)` (étape M). **Limite** : le silence est le seul filet pour un client qui plante sans libérer — il est mesuré côté serveur, pas côté client |
+
+**Les verdicts automatisés sont ceux des sept sondes** : `-coopdebug=creature` (sept critères, une erreur
 écrite par critère manqué) et `-coopdebug=avatar` (rendu isolé, cinq tenues, deux couleurs, deux corps,
 aller-retour d'équipement) et `-coopdebug=presence` (équipement réellement porté, changement d'équipement vu
 par l'autre joueur, couleur appliquée à un avatar déjà instancié, indice du serveur restauré, `PlayerId`
@@ -40,13 +43,16 @@ inventée refusée, id falsifié attribué à la session, et geste de ramassage 
 `-coopdebug=drive` (prise en main acceptée puis refusée à un second conducteur, décision rendue au
 demandeur) et
 `-coopdebug=spawn` (véhicule fabriqué par la console de l'hôte, créé chez **les deux** clients avec la clé
-annoncée, dont un client arrivé après la fabrication). Depuis le
+annoncée, dont un client arrivé après la fabrication) et `-coopdebug=despawn` (le même véhicule, détruit
+par l'hôte, disparaît chez les deux clients — ou n'y a jamais été créé, et n'y apparaît pas après coup).
+Depuis le
 2026-10-17, `tools/run-session.sh` **fait échouer le run** (code de sortie 1) dès qu'un `verdict=False`
-apparaît dans un journal de client, et `tools/verify.sh` rejoue les **quatorze** runs (A avatar + créatures,
+apparaît dans un journal de client, et `tools/verify.sh` rejoue les **seize** runs (A avatar + créatures,
 B deux clients en sonde de présence, C plafond abaissé, D autotest de la garde cliente, E créatures seules à
 deux clients, F sauvegarde de l'hôte, G Seamoth en mouvement, H serveur dédié, I menu Échap du client,
 J diffusion et interpolation du véhicule, K clé nominale du Seamoth de la sauvegarde, L ramassage
-autoritaire d'un objet réel, M conduite autoritaire, N création d'entité et rejeu à un client tardif) et rend
+autoritaire d'un objet réel et disparition de l'objet chez l'autre, M conduite autoritaire **puis
+libération et reprise**, N création d'entité et rejeu à un client tardif, O disparition d'entité) et rend
 un verdict unique :
 lire un journal n'est plus nécessaire pour savoir qu'un contrôle est tombé. Les autres lignes de la colonne de droite sont des
 **compteurs et des relevés** : elles rendent une violation visible, elles ne la verdictent pas.

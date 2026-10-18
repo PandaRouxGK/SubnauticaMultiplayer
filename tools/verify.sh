@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les quatorze étapes, et ce que chacune prouve :
+# Les quinze étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -57,10 +57,13 @@
 #      l'annonce (clé **et** identifiant), et les **deux** clients le créent avec la **même** clé — dont un
 #      client arrivé après la fabrication, qui ne peut le recevoir que parce que le serveur rejoue l'annonce
 #      (`EntitySpawn`, protocole v10).
+#   O  deux clients, sonde de disparition -> l'hôte fabrique le même Seamoth puis le **détruit** ; le serveur
+#      l'annonce (`EntityDespawn`, protocole v11) et les **deux** clients détruisent leur copie. Le critère
+#      est « l'objet n'est plus dans le monde local », pas « un message est arrivé ».
 #
 # Usage :
-#   tools/verify.sh                    # les quatorze étapes
-#   tools/verify.sh --only=B           # une seule étape (A..N, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les quinze étapes
+#   tools/verify.sh --only=B           # une seule étape (A..O, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -127,9 +130,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKLMN,]*)
+    *[!ABCDEFGHIJKLMNO,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, N, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -498,6 +501,35 @@ assert_n() {
     expect N "$c2" '\[sonde\] apparition : verdict=True' "client 2 : la clé locale correspond à la clé annoncée"
 }
 
+assert_o() {
+    local server="$WORK_DIR/O/coop-server.log"
+    local c1="$WORK_DIR/O/coop-client.log"
+    local c2="$WORK_DIR/O/coop-client-2.log"
+
+    # La création d'abord : un retrait sans objet créé ne prouverait rien (le client n'aurait rien à retirer).
+    expect O "$server" 'commande console « spawn Seamoth »' "l'hôte fabrique un véhicule absent de la sauvegarde"
+    expect O "$server" 'apparition : clé=0x[0-9a-f]+ .* — diffusée à [1-9][0-9]* client' \
+        "le serveur annonce la création avant de la détruire"
+
+    # Puis la destruction, nommée **par la sonde** (c'est elle qui détruit) et **par le serveur** (qui l'annonce).
+    expect O "$server" "\\[sonde\\] disparition : véhicule '.*' \\(clé=0x[0-9a-f]+\\) détruit après [0-9]+s" \
+        "la sonde détruit le véhicule qu'elle a créé, et dit sa clé"
+    expect O "$server" 'disparition : clé=0x[0-9a-f]+ \(véhicule\) — annoncée à [1-9][0-9]* client\(s\)' \
+        "le serveur annonce le retrait avec la même clé"
+
+    # Et l'effet chez les clients : le message arrive, puis l'objet n'est **plus** là.
+    expect O "$c1" '\[net\] disparition reçue : clé=0x[0-9a-f]+ \(véhicule\)' "client 1 : l'annonce de retrait arrive"
+    expect O "$c1" '\[disparition\] véhicule retiré : clé=0x[0-9a-f]+' "client 1 : la copie locale est détruite"
+    expect O "$c1" '\[sonde\] disparition : verdict=True' "client 1 : la sonde vérifie que l'objet a disparu"
+
+    # Client 2 : soit il avait l'objet et le détruit, soit il ne l'a jamais eu et ne le recrée pas — les
+    # deux issues sont écrites par la sonde, et le fantôme est un échec dans les deux cas.
+    expect O "$c2" '\[net\] disparition reçue : clé=0x[0-9a-f]+ \(véhicule\)' "client 2 : l'annonce de retrait arrive"
+    expect O "$c2" '\[sonde\] disparition : verdict=True' "client 2 : la sonde vérifie que l'objet a disparu"
+    expect O "$c2" "cette instance (avait l'objet et l'a détruit|ne l'a jamais eu, et ne l'a pas recréé)" \
+        "client 2 : l'issue est nommée (retiré, ou jamais eu sans fantôme)"
+}
+
 assert_m() {
     local server="$WORK_DIR/M/coop-server.log"
     local c1="$WORK_DIR/M/coop-client.log"
@@ -514,9 +546,22 @@ assert_m() {
     expect M "$c1" '\[sonde\] conduite : verdict=True' "client 1 : la sonde conclut True"
     expect M "$c1" 'états envoyés=[1-9][0-9]*' "client 1 : l'état du véhicule est réellement parti"
 
+    # v12 : le premier client **descend** et libère le volant, et le second le reprend. Sans cette moitié,
+    # un refus ne distinguerait pas « un seul conducteur à la fois » de « pris pour toujours ».
+    expect M "$server" "conduite : clé=0x[0-9a-f]+ libérée par 'killi'#1" \
+        "le serveur libère le volant quand le conducteur le quitte"
+    expect M "$server" "conduite : clé=0x[0-9a-f]+ — prise par 'killi'#2" \
+        "et le second client peut alors le prendre : le volant n'était pas perdu"
+
+    expect M "$c1" 'libération envoyée=True' "client 1 : la descente du véhicule envoie la libération"
+
     expect M "$c2" '\[conduite\] résultat : .* accordée=False' \
-        "client 2 : le serveur lui refuse la conduite"
-    expect M "$c2" '\[sonde\] conduite : verdict=True' "client 2 : la sonde conclut True"
+        "client 2 : le serveur lui refuse la conduite tant qu'elle est prise"
+    expect M "$c2" 'refus=[1-9][0-9]*, accords=0' \
+        "client 2 : la première tentative n'obtient que des refus"
+    expect M "$c2" 'après libération par le conducteur : accords=[1-9][0-9]*' \
+        "client 2 : il obtient le volant après la libération"
+    expect M "$c2" '\[conduite\] verdict=True|\[sonde\] conduite : verdict=True' "client 2 : la sonde conclut True"
 }
 
 assert_l() {
@@ -541,14 +586,29 @@ assert_l() {
         "client 1 : le geste de ramassage a bien pris l'objet accordé"
     expect L "$c1" '\[sonde\] ramassage : verdict=True' "client 1 : la sonde conclut True"
 
+    # — La **conséquence** du geste (v11) : un accord ne laisse plus l'objet dans le monde.
+    #
+    # Le serveur le retire de son monde simulé et l'annonce, et c'est l'autre client qui doit le voir
+    # disparaître : celui qui a ramassé l'a déjà dans son inventaire, donc il n'a rien à retirer.
+    expect L "$server" "pickup : clé=0x[0-9a-f]+ '.*' retirée du monde serveur" \
+        "le serveur retire du monde l'objet qu'il vient d'accorder"
+    expect L "$server" 'disparition : clé=0x[0-9a-f]+ \(objet\) — annoncée à [1-9][0-9]* client\(s\)' \
+        "le retrait de l'objet est annoncé aux clients"
+    expect L "$c2" '\[disparition\] objet retiré : clé=0x[0-9a-f]+' \
+        "client 2 : l'objet accordé à l'autre disparaît de son monde"
+
     expect L "$c2" '\[pickup\] résultat : .* accordée=False tenue par 1' \
         "client 2 : la même clé lui est refusée"
     expect L "$c2" 'clé inventée 0x[0-9a-f]+ reçue=True accordée=False' \
         "client 2 : la clé inventée est refusée par le serveur"
     expect L "$c2" 'id falsifié 0x[0-9a-f]+ reçue=True accordée=True tenue par 2 revendiquée sous l.id 1' \
         "client 2 : l'id falsifié est réécrit, un objet réel lui revient"
-    expect L "$c2" 'garde=blocage \(blocages [0-9]+->[1-9][0-9]*' \
-        "client 2 : la garde a réellement bloqué le geste de ramassage"
+    # Deux mécanismes empêchent le refusé de ramasser, et depuis la v11 le second arrive souvent en
+    # premier : l'objet accordé à l'autre est **retiré du monde** avant son clic. Les deux sont nommés par
+    # la sonde ; ce qui compte est que l'objet ne rentre pas (assertion suivante), et que la ligne dise
+    # **lequel** des deux a joué.
+    expect L "$c2" 'objet retiré par disparition=True|garde=blocage \(blocages [0-9]+->[1-9][0-9]*' \
+        "client 2 : le geste est bloqué par la garde, ou l'objet a déjà été retiré par la disparition"
     expect L "$c2" 'objet dans l.inventaire=False' \
         "client 2 : l'objet refusé n'est pas entré dans son inventaire"
     expect L "$c2" '\[sonde\] ramassage : verdict=True' "client 2 : la sonde conclut True"
@@ -613,9 +673,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O}"
 fi
 
 if wanted A "$ONLY"; then
@@ -821,6 +881,20 @@ if wanted N "$ONLY"; then
         args+=(--no-build)
     fi
     step N "création d'entité : un véhicule fabriqué chez l'hôte existe et se suit chez les clients" assert_n "${args[@]}"
+fi
+
+if wanted O "$ONLY"; then
+    # M6 / v11 : l'hôte **fabrique** puis **détruit** un véhicule ; les deux clients doivent le créer, puis
+    # le voir disparaître. Deux défauts seraient visibles ici : un retrait qui n'arrive pas (l'objet reste),
+    # et un retrait reçu mais pas appliqué (l'objet reste quand même).
+    args=(--clients=2 --together --timeout=360
+        "--host-args=-coopmode=server -coopdebug=despawn"
+        "--client-args=-coopmode=client -coopdebug=despawn"
+        "--client-marker=\\[sonde\\] disparition : verdict=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step O "disparition d'entité : le véhicule fabriqué puis détruit chez l'hôte disparaît chez les clients" assert_o "${args[@]}"
 fi
 
 if wanted M "$ONLY"; then

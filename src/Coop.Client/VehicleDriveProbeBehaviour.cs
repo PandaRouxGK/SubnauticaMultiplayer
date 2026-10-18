@@ -31,6 +31,18 @@ namespace Coop.Client
         private const float DriveSpeed = 12f;
         private const float HijackStartSeconds = 12f;
         private const float HijackSeconds = 2f;
+        private const float RetryTimeoutSeconds = 90f;
+
+        /// <summary>
+        /// Durée pendant laquelle le premier client **garde** le volant après son aller-retour.
+        ///
+        /// Pourquoi ce n'est pas du remplissage : depuis la v12, le conducteur libère le véhicule dès qu'il
+        /// le quitte. Sans attente, il libérait avant que le second n'ait tenté sa prise en main — mesuré :
+        /// `refus=0, accords=1` chez le second, qui n'a jamais vu de refus et ne mesurait donc plus
+        /// l'exclusivité. Soixante secondes couvrent le lancement du second client, son chargement de monde
+        /// et sa tentative (mesuré : ≈ 40 s après le début du premier dans le pire cas observé).
+        /// </summary>
+        private const float HoldAfterDriveSeconds = 60f;
 
         private IEnumerator Start()
         {
@@ -122,6 +134,14 @@ namespace Coop.Client
 
             vehicle.transform.position = origin;
 
+            // Garder le volant : c'est ce qui fait que le second client essuie un **refus** au lieu de
+            // trouver le véhicule libre.
+            var holdUntil = Time.realtimeSinceStartup + HoldAfterDriveSeconds;
+            while (Time.realtimeSinceStartup < holdUntil)
+            {
+                yield return null;
+            }
+
             VehicleDriverBehaviour.ProbeTarget = null;
             yield return new WaitForSeconds(1.5f);
 
@@ -135,10 +155,10 @@ namespace Coop.Client
             Log.LogInfo(
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    "[sonde] conduite : verdict={0} — id={1}, conducteur : états envoyés={2} en {3:F0}s, " +
-                    "accords={4}, refus={5}, déplacement local={6:F1} m (les accords prouvent que le serveur " +
-                    "a accepté la prise en main ; aucun refus n'est attendu pour le conducteur) ; " +
-                    "compteurs réseau : conduites envoyées={7}, accords={8}, refus={9}",
+                    "[sonde] conduite : verdict={0} — id={1}, conducteur : états envoyés={2} en {3:F0}s " +
+                    "(+{10:F0}s de volant gardé, puis libéré), accords={4}, refus={5}, déplacement local={6:F1} m " +
+                    "(les accords prouvent que le serveur a accepté la prise en main ; aucun refus n'est attendu " +
+                    "pour le conducteur) ; compteurs réseau : conduites envoyées={7}, accords={8}, refus={9}",
                     verdict,
                     network.AssignedPlayerId,
                     sent,
@@ -148,7 +168,8 @@ namespace Coop.Client
                     moved,
                     network.VehicleControlSent,
                     network.VehicleControlGranted,
-                    network.VehicleControlRefused));
+                    network.VehicleControlRefused,
+                    HoldAfterDriveSeconds));
 
             if (!verdict)
             {
@@ -185,29 +206,59 @@ namespace Coop.Client
 
             yield return new WaitForSeconds(1.5f);
 
-            var granted = VehicleDriverBehaviour.GrantedCount - grantedBefore;
             var refused = VehicleDriverBehaviour.RefusedCount - refusedBefore;
-            var verdict = refused > 0 && granted == 0;
+            var grantedOnFirstTry = VehicleDriverBehaviour.GrantedCount - grantedBefore;
+
+            // — Puis on attend que le **premier** client libère le volant (v12) et on le reprend.
+            //
+            // Sans cette reprise, le refus seul ne distinguerait pas « un seul conducteur à la fois » de
+            // « le véhicule est pris pour toujours » : les deux produisent exactement le même refus. C'est
+            // la seconde moitié de M4, et elle a besoin d'un conducteur qui **descend** de son véhicule.
+            var retryStart = Time.realtimeSinceStartup;
+            var grantedAfterRelease = 0;
+            var attempts = 0;
+
+            while (Time.realtimeSinceStartup - retryStart < RetryTimeoutSeconds)
+            {
+                attempts++;
+                VehicleDriverBehaviour.ProbeTarget = vehicle;
+                yield return new WaitForSeconds(HijackSeconds);
+                VehicleDriverBehaviour.ProbeTarget = null;
+                yield return new WaitForSeconds(1f);
+
+                grantedAfterRelease = VehicleDriverBehaviour.GrantedCount - grantedBefore;
+                if (grantedAfterRelease > 0)
+                {
+                    break;
+                }
+            }
+
+            var verdict = refused > 0 && grantedAfterRelease > 0 && grantedOnFirstTry == 0;
 
             Log.LogInfo(
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    "[sonde] conduite : verdict={0} — id={1}, tentative de conduite sur un véhicule déjà pris : " +
-                    "refus={2}, accords={3} (attendu : refus ≥ 1, accords = 0) ; compteurs réseau : " +
-                    "conduites envoyées={4}, accords={5}, refus={6}",
+                    "[sonde] conduite : verdict={0} — id={1}, tentative sur un véhicule déjà pris : " +
+                    "refus={2}, accords={3} (attendu : refus ≥ 1, accords = 0) ; après libération par le " +
+                    "conducteur : accords={4} en {5} tentative(s) (attendu : ≥ 1) ; compteurs réseau : " +
+                    "conduites envoyées={6}, accords={7}, refus={8}, libérations envoyées={9}",
                     verdict,
                     network.AssignedPlayerId,
                     refused,
-                    granted,
+                    grantedOnFirstTry,
+                    grantedAfterRelease,
+                    attempts,
                     network.VehicleControlSent,
                     network.VehicleControlGranted,
-                    network.VehicleControlRefused));
+                    network.VehicleControlRefused,
+                    network.VehicleReleasesSent));
 
             if (!verdict)
             {
                 Log.LogError(
-                    "[sonde] conduite : le second client a pu prendre un véhicule déjà conduit, ou n'a reçu " +
-                    "aucun refus — deux joueurs pourraient piloter le même Seamoth.");
+                    "[sonde] conduite : soit le second client a pu prendre un véhicule déjà conduit, soit il " +
+                    "n'a jamais pu le reprendre après la libération — le volant reste attribué à quelqu'un " +
+                    "qui n'est plus dedans.");
             }
         }
 

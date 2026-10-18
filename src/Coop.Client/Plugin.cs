@@ -76,6 +76,10 @@ namespace Coop.Client
             // ne crée pas une entité annoncée la voit dans le flux de positions sans objet à déplacer.
             go.AddComponent<EntitySpawner>();
 
+            // Retrait d'entité (v11) : composant et non classe statique, parce qu'un retrait reçu avant le
+            // chargement du monde doit être **gardé** puis appliqué — sans quoi la sauvegarde le fait revenir.
+            go.AddComponent<EntityDespawner>();
+
             if (saveGuardInstalled)
             {
                 // Même composant que côté serveur (src/Shared) : le client entre dans le monde.
@@ -136,6 +140,13 @@ namespace Coop.Client
                 // M6 / v10 : attend qu'une entité annoncée par l'hôte soit créée localement, clé comprise.
                 Log.LogWarning("[boot] sonde d'apparition activée (-coopdebug=spawn).");
                 go.AddComponent<EntitySpawnProbeBehaviour>();
+            }
+
+            if (IsDebugFlagSet("despawn"))
+            {
+                // M6 / v11 : attend qu'un véhicule annoncé par l'hôte soit **retiré** localement.
+                Log.LogWarning("[boot] sonde de disparition activée (-coopdebug=despawn).");
+                go.AddComponent<EntityDespawnProbeBehaviour>();
             }
 
             if (IsDebugFlagSet("drive"))
@@ -293,6 +304,32 @@ namespace Coop.Client
 
             _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.Unreliable);
             _vehicleControlSent++;
+            return true;
+        }
+
+        private int _vehicleReleasesSent;
+
+        internal int VehicleReleasesSent => _vehicleReleasesSent;
+
+        /// <summary>
+        /// Libère le volant (v12) : « je ne conduis plus ce véhicule ». ReliableOrdered, parce qu'un
+        /// message perdu laisserait le véhicule attribué à un joueur qui n'est plus dedans.
+        /// </summary>
+        internal bool SendVehicleRelease(long vehicleKey)
+        {
+            if (vehicleKey == 0L || _server == null || _server.ConnectionState != ConnectionState.Connected)
+            {
+                return false;
+            }
+
+            _writer.Reset();
+            new VehicleReleaseMessage
+            {
+                VehicleKey = vehicleKey,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+            _vehicleReleasesSent++;
             return true;
         }
 
@@ -1036,6 +1073,16 @@ namespace Coop.Client
                         $"[net] apparition reçue : clé=0x{spawn.Key:x16} '{spawn.TechTypeName}' " +
                         $"identité '{spawn.UniqueId}'");
                     EntitySpawner.Enqueue(spawn);
+                    break;
+                }
+
+                case MessageType.EntityDespawn:
+                {
+                    var despawn = EntityDespawnMessage.Read(reader);
+                    var kind = despawn.Kind == EntityKind.Vehicle ? "véhicule" : "objet";
+                    CoopClientPlugin.Log.LogInfo(
+                        $"[net] disparition reçue : clé=0x{despawn.Key:x16} ({kind}) — motif « {despawn.Reason} »");
+                    EntityDespawner.Handle(despawn);
                     break;
                 }
 

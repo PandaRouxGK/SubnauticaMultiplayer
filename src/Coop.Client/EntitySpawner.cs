@@ -88,6 +88,18 @@ namespace Coop.Client
 
         private IEnumerator Spawn(EntitySpawnMessage msg)
         {
+            // Course réelle : le serveur peut détruire l'entité avant que ce client n'ait chargé son monde.
+            // L'annonce de disparition est alors arrivée la première ; recréer l'objet ici en ferait un
+            // fantôme que plus rien ne retirerait.
+            if (EntityDespawner.IsGone(msg.Key))
+            {
+                _skipped++;
+                Log.LogInfo(
+                    $"[spawn] entité 0x{msg.Key:x16} annoncée disparue avant sa création — aucune création " +
+                    "(l'annonce de retrait l'a emporté).");
+                yield break;
+            }
+
             var duplicate = FindLocalVehicle(msg.Key);
             if (duplicate != null)
             {

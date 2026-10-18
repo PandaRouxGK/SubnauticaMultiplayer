@@ -8,6 +8,14 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **12** : ajout de la **libération du volant** (`VehicleRelease`, M4) : le conducteur rend le
+        /// véhicule quand il le quitte, et le serveur le libère aussi après un silence de
+        /// `VehicleSilenceReleaseSeconds`. Sans ce message, un véhicule restait attribué à son dernier
+        /// conducteur jusqu'à sa déconnexion — il fallait relancer le serveur pour le reprendre.
+        /// **11** : ajout du **retrait d'entité** (`EntityDespawn`, M6) : ce que le serveur fait disparaître
+        /// — un véhicule détruit, un objet ramassé — est annoncé aux clients. Sans ce message, une entité
+        /// créée par la v10 restait chez tout le monde après sa destruction chez l'hôte, et un objet
+        /// ramassé restait visible (et réclamable) pour les autres joueurs.
         /// **10** : ajout de la **création d'entité** (`EntitySpawn`, M6) : le serveur annonce le véhicule
         /// qu'il vient de fabriquer, et le client l'instancie au même endroit avec la **même** identité.
         /// Sans ce message, un `spawn` côté serveur n'existe pas chez les clients — ils le voient dans le
@@ -22,13 +30,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 10;
+        public const int Version = 12;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v10";
+        public const string ConnectionKey = "coop-subnautica-v12";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -64,8 +72,20 @@ namespace Coop.Model
         /// </summary>
         public const int VehicleControlIntervalMs = 100;
 
+        /// <summary>
+        /// Silence au bout duquel le serveur **libère** le volant d'un conducteur (v12).
+        ///
+        /// Dimensionné sur la cadence d'envoi : le client envoie un état toutes les 100 ms tant qu'il est au
+        /// volant, donc 3 s représentent 30 états perdus — bien au-delà d'une rafale de latence, et bien en
+        /// dessous du délai qu'un joueur attendrait pour reprendre un véhicule laissé.
+        /// </summary>
+        public const float VehicleSilenceReleaseSeconds = 3f;
+
         /// <summary>Longueur maximale d'un identifiant d'entité transporté dans un <see cref="EntitySpawnMessage"/>.</summary>
         public const int MaxEntityIdLength = 64;
+
+        /// <summary>Longueur maximale du motif d'un <see cref="EntityDespawnMessage"/> (journal, pas décision).</summary>
+        public const int MaxDespawnReasonLength = 96;
 
         /// <summary>Intervalle de vérification des changements d'équipement local côté client, en millisecondes.</summary>
         public const int EquipmentCheckIntervalMs = 250;
@@ -285,6 +305,12 @@ namespace Coop.Model
 
         /// <summary>Annonce d'une entité fabriquée par le serveur (ReliableOrdered, v10, M6).</summary>
         EntitySpawn = 19,
+
+        /// <summary>Annonce de la disparition d'une entité (ReliableOrdered, v11, M6).</summary>
+        EntityDespawn = 20,
+
+        /// <summary>Libération du volant par son conducteur (ReliableOrdered, v12, M4).</summary>
+        VehicleRelease = 21,
     }
 
     /// <summary>

@@ -188,6 +188,12 @@ namespace Coop.Client
             var blockedNow = PickupGuard.BlockedCount;
             var grantedNow = PickupGuard.GrantedCount;
 
+            // Depuis la v11, un objet accordé à quelqu'un d'autre est **retiré du monde** et annoncé : chez
+            // le refusé, il peut donc disparaître avant son propre clic. Ce n'est pas la garde qui a parlé,
+            // c'est l'objet qui n'est plus là — deux issues distinctes, et la sonde les nomme plutôt que
+            // de faire passer l'une pour l'autre.
+            var objectGone = target == null;
+
             while (Time.realtimeSinceStartup - start < VerdictSeconds)
             {
                 yield return null;
@@ -213,7 +219,7 @@ namespace Coop.Client
 
             var guardDecided = isFirst
                 ? grantedNow > grantedBefore
-                : blockedNow > blockedBefore;
+                : blockedNow > blockedBefore || objectGone;
 
             var pickupOutcomeGood = isFirst ? inInventory : !inInventory;
 
@@ -227,7 +233,7 @@ namespace Coop.Client
                     "(attendu : refusée) ; id falsifié 0x{10:x16} reçue={11} accordée={12} tenue par {13} " +
                     "revendiquée sous l'id {14} (attendu : accordée, tenue par {1}) ; geste de ramassage : " +
                     "main libre={15}, garde={16} (blocages {17}->{18}, accords {19}->{20}), objet dans " +
-                    "l'inventaire={21} (attendu : {22}) ; garde : {23}",
+                    "l'inventaire={21} (attendu : {22}), objet retiré par disparition={24} ; garde : {23}",
                     verdict,
                     me,
                     targetKey,
@@ -251,7 +257,8 @@ namespace Coop.Client
                     grantedNow,
                     inInventory,
                     isFirst ? "oui" : "non",
-                    PickupGuard.Summary()));
+                    PickupGuard.Summary(),
+                    objectGone));
 
             if (!sharedGood)
             {

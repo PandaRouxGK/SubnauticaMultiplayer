@@ -12,8 +12,8 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `10` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v10` | `Protocol.ConnectionKey` |
+| Version du protocole | `12` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v12` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
 | Encodage | little-endian, tampons réutilisables, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
@@ -56,6 +56,8 @@ et encodé en UTF-8.
 | 17 | `VehicleControl` | client → serveur | Unreliable (10 Hz) | `PlayerId` ushort (revendiqué, falsifiable), `VehicleKey` long, `Sequence` int, position et rotation (7 floats), vitesse (3 floats) |
 | 18 | `VehicleControlResult` | serveur → demandeur | ReliableOrdered | `VehicleKey` long, `Granted` bool, `DriverId` ushort |
 | 19 | `EntitySpawn` | serveur → client | ReliableOrdered | `Key` long, `UniqueId` string, `TechTypeName` string, position (3 floats), quaternion (4 floats) |
+| 20 | `EntityDespawn` | serveur → client | ReliableOrdered | `Key` long, `Kind` octet (`1` véhicule, `2` objet), `Reason` string |
+| 21 | `VehicleRelease` | client → serveur | ReliableOrdered | `VehicleKey` long |
 
 Cinq points de contrat que ces messages portent :
 
@@ -74,6 +76,15 @@ Cinq points de contrat que ces messages portent :
   **écrit cet identifiant** sur son exemplaire : sans lui, deux instances d'un même `spawn` calculeraient
   deux clés différentes (mesuré en J) et le flux #14 n'aurait aucun objet à déplacer. Une entité sans
   identifiant n'est **pas** annoncée — c'est journalisé — plutôt que de laisser le client inventer une clé.
+- **Le retrait d'une entité est décidé par le serveur seul (#20, v11).** Le client ne demande jamais
+  qu'une entité disparaisse : le serveur annonce ce qu'il constate (véhicule détruit) ou ce qu'il vient de
+  faire (objet ramassé). `Kind` évite deux index côté client — une clé de véhicule et une clé d'objet sont
+  deux hachages de formes différentes. Le détenteur d'un objet ramassé est **exclu** de la diffusion de
+  son propre retrait : son exemplaire est déjà dans son inventaire.
+- **La libération du volant voyage (#21, v12).** Le conducteur dit « je ne conduis plus », le serveur libère
+  aussitôt ; un silence de `VehicleSilenceReleaseSeconds` (3 s) fait de même, au cas où le client aurait
+  planté. Sans ces deux chemins, un véhicule restait attribué à son dernier conducteur jusqu'à sa
+  déconnexion.
 - **Les flux #9, #13 et #14 sont filtrés par destinataire.** #13 n'est pas « toutes les créatures du
   monde » mais « celles qui comptent pour toi », dans le rayon ci-dessous (`ServerNetwork`,
   `BroadcastCreatureSnapshots`) ; #14 suit la même règle pour les véhicules, dans un rayon plus large
@@ -158,6 +169,8 @@ distingue en décalant la teinte de sa texture dans la bande 5°–45° (`HsvSwa
 | `HandshakeTimeoutSeconds` | `10` | au-delà, un pair qui n'a pas fini son handshake est éjecté |
 | `ServerHostPlayerId` | `0` | identifiant réservé au personnage de l'instance serveur |
 | `MaxEntityIdLength` | `64` | longueur maximale d'un `UniqueId` dans `EntitySpawn` (#19) : un identifiant du jeu fait 36 caractères, `64` laisse de la marge sans permettre un paquet démesuré (écriture et lecture refusent au-delà) |
+| `MaxDespawnReasonLength` | `96` | motif lisible d'un `EntityDespawn` (#20) : il ne sert qu'au journal, mais une chaîne non bornée est un paquet non borné (refusé à l'écriture comme à la lecture) |
+| `VehicleSilenceReleaseSeconds` | `3.0` | silence au bout duquel le serveur libère un volant (v12) : le conducteur envoie à 10 Hz, donc 30 états manqués — bien au-delà d'une rafale de latence, bien en dessous de l'attente d'un joueur qui veut reprendre le véhicule |
 | Identifiant de l'hôte vu par un client | `9999` | `ServerNetwork.BroadcastSnapshots` : l'hôte est inclus comme joueur virtuel pour qu'un client seul voie aussi son personnage |
 
 ---
@@ -228,9 +241,33 @@ une annonce (#19) et trois décisions qui méritent d'être dites :
    Mesuré à l'étape N : sans cette attente, le Seamoth était fabriqué dans la scène du menu, que le
    chargement décharge ensuite — l'objet créé n'était plus retrouvé trois secondes plus tard.
 
-Ce que l'annonce ne fait pas : **aucun retrait**. Détruire un véhicule côté serveur ne dit rien aux clients
-(`EntityDespawn` n'existe pas), le carnet des entités fabriquées est borné à `256` (`MaxRememberedSpawns`),
-et une entité oubliée n'est plus rejouée aux clients suivants (c'est journalisé).
+Ce que l'annonce ne fait pas, elle seule : **retirer**. Le retrait est un message distinct (#20, section
+4 quater), et le carnet des entités fabriquées est borné à `256` (`MaxRememberedSpawns`) — une entité
+oubliée n'est plus rejouée aux clients suivants (c'est journalisé).
+
+---
+
+## 4 quater. Retrait d'entité : trois décisions, chacune née d'une mesure
+
+La v11 ajoute `EntityDespawn` (#20). Ce n'est pas la symétrie décorative de la création : sans lui, une
+entité créée restait chez tout le monde après sa destruction chez l'hôte, et un objet ramassé restait
+**visible et réclamable** par les autres — le serveur accordait alors une clé qui ne désignait plus rien.
+
+1. **Le serveur décide, le client constate.** Aucun retrait n'est demandé par un client. Deux sources : le
+   balayage des véhicules (une clé connue qui n'est plus dans le monde) et un ramassage accordé (l'objet
+   est retiré du monde simulé avant d'être annoncé).
+2. **Le détenteur est exclu de son propre retrait.** Sinon, un ramassage accordé détruisait l'objet chez
+   celui qui venait de le prendre, **avant** que son geste ne le range dans l'inventaire — mesuré à l'étape
+   L : `accordée=True` côté serveur, `objet dans l'inventaire=False` côté client.
+3. **Un retrait reçu avant le chargement du monde est mis en file.** Le client se connecte au menu : sans
+   cette file, l'objet revenait avec la sauvegarde (mesuré : retrait reçu 10 s avant le chargement, puis
+   `PowerCell` présent dans le monde). Même raison pour `EntitySpawner` : une apparition arrivée **après**
+   un retrait ne recrée rien (`EntityDespawner.IsGone`), sinon un fantôme survivrait à la destruction.
+
+Ce que ça ne fait pas : **aucun retrait d'objet par un client** (seul le serveur le décide), et un objet
+que le serveur n'a pas accordé ne disparaît pas. Les véhicules détruits **hors** d'un balayage réussi
+(clé passagèrement nulle) ne produisent pas de faux retrait : une clé absente du monde est annoncée une
+seule fois, puis oubliée.
 
 ---
 
@@ -270,8 +307,11 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   décision au demandeur). Ne sont **pas** transportés : l'énergie, les modules, les dégâts — un client qui
   conduit et un serveur qui ne simule pas le véhicule ne peuvent pas décider d'une panne. Il n'y a **pas
   de libération** du véhicule : le conducteur garde la main jusqu'à sa déconnexion (`PLAN.md` §40). La  synchronisation suppose aussi un véhicule **présent dans la sauvegarde des deux côtés** : la création
-d'entité est arrivée avec la v10 (#19, section 4 ter), mais **aucun retrait** ne l'accompagne — un véhicule
-détruit côté serveur continue d'exister chez les clients.
+d'entité (v10, #19) et son retrait (v11, #20) existent désormais, mais **seulement du serveur vers les
+clients** — un véhicule fabriqué **chez un client** n'existe pas dans le monde du serveur.
+- **Le volant se libère (v12, #21)** : le conducteur qui descend le rend immédiatement, et un silence de
+  `VehicleSilenceReleaseSeconds` (3 s) le libère aussi. Le véhicule n'est donc plus perdu jusqu'à la
+  déconnexion de son dernier conducteur.
 - **Le ramassage est autoritaire, mais son effet sur le monde ne l'est pas** : depuis la v8 et la fin de
   M5, le serveur accorde ou refuse une clé **d'un objet réel** (il la résout dans son propre monde, et
   refuse ce qu'il ne trouve pas ou qui est à plus de `6 m` du joueur), et le client **bloque** le geste de
@@ -281,5 +321,5 @@ détruit côté serveur continue d'exister chez les clients.
   à tort, et les objets **sans clé** ne sont pas arbitrés. Les collisions de clé sont comptées, pas
   résolues. Aucun autre arbitrage de ressource (récolte, craft, dégâts) n'existe.
 - **Aucun transport de contenu** : pas d'AssetBundle, pas de définition d'objet envoyée au client (M6).
-- **Version 10** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
+- **Version 12** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
   tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

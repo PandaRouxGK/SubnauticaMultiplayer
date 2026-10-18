@@ -63,8 +63,15 @@ namespace Coop.Client
             {
                 if (_lastKey != 0L)
                 {
+                    var released = _lastKey;
                     _lastKey = 0L;
-                    Log.LogInfo("[conduite] véhicule quitté — l'envoi s'arrête.");
+
+                    // v12 : le volant revient **tout de suite**. Sans ce message, le véhicule restait
+                    // attribué à ce joueur jusqu'à sa déconnexion, et aucun autre ne pouvait le reprendre.
+                    var sent = network.SendVehicleRelease(released);
+                    Log.LogInfo(
+                        $"[conduite] véhicule quitté — l'envoi s'arrête, libération envoyée={sent} " +
+                        $"(clé=0x{released:x16}).");
                 }
 
                 return;
@@ -86,6 +93,13 @@ namespace Coop.Client
 
             if (key != _lastKey)
             {
+                // Changement direct d'un véhicule à un autre : l'ancien serait resté attribué.
+                if (_lastKey != 0L)
+                {
+                    network.SendVehicleRelease(_lastKey);
+                    Log.LogInfo($"[conduite] véhicule précédent libéré avant la prise en main : clé=0x{_lastKey:x16}.");
+                }
+
                 _lastKey = key;
                 Log.LogInfo($"[conduite] prise en main : clé=0x{key:x16} ({mechanism}) — envoi à 10 Hz.");
             }

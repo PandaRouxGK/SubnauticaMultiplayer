@@ -184,6 +184,9 @@ namespace Coop.Server
         /// </summary>
         private readonly Dictionary<long, ushort> _pickupClaims = new Dictionary<long, ushort>();
 
+        /// <summary>Clés d'objets **déjà retirées** du monde simulé après un ramassage accordé (v11).</summary>
+        private readonly HashSet<long> _pickupRemoved = new HashSet<long>();
+
         public int PickupClaimsGranted { get; private set; }
 
         public int PickupClaimsRefused { get; private set; }
@@ -202,8 +205,16 @@ namespace Coop.Server
 
         // — Conduite autoritaire (v9, M4) ——————————————————————————————————————
 
-        /// <summary>Véhicule → joueur qui le conduit. Le premier qui prend la main la garde jusqu'à sa déconnexion.</summary>
+        /// <summary>Véhicule → joueur qui le conduit. Le premier qui prend la main la garde jusqu'à libération.</summary>
         private readonly Dictionary<long, ushort> _vehicleDrivers = new Dictionary<long, ushort>();
+
+        /// <summary>Dernier état reçu par véhicule conduit : sert à libérer un volant devenu silencieux (v12).</summary>
+        private readonly Dictionary<long, float> _vehicleDriverLastState = new Dictionary<long, float>();
+
+        /// <summary>Volants libérés par leur conducteur / par silence — comptés, pour le dire au journal.</summary>
+        public int VehicleReleases { get; private set; }
+
+        public int VehicleSilenceReleases { get; private set; }
 
         /// <summary>Index clé → véhicule du monde serveur, reconstruit au plus une fois par seconde.</summary>
         private Dictionary<long, Vehicle> _vehicleIndex;
@@ -339,8 +350,11 @@ namespace Coop.Server
 
         private int _entitySpawnsSent;
         private int _entitySpawnsReplayed;
+        private int _entityDespawnsSent;
 
         public int EntitySpawnsSent => _entitySpawnsSent;
+
+        public int EntityDespawnsSent => _entityDespawnsSent;
 
         /// <summary>Intervalle (s) du rapport de flux de véhicules, par client.</summary>
         private const float VehicleStreamReportSeconds = 5f;
@@ -534,6 +548,37 @@ namespace Coop.Server
                 }
 
                 _log.LogInfo($"[net] PlayerLeft diffusé pour '{session.Username}' (id={session.PlayerId})");
+
+                // Ses volants aussi : un client parti ne les rendra jamais lui-même (v12).
+                List<long> owned = null;
+                foreach (var pair in _vehicleDrivers)
+                {
+                    if (pair.Value != session.PlayerId)
+                    {
+                        continue;
+                    }
+
+                    if (owned == null)
+                    {
+                        owned = new List<long>();
+                    }
+
+                    owned.Add(pair.Key);
+                }
+
+                if (owned != null)
+                {
+                    foreach (var key in owned)
+                    {
+                        _vehicleDrivers.Remove(key);
+                        _vehicleDriverLastState.Remove(key);
+                        VehicleReleases++;
+                    }
+
+                    _log.LogInfo(
+                        $"[net] conduite : {owned.Count} volant(s) libéré(s) par la déconnexion de " +
+                        $"'{session.Username}'#{session.PlayerId}.");
+                }
             }
         }
 
@@ -605,6 +650,10 @@ namespace Coop.Server
 
                 case MessageType.VehicleControl:
                     HandleVehicleControl(peer, session, VehicleControlMessage.Read(reader));
+                    break;
+
+                case MessageType.VehicleRelease:
+                    HandleVehicleRelease(session, VehicleReleaseMessage.Read(reader));
                     break;
 
                 default:
@@ -1050,6 +1099,32 @@ namespace Coop.Server
             // accordée, et un joueur pouvait réclamer un objet à l'autre bout de la carte. La portée se
             // mesure avec la **dernière position reçue** de la session (20 Hz), sans nouveau champ dans
             // le message : le format de la v8 suffit.
+            // — Une clé **déjà attribuée** est refusée immédiatement, avant toute résolution du monde.
+            //
+            // L'ordre compte depuis la v11 : un objet accordé est retiré du monde simulé, donc la résolution
+            // échouerait et le motif deviendrait « objet inconnu » — vrai, mais muet sur le fait qu'un
+            // joueur le détient. La carte des réclamations est le registre durable ; elle passe en premier.
+            if (msg.ItemKey != 0L &&
+                _pickupClaims.TryGetValue(msg.ItemKey, out var alreadyHeld) &&
+                alreadyHeld != session.PlayerId)
+            {
+                PickupClaimsRefused++;
+                _log.LogInfo(
+                    $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
+                    $"'{session.Username}'#{session.PlayerId} -> REFUSÉE (déjà tenue par {DescribeHolder(alreadyHeld)})");
+
+                Send(peer, new PickupResultMessage
+                {
+                    ItemKey = msg.ItemKey,
+                    TechTypeName = tech,
+                    Granted = false,
+                    HolderId = alreadyHeld,
+                    ClaimedBy = msg.PlayerId,
+                }.Write, DeliveryMethod.ReliableOrdered);
+
+                return;
+            }
+
             UnityEngine.Vector3 itemPosition = UnityEngine.Vector3.zero;
             var distance = 0f;
             string refusal = null;
@@ -1145,6 +1220,60 @@ namespace Coop.Server
                 HolderId = holder,
                 ClaimedBy = msg.PlayerId,
             }.Write, DeliveryMethod.ReliableOrdered);
+
+            // — La conséquence du geste (v11).
+            //
+            // Jusqu'ici, un accord ne changeait rien dans le monde du serveur : l'objet restait chez lui,
+            // et un troisième joueur qui le réclamait recevait un **accord** pour un objet qui n'existait
+            // plus pour personne. On retire donc l'objet du monde simulé et on l'annonce.
+            //
+            // Seulement sur un accord **nouveau** : une réclamation répétée du même joueur (idempotente)
+            // ne doit pas retirer deux fois, et un refus ne retire rien.
+            if (granted && msg.ItemKey != 0L && !_pickupRemoved.Contains(msg.ItemKey))
+            {
+                RemoveGrantedItem(msg.ItemKey, tech, session);
+            }
+        }
+
+        /// <summary>
+        /// Retire du monde du serveur l'objet dont la clé vient d'être accordée, puis annonce sa disparition.
+        ///
+        /// Ce que ça change et ce que ça ne change pas : l'objet cesse d'exister dans le monde simulé (il ne
+        /// sera plus résolu par <see cref="TryResolveWorldItem"/>), et les clients le voient disparaître. Il
+        /// n'est **pas** retiré de l'inventaire de celui qui l'a ramassé — il y est déjà depuis son geste
+        /// local, et c'est son exemplaire à lui qui compte.
+        /// </summary>
+        private void RemoveGrantedItem(long key, string tech, ClientSession session)
+        {
+            if (!TryResolveWorldItemObject(key, out var item))
+            {
+                _log.LogWarning(
+                    $"[net] pickup : clé=0x{key:x16} '{tech}' accordée à '{session.Username}'#{session.PlayerId} " +
+                    "mais l'objet n'est plus dans le monde serveur — rien à retirer (il a peut-être déjà été " +
+                    "consumé par le jeu).");
+                return;
+            }
+
+            var described = ItemIdentity.Describe(item);
+
+            _pickupRemoved.Add(key);
+            UnityEngine.Object.Destroy(item.gameObject);
+
+            // L'index est invalidé : sans ça, la clé resterait résoluble pendant une seconde, et une
+            // réclamation concurrente retomberait sur une position morte.
+            _itemIndex = null;
+
+            _log.LogInfo(
+                $"[net] pickup : clé=0x{key:x16} '{tech}' retirée du monde serveur ({described}) — " +
+                $"ramassée par '{session.Username}'#{session.PlayerId}.");
+
+            // Le détenteur est exclu : son exemplaire est déjà dans son inventaire, et c'est son geste à lui
+            // qui le fait disparaître de son monde.
+            BroadcastDespawn(
+                key,
+                EntityKind.Item,
+                $"ramassée par '{session.Username}'#{session.PlayerId}",
+                session.PlayerId);
         }
 
         /// <summary>
@@ -1217,6 +1346,7 @@ namespace Coop.Server
 
             var first = !_vehicleDrivers.ContainsKey(msg.VehicleKey);
             _vehicleDrivers[msg.VehicleKey] = session.PlayerId;
+            _vehicleDriverLastState[msg.VehicleKey] = UnityEngine.Time.realtimeSinceStartup;
 
             ApplyVehicleControl(vehicle, msg);
             VehicleControlApplied++;
@@ -1228,6 +1358,93 @@ namespace Coop.Server
                     $"({VehicleIdentity.Describe(vehicle)}, joueur à {distance:F1} m), état appliqué et rediffusé.");
 
                 ReplyControl(peer, msg.VehicleKey, true, session.PlayerId);
+            }
+        }
+
+        /// <summary>
+        /// Libération du volant par son conducteur (v12, M4).
+        ///
+        /// Ce que ça change : jusqu'ici un véhicule restait attribué à son dernier conducteur **jusqu'à sa
+        /// déconnexion**. Un joueur qui descendait d'un Seamoth le rendait donc inutilisable pour les autres
+        /// — le refus les renvoyait à un conducteur qui n'était plus dedans. La libération est immédiate ; le
+        /// silence reste le filet de sécurité (voir <see cref="ReleaseSilentDrivers"/>).
+        ///
+        /// Seul le conducteur **effectif** peut libérer : une demande pour un véhicule conduit par un autre
+        /// est ignorée (sans réponse : ce n'est pas une décision à rendre, c'est un fait sans effet).
+        /// </summary>
+        private void HandleVehicleRelease(ClientSession session, VehicleReleaseMessage msg)
+        {
+            if (!session.Accepted || msg.VehicleKey == 0L)
+            {
+                return;
+            }
+
+            if (!_vehicleDrivers.TryGetValue(msg.VehicleKey, out var driver) || driver != session.PlayerId)
+            {
+                return;
+            }
+
+            _vehicleDrivers.Remove(msg.VehicleKey);
+            _vehicleDriverLastState.Remove(msg.VehicleKey);
+            VehicleReleases++;
+
+            _log.LogInfo(
+                $"[net] conduite : clé=0x{msg.VehicleKey:x16} libérée par '{session.Username}'#{session.PlayerId} " +
+                "— le volant est libre (libérations=1, total=" + VehicleReleases + ")");
+        }
+
+        /// <summary>
+        /// Libère les volants devenus **silencieux** (v12).
+        ///
+        /// Pourquoi le silence et pas seulement le message : un client qui plante, qui perd le réseau ou qui
+        /// contourne `VehicleDriverBehaviour` ne libère rien. Le conducteur envoie un état toutes les 100 ms
+        /// tant qu'il est au volant ; `VehicleSilenceReleaseSeconds` (3 s) vaut donc 30 états manqués — bien
+        /// au-delà d'une rafale de latence.
+        /// </summary>
+        private void ReleaseSilentDrivers()
+        {
+            if (_vehicleDrivers.Count == 0)
+            {
+                return;
+            }
+
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            List<long> silent = null;
+
+            foreach (var pair in _vehicleDrivers)
+            {
+                if (!_vehicleDriverLastState.TryGetValue(pair.Key, out var last))
+                {
+                    last = now;
+                    _vehicleDriverLastState[pair.Key] = now;
+                }
+
+                if (now - last <= Protocol.VehicleSilenceReleaseSeconds)
+                {
+                    continue;
+                }
+
+                if (silent == null)
+                {
+                    silent = new List<long>();
+                }
+
+                silent.Add(pair.Key);
+            }
+
+            if (silent == null)
+            {
+                return;
+            }
+
+            foreach (var key in silent)
+            {
+                _vehicleDrivers.Remove(key);
+                _vehicleDriverLastState.Remove(key);
+                VehicleSilenceReleases++;
+                _log.LogInfo(
+                    $"[net] conduite : clé=0x{key:x16} libérée (silence de {Protocol.VehicleSilenceReleaseSeconds:F1} s) " +
+                    $"— le conducteur ne l'envoie plus (libérations par silence={VehicleSilenceReleases}).");
             }
         }
 
@@ -1379,6 +1596,35 @@ namespace Coop.Server
 
             indexedKeys = _itemIndex.Count;
             return _itemIndex.TryGetValue(key, out position);
+        }
+
+        /// <summary>Objet du monde portant cette clé, s'il existe encore.</summary>
+        ///
+        /// Distinct de <see cref="TryResolveWorldItem"/>, qui rend une position indexée : ici on veut
+        /// l'objet lui-même, pour le retirer. Le parcours est refait à neuf plutôt que de mémoriser des
+        /// références, parce qu'une référence à un objet détruit par le jeu ne se distingue pas d'une
+        /// référence nulle et ferait croire à un retrait réussi.
+        /// </summary>
+        private bool TryResolveWorldItemObject(long key, out Pickupable item)
+        {
+            item = null;
+            if (key == 0L)
+            {
+                return false;
+            }
+
+            foreach (var candidate in ItemIdentity.CollectWorldItems())
+            {
+                if (candidate == null || ItemIdentity.KeyOf(candidate, out _) != key)
+                {
+                    continue;
+                }
+
+                item = candidate;
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>Nom lisible du détenteur, pour que le refus dise **qui** détient l'objet.</summary>
@@ -2176,6 +2422,7 @@ namespace Coop.Server
             var baseline = !_vehicleBaselineDone;
             _vehicleBaselineDone = true;
             var announced = 0;
+            var present = new HashSet<long>();
 
             foreach (var vehicle in _vehicleCache)
             {
@@ -2185,6 +2432,11 @@ namespace Coop.Server
                 }
 
                 var key = VehicleIdentity.KeyOf(vehicle, out _);
+                if (key != 0L)
+                {
+                    present.Add(key);
+                }
+
                 if (key == 0L || !_knownVehicles.Add(key))
                 {
                     continue;
@@ -2260,7 +2512,87 @@ namespace Coop.Server
             {
                 _log.LogInfo($"[net] apparition : {announced} entité(s) annoncée(s) ce balayage.");
             }
+
+            // Les clés connues qui ne sont plus dans le monde ont **disparu** : on les annonce (v11).
+            // Sans ce balayage, un véhicule détruit chez l'hôte restait chez tous les clients, immobile.
+            // Le premier passage ne peut rien annoncer : `_knownVehicles` vient d'être rempli.
+            List<long> vanished = null;
+            foreach (var known in _knownVehicles)
+            {
+                if (!present.Contains(known))
+                {
+                    (vanished ?? (vanished = new List<long>())).Add(known);
+                }
+            }
+
+            if (vanished == null)
+            {
+                return;
+            }
+
+            foreach (var key in vanished)
+            {
+                _knownVehicles.Remove(key);
+                BroadcastDespawn(key, EntityKind.Vehicle, "véhicule détruit chez le serveur");
+            }
         }
+
+        /// <summary>
+        /// Annonce une disparition à **tous** les clients admis (v11, M6), et oublie l'entité du carnet.
+        ///
+        /// Le retrait n'est jamais demandé par un client : c'est le serveur qui constate qu'une entité
+        /// n'existe plus (véhicule détruit) ou qu'il vient de la retirer (objet ramassé). Le client, lui, ne
+        /// fait que constater — détruire sa copie, ou ne rien faire si elle est déjà dans un inventaire.
+        /// </summary>
+        /// <param name="exceptPlayerId">
+        /// Joueur à **exclure** de la diffusion, ou `0` pour aucun. Utile au ramassage : celui qui vient de
+        /// ramasser est le seul à qui le retrait ne doit pas être annoncé — son objet est déjà dans son
+        /// inventaire, et le retirer avant qu'il n'ait fini son geste l'empêcherait de le ramasser pour de
+        /// vrai (mesuré à l'étape L : `accordée=True` côté serveur, `objet dans l'inventaire=False` côté
+        /// client).
+        /// </param>
+        private void BroadcastDespawn(long key, byte kind, string reason, ushort exceptPlayerId = 0)
+        {
+            if (key == 0L)
+            {
+                return;
+            }
+
+            // Une entité disparue ne doit plus être rejouée à un client qui se connecte après coup.
+            _spawnedEntities.Remove(key);
+
+            var message = new EntityDespawnMessage
+            {
+                Key = key,
+                Kind = kind,
+                Reason = reason,
+            };
+
+            var sent = 0;
+            foreach (var pair in _sessions)
+            {
+                if (!pair.Value.Accepted)
+                {
+                    continue;
+                }
+
+                if (exceptPlayerId != 0 && pair.Value.PlayerId == exceptPlayerId)
+                {
+                    continue;
+                }
+
+                Send(pair.Key, message.Write, DeliveryMethod.ReliableOrdered);
+                sent++;
+            }
+
+            _entityDespawnsSent++;
+
+            var what = kind == EntityKind.Vehicle ? "véhicule" : "objet";
+            _log.LogInfo(
+                $"[net] disparition : clé=0x{key:x16} ({what}) — annoncée à {sent} client(s), motif « {reason} »" +
+                (exceptPlayerId != 0 ? $", sauf au détenteur (id {exceptPlayerId})" : string.Empty) + ".");
+        }
+
 
         /// <summary>Range une annonce dans le carnet, en évinçant la plus ancienne au-delà de la borne.</summary>
         private void RememberSpawn(EntitySpawnMessage message)
@@ -2309,6 +2641,10 @@ namespace Coop.Server
 
         private void BroadcastVehicleSnapshots(long serverTick, Player hostPlayer)
         {
+            // Un volant que plus personne n'envoie doit redevenir libre avant le calcul des diffusés :
+            // sans ça, `conduits localement` resterait vrai chez les autres clients indéfiniment.
+            ReleaseSilentDrivers();
+
             var now = UnityEngine.Time.realtimeSinceStartup;
             if (_vehicleCache == null || now - _vehicleCacheRealtime >= VehicleCacheSeconds)
             {
