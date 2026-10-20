@@ -108,7 +108,7 @@ avec `-nographics`. Ce n'est pas un binaire serveur.
 | `dotnet test` | secondes | logique pure : empreinte de sauvegarde, plausibilité, définition/hash, messages, bornes de lecture |
 | `dotnet run --project tools/NetProbe -- selftest` | secondes | aller-retour de chaque message, refus des paquets tronqués et des `NaN` |
 | `tools/deploy.sh --verify` | secondes | binaires installés = manifeste |
-| `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only`, et les assertions P/Q/N/B/R acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
+| `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only` **et** lancées par le défaut, et les assertions P/Q/N/B/R acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
 | `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–R) |
 | `tools/verify.sh` | long (~35 min) | les dix-huit étapes, un seul verdict |
 
