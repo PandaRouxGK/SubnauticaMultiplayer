@@ -81,6 +81,13 @@ dans la colonne de droite et n'invalident pas le critère.
 | Les trois clients suivent le même monde, sous le seuil | `écart max=1.02 / 1.04 / 1.28 m` (seuil 2 m), `verdict=True` sur les trois, `étape W : OK (132s)` | `tools/verify.sh --only=W` | prouvé (2026-10-20) |
 | Une annonce manquée reste mesurée et publiée | `interruption max=1.4 à 2.0 s` avec écarts `2.32 à 5.85 m` sur le même run | sonde de créatures, branche « interruption » | prouvé (2026-10-20, étape W) |
 
+### Le garde de dérive, testé hors jeu (2026-10-20)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| La règle « segment terminé » se vérifie en millisecondes | `dotnet test` : **314/314**, dont 5 cas `CreatureDriftGateTests` | `Coop.Model/CreatureDriftGate.cs` | prouvé (2026-10-20) |
+| L'extraction ne change pas la mesure en jeu | `étape E : OK (99s)`, `étape W : OK (126s)`, tout vert | `tools/verify.sh --only=E,W` | prouvé (2026-10-20) |
+
 ## 1. Fondations : le mod démarre, le réseau parle, les journaux sont séparés
 
 | Affirmation | Instrument | Source | Statut |

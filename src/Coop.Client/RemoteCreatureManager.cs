@@ -1119,12 +1119,9 @@ namespace Coop.Client
         /// </summary>
         private static bool PreviousSegmentFinished(Adopted entry, float gap)
         {
-            if (entry.SegmentDuration <= 0f)
-            {
-                return true;
-            }
-
-            return gap + 0.02f >= entry.SegmentDuration;
+            // La règle vit dans `Coop.Model` (testée en millisecondes) ; ce qui reste ici est le seul
+            // accès au segment en cours.
+            return CreatureDriftGate.SegmentFinished(gap, entry.SegmentDuration);
         }
 
         private bool TryAdopt(CreatureStateEntry state, out Adopted entry)

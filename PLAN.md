@@ -4353,3 +4353,20 @@ Les trois clients suivent 18 à 20 créatures, `IA arrêtée` égale `adoptées`
   traiter, pas la cause du rouge.
 - Ce qui n'est **pas** prouvé : que la dérive soit nulle. Le garde réduit l'échantillon d'environ 12 % des
   paires (≈400 sur ≈3 200 appariés) ; la valeur publiée porte sur le reste, et c'est écrit dans le verdict.
+
+## 61. Le garde de dérive sort du gestionnaire (2026-10-20)
+
+La correction de W (§60) vivait dans `RemoteCreatureManager` sous forme de quatre lignes non testables.
+Elle est maintenant `Coop.Model.CreatureDriftGate.SegmentFinished(gap, segment)` : le gestionnaire ne garde
+que l'accès au segment en cours, et la règle se vérifie en millisecondes.
+
+Hors jeu : `CreatureDriftGateTests` (5 cas — segment terminé, glissement inachevé, tolérance de 20 ms qui
+couvre une image longue sans couvrir un segment entier, absence de segment, entrée non finie) ;
+`dotnet test` **314/314**, build rc=0.
+
+En jeu, après câblage : `étape E : OK (99s)`, `étape W : OK (126s)`, `VERDICT GLOBAL : tout est vert` —
+la valeur mesurée ne bouge pas (1,02 / 1,04 / 1,28 m la veille), ce qui est attendu d'un déplacement de
+règle sans changement de calcul.
+
+Même motif que `SnapshotTickGate` (§54.5) : une règle qui décide d'une mesure doit pouvoir échouer hors du
+jeu, sinon sa seule preuve est un run de deux minutes.
