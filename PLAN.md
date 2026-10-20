@@ -4049,7 +4049,22 @@ avec **six tests** dans `SnapshotTickGateTests` (`dotnet test` **286/286**).
 l'écart vient donc d'ailleurs — probablement l'IA qui continue de faire nager la créature entre deux
 relâchées, c'est-à-dire le « clignotement à la coupure » déjà partiellement mesuré.
 
-- Ce n'est **pas** corrigé ici : la piste demande de mesurer les réadoptions (pourquoi `Peeper` bouge
-  encore localement) avant de toucher au gestionnaire, et l'heure de session ne le permet pas.
+**Cause trouvée dans le journal**, et elle n'est pas le filtre de tick : la même créature est
+**relâchée** puis **ré-adoptée** en 0,5 s —
+
+```
+[créature] relâchée : 'Peeper(Clone)' pos=(-102.0, -8.0, -93.1) clé=fb8ea914290670c4
+            (plus d'état depuis 2.0s) — l'IA reprend chez ce client (index relu > 0 : True).
+[créature] adoptée : 'Peeper(Clone)' pos=(-101.1, -5.8, -84.1) clé=fb8ea914290670c4
+            à 4.54 m de la position serveur …
+```
+
+Pendant les ~0,5 s où elle est relâchée, l'IA **reprend** et la créature nage de ~9 m ; la ré-adoption
+repose ensuite la copie à la position serveur. L'écart de `2,01 m` compté comme « état consécutif » est
+donc la **frontière d'une ré-adoption**, pas une désynchronisation : le compteur ne distingue pas « état
+suivant » de « premier état après une reprise ».
+
+- Ce n'est **pas** corrigé ici : il faut soit exclure le premier état après ré-adoption de la mesure de
+  dérive, soit espacer la relâche (2 s) — deux choix à mesurer, et l'heure de session ne le permet pas.
 - W reste **strict et exécutable** (`--only=W`) ; il est **intermittent** (vert une fois, rouge une fois),
   donc il ne sert pas de critère de clôture. M3 reste clos sur son critère §6 (deux clients, E).
