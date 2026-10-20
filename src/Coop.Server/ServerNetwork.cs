@@ -90,6 +90,37 @@ namespace Coop.Server
 
             /// <summary>Instant (ms) au-delà duquel un peer qui n'a pas fini son handshake est éjecté.</summary>
             public long HandshakeDeadline;
+
+            // — Empreinte de sauvegarde (P0, v13) ————————————————————————————————
+            //
+            // `SavePending` est le cas de démarrage : le réseau écoute avant qu'AutoLoad n'ait résolu la
+            // partie (côté serveur comme côté client). L'empreinte est alors vérifiée au tick suivant,
+            // au lieu de refuser un client correct sur une simple course de démarrage.
+            public SaveIdentity Save;
+            public bool SavePending;
+            public bool SaveMismatch;
+
+            // — Position acceptée et plausibilité (P1, v13) ————————————————————————
+            //
+            // La session garde **deux** états : la dernière position acceptée (qui est diffusée aux
+            // autres) et la dernière position reçue (qui peut avoir été refusée). Les confondre
+            // reviendrait à diffuser un saut qu'on vient de refuser.
+            public bool HasAcceptedPosition;
+            public float LastAcceptedX;
+            public float LastAcceptedY;
+            public float LastAcceptedZ;
+            public float LastAcceptedAt;
+            public PlayerActionFlags LastAcceptedFlags;
+            public int RejectedStreak;
+            public long PositionsRejected;
+            public long PositionResyncs;
+            public float NextPositionReportAt;
+
+            // Fenêtre de resynchronisations (P1). Une téléportation légitime est rare ; une session qui
+            // resynchronise en boucle ne joue pas, elle saute. Le budget rend la garde opposable au
+            // lieu de laisser un client se téléporter toutes les 150 ms.
+            public float ResyncWindowStart = -1f;
+            public int ResyncsInWindow;
         }
 
         private readonly NetManager _net;
@@ -136,6 +167,9 @@ namespace Coop.Server
         /// le bout du rayon, ce qui est le comportement voulu.
         /// </summary>
         private const float CloseSacrificeMeters = 30f;
+
+        /// <summary>Période du rapport de taux de refus de position (P1), par session.</summary>
+        private const float PositionReportSeconds = 5f;
 
         private int _closeSacrificeWarnings;
 
@@ -339,8 +373,21 @@ namespace Coop.Server
         /// client qui se connecte après coup : sans ça, une entité créée pendant que personne n'était là (ou
         /// avant l'arrivée du deuxième client) n'existerait que chez ceux qui étaient connectés à cet instant.
         /// </summary>
-        private readonly Dictionary<long, EntitySpawnMessage> _spawnedEntities =
-            new Dictionary<long, EntitySpawnMessage>();
+        private readonly Dictionary<long, EntitySpawnMessage> _spawnedEntities = new Dictionary<long, EntitySpawnMessage>();
+
+        // — Carnet des retraits (P2) ————————————————————————————————————————————————
+        //
+        // Le carnet d'apparitions rejoue ce qui a été **créé** avant l'arrivée d'un client. Sans le
+        // pendant pour les retraits, un client qui rejoint après un ramassage ou une destruction
+        // recharge la sauvegarde et voit réapparaître ce que le serveur a déjà retiré — le fantôme
+        // que la v11 avait corrigé pour les clients **déjà connectés** seulement.
+        private readonly Dictionary<long, EntityDespawnMessage> _despawnedEntities =
+            new Dictionary<long, EntityDespawnMessage>();
+
+        private readonly Queue<long> _despawnOrder = new Queue<long>();
+
+        private const int MaxRememberedDespawns = 256;
+        private int _entityDespawnsReplayed;
 
         /// <summary>Ordre d'ajout dans le carnet, pour que l'éviction retire bien la **plus ancienne**.</summary>
         private readonly Queue<long> _spawnOrder = new Queue<long>();
@@ -355,6 +402,9 @@ namespace Coop.Server
         public int EntitySpawnsSent => _entitySpawnsSent;
 
         public int EntityDespawnsSent => _entityDespawnsSent;
+
+        /// <summary>Retraits rejoués à des clients arrivés après coup (P2).</summary>
+        public int EntityDespawnsReplayed => _entityDespawnsReplayed;
 
         /// <summary>Intervalle (s) du rapport de flux de véhicules, par client.</summary>
         private const float VehicleStreamReportSeconds = 5f;
@@ -438,6 +488,75 @@ namespace Coop.Server
         {
             _net.PollEvents();
             ExpireStalledHandshakes();
+            ValidatePendingSaveIdentities();
+        }
+
+        /// <summary>
+        /// Vérifie les empreintes des sessions admises **avant** que le serveur n'ait résolu sa propre
+        /// partie (P0).
+        ///
+        /// Pourquoi ce n'est pas fait au handshake : `ServerNetwork.Start` est appelé dans `Awake`, alors
+        /// qu'`AutoLoadBehaviour` ne résout le slot que quelques secondes plus tard. Refuser un client
+        /// correct sur cette course rendrait le démarrage dépendant d'un ordre que rien ne garantit.
+        /// Le client est donc admis sous réserve, et la vérification tombe dès que l'empreinte serveur
+        /// existe — avant qu'il n'ait pu jouer (le monde n'est pas encore chargé de son côté).
+        /// </summary>
+        private void ValidatePendingSaveIdentities()
+        {
+            var server = SaveIdentitySource.Current;
+            if (server == null || server.IsUnknown || _sessions.Count == 0)
+            {
+                return;
+            }
+
+            List<KeyValuePair<NetPeer, string>> refused = null;
+
+            foreach (var pair in _sessions)
+            {
+                var session = pair.Value;
+                if (!session.Accepted || !session.SavePending)
+                {
+                    continue;
+                }
+
+                var reason = SaveCompatibility.Explain(server, session.Save);
+                if (reason == null)
+                {
+                    session.SavePending = false;
+                    _log.LogInfo(
+                        $"[net] empreinte de sauvegarde acceptée (vérifiée après coup) : " +
+                        $"client={session.Save?.Describe()} · serveur={server.Describe()}");
+                    continue;
+                }
+
+                refused = refused ?? new List<KeyValuePair<NetPeer, string>>();
+                refused.Add(new KeyValuePair<NetPeer, string>(pair.Key, reason));
+            }
+
+            if (refused == null)
+            {
+                return;
+            }
+
+            foreach (var item in refused)
+            {
+                if (!_sessions.TryGetValue(item.Key, out var session))
+                {
+                    continue;
+                }
+
+                _log.LogWarning(
+                    $"[net] handshake REFUSÉ (empreinte) : '{session.Username}'#{session.PlayerId} : {item.Value}");
+
+                // Même leçon qu'au §12 : envoyer le motif en fiable, **puis laisser le client fermer**.
+                // Couper juste après l'envoi ferait perdre le message, et le client ne verrait qu'une
+                // coupure sans explication. `ExpireStalledHandshakes` ferme le peer 2 s plus tard.
+                Send(item.Key, w => new DisconnectMessage { Reason = item.Value }.Write(w), DeliveryMethod.ReliableOrdered);
+
+                session.Accepted = false;
+                session.SaveMismatch = true;
+                session.HandshakeDeadline = ServerClock.Milliseconds + 2000L;
+            }
         }
 
         /// <summary>
@@ -695,9 +814,32 @@ namespace Coop.Server
             }
 
             session.PlayerId = _nextPlayerId;
-            session.Username = request.Username;
+            // Le pseudo d'un pair n'est pas une identité : il est affiché, journalisé et recopié dans
+            // le nom du clone d'avatar. On le normalise ici pour qu'un client tiers ne puisse pas
+            // injecter un saut de ligne dans une ligne de journal ni un caractère de contrôle dans un
+            // nom d'objet. Le refus « pseudo trop long » de `Validate` reste pour l'annonce faite.
+            session.Username = Usernames.Sanitize(request.Username);
             session.Accepted = true;
             session.RotW = 1f;
+
+            // Empreinte admise (P0). Si le serveur n'a pas encore résolu la sienne, la vérification
+            // est différée au tick suivant plutôt que de refuser un client correct sur une course de
+            // démarrage — mais elle aura lieu **avant** que le client n'ait chargé son monde.
+            session.Save = request.Save;
+            session.SavePending = SaveIdentitySource.Current == null || SaveIdentitySource.Current.IsUnknown;
+
+            if (session.SavePending)
+            {
+                _log.LogInfo(
+                    $"[net] empreinte de sauvegarde en attente (serveur pas encore résolu) : " +
+                    $"client={request.Save?.Describe()} — vérifiée au prochain tick.");
+            }
+            else
+            {
+                _log.LogInfo(
+                    $"[net] empreinte de sauvegarde acceptée : client={request.Save.Describe()} · " +
+                    $"serveur={SaveIdentitySource.Current.Describe()}");
+            }
 
             // La couleur est décidée **ici**, une fois, et annoncée ensuite à tout le monde. L'hôte
             // occupe l'indice 0 quand son personnage est dans le monde : on cherche donc sa
@@ -920,6 +1062,25 @@ namespace Coop.Server
                 return $"version du jeu différente (client={request.GameVersion}, serveur={_gameVersion})";
             }
 
+            // Empreinte de sauvegarde (P0). Le serveur ne peut juger que s'il a lui-même résolu sa
+            // partie : sinon la session est admise sous réserve (voir `ValidatePendingSaveIdentities`).
+            // Un client qui n'a pas résolu la sienne, en revanche, est refusé tout de suite : accepter
+            // une empreinte inconnue reviendrait à accepter n'importe quelle partie.
+            var serverSave = SaveIdentitySource.Current;
+            if (serverSave != null && !serverSave.IsUnknown)
+            {
+                if (request.Save == null || request.Save.IsUnknown)
+                {
+                    return "empreinte de sauvegarde inconnue côté client (le client n'a pas encore résolu sa partie)";
+                }
+
+                var mismatch = SaveCompatibility.Explain(serverSave, request.Save);
+                if (mismatch != null)
+                {
+                    return mismatch;
+                }
+            }
+
             return null;
         }
 
@@ -969,8 +1130,125 @@ namespace Coop.Server
                 return;
             }
 
+            // La séquence et le compteur avancent **même si la position est refusée** : un message
+            // rejeté ne doit pas être rejoué, et le taux de refus se calcule sur les messages reçus.
             session.LastPositionSequence = pos.Sequence;
             session.PositionsReceived++;
+
+            var wallNow = UnityEngine.Time.realtimeSinceStartup;
+
+            if (!session.HasAcceptedPosition)
+            {
+                StoreAcceptedPosition(session, pos, wallNow);
+                session.NextPositionReportAt = wallNow + PositionReportSeconds;
+
+                _log.LogInfo(
+                    $"[net] première position reçue de '{session.Username}'#{session.PlayerId} : " +
+                    $"({pos.X:F2}, {pos.Y:F2}, {pos.Z:F2}) v=({pos.MoveSpeedX:F1},{pos.MoveSpeedY:F1},{pos.MoveSpeedZ:F1}) " +
+                    $"pitch={pos.ViewPitch:F1} sousEau={pos.IsUnderwater} actions={pos.ActionFlags}");
+                ReportPositionRate(session, wallNow);
+                return;
+            }
+
+            // P1 : la position est jugée contre la dernière position **acceptée**, pas contre la
+            // précédente reçue. Un refus ne déplace donc pas la référence, sinon un client pourrait
+            // avancer par petits sauts refusés sans jamais être corrigé.
+            var deltaSeconds = wallNow - session.LastAcceptedAt;
+            var verdict = PlayerPlausibility.Evaluate(
+                session.LastAcceptedX,
+                session.LastAcceptedY,
+                session.LastAcceptedZ,
+                pos.X,
+                pos.Y,
+                pos.Z,
+                deltaSeconds,
+                session.LastAcceptedFlags,
+                pos.ActionFlags);
+
+            if (verdict.Accepted)
+            {
+                session.RejectedStreak = 0;
+                StoreAcceptedPosition(session, pos, wallNow);
+            }
+            else if (session.RejectedStreak + 1 >= PlayerPlausibility.MaxConsecutiveRejections)
+            {
+                // Une téléportation légitime (console, téléporteur, réapparition) ne doit pas
+                // condamner la session : après trois refus consécutifs, la position reçue est
+                // adoptée comme resynchronisation, et c'est **écrit** comme tel. Le troisième refus
+                // est compté comme les deux premiers : le taux publié doit refléter tous les refus,
+                // sinon une session qui resynchronise sans arrêt paraîtrait propre.
+                session.PositionsRejected++;
+                session.PositionResyncs++;
+                session.RejectedStreak = 0;
+                StoreAcceptedPosition(session, pos, wallNow);
+
+                _log.LogWarning(
+                    $"[net] position RESYNCHRONISÉE de '{session.Username}'#{session.PlayerId} après " +
+                    $"{PlayerPlausibility.MaxConsecutiveRejections} refus consécutifs : {verdict.Reason} — la position reçue est adoptée.");
+
+                // Budget : au-delà de cinq resynchronisations en une minute, ce n'est plus un
+                // téléporteur du jeu, c'est un client qui saute. La session est éjectée avec un motif.
+                if (session.ResyncWindowStart < 0f || wallNow - session.ResyncWindowStart > 60f)
+                {
+                    session.ResyncWindowStart = wallNow;
+                    session.ResyncsInWindow = 0;
+                }
+
+                session.ResyncsInWindow++;
+                if (session.ResyncsInWindow > 5)
+                {
+                    var budgetReason =
+                        $"trop de resynchronisations de position ({session.ResyncsInWindow} en moins de 60 s) — " +
+                        "une téléportation légitime est rare, une téléportation répétée n'en est pas une";
+
+                    _log.LogWarning(
+                        $"[net] position : '{session.Username}'#{session.PlayerId} éjecté — {budgetReason}");
+
+                    Send(peer, w => new DisconnectMessage { Reason = budgetReason }.Write(w), DeliveryMethod.ReliableOrdered);
+                    session.Accepted = false;
+                    session.HandshakeDeadline = ServerClock.Milliseconds + 2000L;
+                    return;
+                }
+            }
+            else
+            {
+                session.RejectedStreak++;
+                session.PositionsRejected++;
+
+                // Le serveur garde la dernière position acceptée : les autres joueurs ne voient
+                // jamais le saut, et le client reçoit de quoi revenir.
+                if (session.PositionsRejected <= 3 || session.PositionsRejected % 100 == 0)
+                {
+                    _log.LogWarning(
+                        $"[net] position REFUSÉE de '{session.Username}'#{session.PlayerId} : {verdict.Reason} — " +
+                        $"correction renvoyée (refus={session.PositionsRejected})");
+                }
+
+                Send(peer, w => new PlayerCorrectionMessage
+                {
+                    ServerTick = ServerTickBehaviour.Ticks,
+                    X = session.LastAcceptedX,
+                    Y = session.LastAcceptedY,
+                    Z = session.LastAcceptedZ,
+                    Reason = WireReason(verdict.Reason),
+                }.Write(w), DeliveryMethod.ReliableOrdered);
+            }
+
+            ReportPositionRate(session, wallNow);
+        }
+
+        /// <summary>
+        /// Mémorise une position comme **acceptée** : c'est le seul état que les autres joueurs voient.
+        /// </summary>
+        private static void StoreAcceptedPosition(ClientSession session, PlayerPositionMessage pos, float now)
+        {
+            session.HasAcceptedPosition = true;
+            session.LastAcceptedX = pos.X;
+            session.LastAcceptedY = pos.Y;
+            session.LastAcceptedZ = pos.Z;
+            session.LastAcceptedFlags = pos.ActionFlags;
+            session.LastAcceptedAt = now;
+
             session.X = pos.X;
             session.Y = pos.Y;
             session.Z = pos.Z;
@@ -985,14 +1263,48 @@ namespace Coop.Server
             session.IsUnderwater = pos.IsUnderwater;
             session.OnSurface = pos.OnSurface;
             session.ActionFlags = pos.ActionFlags;
+        }
 
-            if (session.PositionsReceived == 1)
+        /// <summary>
+        /// Tronque un motif pour le fil : `Protocol.MaxCorrectionReasonLength` est une borne de
+        /// message, et un motif de plausibilité complet la dépasse. Le journal garde la version
+        /// entière ; seule la copie transportée est tronquée.
+        /// </summary>
+        private static string WireReason(string reason)
+        {
+            if (string.IsNullOrEmpty(reason))
             {
-                _log.LogInfo(
-                    $"[net] première position reçue de '{session.Username}'#{session.PlayerId} : " +
-                    $"({pos.X:F2}, {pos.Y:F2}, {pos.Z:F2}) v=({pos.MoveSpeedX:F1},{pos.MoveSpeedY:F1},{pos.MoveSpeedZ:F1}) " +
-                    $"pitch={pos.ViewPitch:F1} sousEau={pos.IsUnderwater} actions={pos.ActionFlags}");
+                return string.Empty;
             }
+
+            return reason.Length <= Protocol.MaxCorrectionReasonLength
+                ? reason
+                : reason.Substring(0, Protocol.MaxCorrectionReasonLength);
+        }
+
+        /// <summary>
+        /// Rapport périodique du taux de refus (P1). C'est ce chiffre — et non le nombre brut — qui
+        /// sert de critère d'arrêt : plus de 5 % de corrections sur une nage normale signifie que la
+        /// validation a posteriori n'est pas viable.
+        /// </summary>
+        private void ReportPositionRate(ClientSession session, float now)
+        {
+            if (now < session.NextPositionReportAt)
+            {
+                return;
+            }
+
+            session.NextPositionReportAt = now + PositionReportSeconds;
+
+            if (session.PositionsReceived <= 0)
+            {
+                return;
+            }
+
+            var rate = 100.0 * session.PositionsRejected / session.PositionsReceived;
+            _log.LogInfo(
+                $"[net] position : '{session.Username}'#{session.PlayerId} {session.PositionsReceived} reçue(s), " +
+                $"{session.PositionsRejected} refusée(s) ({rate:F1}%), {session.PositionResyncs} resynchronisée(s)");
         }
 
         /// <summary>
@@ -2469,6 +2781,11 @@ namespace Coop.Server
                 var position = transform != null ? transform.position : UnityEngine.Vector3.zero;
                 var rotation = transform != null ? transform.rotation : UnityEngine.Quaternion.identity;
 
+                // P1bis : la définition voyage avec l'annonce, et son empreinte est vérifiable.
+                // Un véhicule du jeu a une échelle neutre ; le contrat existe pour que le client
+                // puisse **refuser** une définition divergente au lieu de la supposer.
+                var definition = EntityDefinition.ForVehicle(tech);
+
                 var message = new EntitySpawnMessage
                 {
                     Key = key,
@@ -2481,6 +2798,10 @@ namespace Coop.Server
                     RotY = rotation.y,
                     RotZ = rotation.z,
                     RotW = rotation.w,
+                    ScaleX = definition.ScaleX,
+                    ScaleY = definition.ScaleY,
+                    ScaleZ = definition.ScaleZ,
+                    DefinitionHash = definition.ComputeHash(),
                 };
 
                 // Mémorisé **avant** l'envoi : un client qui se connecte pendant la diffusion doit trouver
@@ -2505,7 +2826,7 @@ namespace Coop.Server
                 _log.LogInfo(
                     $"[net] apparition : clé=0x{key:x16} '{vehicle.gameObject.name}' ({tech}) — " +
                     $"diffusée à {sent} client(s), pos=({position.x:F1}, {position.y:F1}, {position.z:F1}), " +
-                    $"identité '{uniqueId}'.");
+                    $"identité '{uniqueId}', définition=0x{message.DefinitionHash:x16}.");
             }
 
             if (announced > 0)
@@ -2568,6 +2889,8 @@ namespace Coop.Server
                 Reason = reason,
             };
 
+            RememberDespawn(message);
+
             var sent = 0;
             foreach (var pair in _sessions)
             {
@@ -2612,6 +2935,45 @@ namespace Coop.Server
             }
 
             _spawnedEntities[message.Key] = message;
+
+            // Une clé qui réapparaît n'est plus « disparue » : le carnet de retraits doit oublier
+            // l'ancienne annonce, sinon le client recréerait puis retirerait la même entité.
+            _despawnedEntities.Remove(message.Key);
+        }
+
+        /// <summary>
+        /// Range un retrait dans le carnet, borné comme celui des apparitions.
+        ///
+        /// Un client qui rejoint après un ramassage charge la **même sauvegarde**, qui contient
+        /// encore l'objet : sans ce rejeu, il le verrait et pourrait le réclamer, alors que le
+        /// serveur l'a déjà accordé à quelqu'un. C'est le défaut que la v11 avait fermé pour les
+        /// clients présents, et qui restait ouvert pour les suivants (P2).
+        /// </summary>
+        private void RememberDespawn(EntityDespawnMessage message)
+        {
+            if (message == null || message.Key == 0L)
+            {
+                return;
+            }
+
+            // Une clé peut réapparaître puis disparaître de nouveau : la file ne doit pas la contenir
+            // deux fois, sinon une éviction consommerait un créneau sans rien retirer et le carnet
+            // grossirait au-delà de sa borne. 256 entrées au plus, donc `Contains` est sans coût notable.
+            if (!_despawnedEntities.ContainsKey(message.Key) && !_despawnOrder.Contains(message.Key))
+            {
+                if (_despawnOrder.Count >= MaxRememberedDespawns)
+                {
+                    var oldest = _despawnOrder.Dequeue();
+                    _despawnedEntities.Remove(oldest);
+                    _log.LogWarning(
+                        $"[net] disparition : carnet plein ({MaxRememberedDespawns}) — clé=0x{oldest:x16} oubliée " +
+                        "(un client qui se connecte maintenant ne la recevra pas).");
+                }
+
+                _despawnOrder.Enqueue(message.Key);
+            }
+
+            _despawnedEntities[message.Key] = message;
         }
 
         /// <summary>
@@ -2623,20 +2985,35 @@ namespace Coop.Server
         /// </summary>
         private void SendSpawnedEntities(NetPeer peer, ClientSession session)
         {
-            if (_spawnedEntities.Count == 0)
+            if (_spawnedEntities.Count > 0)
+            {
+                foreach (var message in _spawnedEntities.Values)
+                {
+                    Send(peer, message.Write, DeliveryMethod.ReliableOrdered);
+                    _entitySpawnsReplayed++;
+                }
+
+                _log.LogInfo(
+                    $"[net] apparition : {_spawnedEntities.Count} entité(s) fabriquée(s) rejouée(s) pour " +
+                    $"'{session.Username}'#{session.PlayerId} (arrivé après leur création).");
+            }
+
+            // P2 : le pendant des retraits. Il est indépendant du carnet d'apparitions — une session
+            // peut n'avoir que des retraits à rejouer (objet ramassé avant qu'elle n'arrive).
+            if (_despawnedEntities.Count == 0)
             {
                 return;
             }
 
-            foreach (var message in _spawnedEntities.Values)
+            foreach (var message in _despawnedEntities.Values)
             {
                 Send(peer, message.Write, DeliveryMethod.ReliableOrdered);
-                _entitySpawnsReplayed++;
+                _entityDespawnsReplayed++;
             }
 
             _log.LogInfo(
-                $"[net] apparition : {_spawnedEntities.Count} entité(s) fabriquée(s) rejouée(s) pour " +
-                $"'{session.Username}'#{session.PlayerId} (arrivé après leur création).");
+                $"[net] disparition : {_despawnedEntities.Count} entité(s) disparue(s) rejouée(s) pour " +
+                $"'{session.Username}'#{session.PlayerId} (arrivé après leur retrait).");
         }
 
         private void BroadcastVehicleSnapshots(long serverTick, Player hostPlayer)

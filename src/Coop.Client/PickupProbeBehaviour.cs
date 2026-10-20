@@ -38,6 +38,18 @@ namespace Coop.Client
 
         private const float ConnectionTimeoutSeconds = 120f;
 
+        /// <summary>
+        /// Attente (s) de l'autre client **entré dans le monde** avant la première réclamation.
+        ///
+        /// Connecté ne suffit pas à rendre la mesure vraie, mais c'est le minimum : la réclamation du
+        /// client 1 est annoncée aux clients présents, et le serveur écrit « annoncée à 0 client(s) » si le
+        /// second n'a pas encore fait son handshake (mesuré le 2026-10-19 : client 2 connecté 9 s après la
+        /// réclamation de client 1, run rouge alors que la décision elle-même était bonne). On attend donc
+        /// son **avatar**, c'est-à-dire son entrée dans le monde, pour que le retrait qu'il reçoit soit
+        /// celui qu'il doit appliquer.
+        /// </summary>
+        private const float PeerWaitSeconds = 90f;
+
         /// <summary>Décalage (m) appliqué au joueur pour se placer devant l'objet.</summary>
         private static readonly Vector3 StandOffset = new Vector3(1.2f, 0.4f, 1.2f);
 
@@ -86,6 +98,25 @@ namespace Coop.Client
                 }
 
                 yield return new WaitForSeconds(0.5f);
+            }
+
+            if (isFirst && network.Remotes != null)
+            {
+                var peerDeadline = Time.realtimeSinceStartup + PeerWaitSeconds;
+                string peerName = null;
+                while (Time.realtimeSinceStartup < peerDeadline &&
+                       !network.Remotes.TryGetPeerAvatarForProbe(out _, out peerName, out _))
+                {
+                    yield return new WaitForSeconds(0.5f);
+                }
+
+                Log.LogInfo(
+                    network.Remotes.TryGetPeerAvatarForProbe(out _, out peerName, out _)
+                        ? $"[sonde] ramassage : l'autre client ('{peerName}') est entré dans le monde — la " +
+                          "réclamation sera annoncée à un client qui peut l'appliquer."
+                        : $"[sonde] ramassage : aucun autre client entré dans le monde après " +
+                          $"{PeerWaitSeconds:F0}s — la réclamation sera annoncée à personne, et la moitié " +
+                          "« l'autre voit le retrait » ne sera pas mesurée.");
             }
 
             var target = FindTarget(0L, out _, out var targetKey, out var mechanism);
@@ -304,8 +335,25 @@ namespace Coop.Client
             }
 
             var position = item.transform.position;
-            Player.main.SetPosition(position + StandOffset, Player.mainObject.transform.rotation);
-            yield return new WaitForSeconds(2.5f);
+            var destination = position + StandOffset;
+
+            // Le serveur refuse un déplacement de plus de 15 m/s : une téléportation de 16 m en une image
+            // est rejetée, puis le client est resynchronisé et se retrouve loin de l'objet (mesuré le
+            // 2026-10-19 : « joueur placé à 15.99 m », puis réclamation refusée « hors portée »). On
+            // approche donc par petits pas sous la vitesse admise — 1,5 m toutes les 0,15 s, soit
+            // 10 m/s — au lieu d'un saut que la garde P1 a raison de refuser.
+            var origin = Player.mainObject.transform.position;
+            var distance = Vector3.Distance(origin, destination);
+            var steps = Mathf.Max(1, Mathf.CeilToInt(distance / 1.5f));
+
+            for (var step = 1; step <= steps; step++)
+            {
+                var next = Vector3.Lerp(origin, destination, (float)step / steps);
+                Player.main.SetPosition(next, Player.mainObject.transform.rotation);
+                yield return new WaitForSeconds(0.15f);
+            }
+
+            yield return new WaitForSeconds(0.5f);
 
             var placed = Player.mainObject != null
                 ? Vector3.Distance(Player.mainObject.transform.position, position)
@@ -313,7 +361,17 @@ namespace Coop.Client
 
             Log.LogInfo(
                 $"[sonde] ramassage : joueur placé à {placed:F2} m de l'objet (portée admise par le serveur : " +
-                $"{Coop.Model.Protocol.MaxPickupRangeMeters:F1} m)");
+                $"{Coop.Model.Protocol.MaxPickupRangeMeters:F1} m ; approche en {steps} pas)");
+
+            if (placed > Coop.Model.Protocol.MaxPickupRangeMeters)
+            {
+                // Une réclamation partirait hors portée et le refus ressemblerait à une règle d'identité
+                // respectée : le dire ici évite de lire un refus de distance comme un accord déguisé.
+                Log.LogWarning(
+                    $"[sonde] ramassage : le joueur n'est pas à portée après l'approche ({placed:F2} m > " +
+                    $"{Coop.Model.Protocol.MaxPickupRangeMeters:F1} m) — la réclamation sera refusée pour la " +
+                    "distance, pas pour l'identité.");
+            }
         }
 
         /// <summary>

@@ -45,12 +45,35 @@ namespace Coop.Client
         private static long _lastSpawnedKey;
         private static string _lastSpawnedName = string.Empty;
 
+        // — Contrat de contenu (v13, P1bis) ————————————————————————————————————————————
+        // Une définition dont le hash ne se recalcule pas est refusée **avant** toute instanciation.
+        // Le compteur existe pour que la sonde puisse échouer : un contrôle qui ne peut pas échouer
+        // ne prouve rien (c'est la leçon de la preuve discriminante du §28).
+        private static int _refusedDefinition;
+        private static long _lastDeclaredHash;
+        private static long _lastComputedHash;
+        private static string _lastDefinitionSummary = string.Empty;
+        private static EntitySpawnMessage _lastMessage;
+
         internal static int SpawnedCount => _spawned;
         internal static int FailedCount => _failed;
         internal static int SkippedCount => _skipped;
         internal static int BadKeyCount => _badKey;
         internal static long LastSpawnedKey => _lastSpawnedKey;
         internal static string LastSpawnedName => _lastSpawnedName;
+        internal static int RefusedDefinitionCount => _refusedDefinition;
+        internal static long LastDeclaredHash => _lastDeclaredHash;
+        internal static long LastComputedHash => _lastComputedHash;
+        internal static string LastDefinitionSummary => _lastDefinitionSummary;
+        internal static EntitySpawnMessage LastMessage => _lastMessage;
+
+        /// <summary>
+        /// Vérifie une définition **par la même règle** que <see cref="Spawn"/>. Exposé pour que la
+        /// sonde puisse falsifier une définition et constater le refus, au lieu de réimplémenter la
+        /// règle (deux implémentations divergeraient, et la sonde validerait la mauvaise).
+        /// </summary>
+        internal static bool ProbeDefinitionContract(EntityDefinition definition, long declaredHash, out long computed)
+            => EntityDefinition.Verify(definition, declaredHash, out computed);
 
         /// <summary>Reçoit une annonce du serveur (appelée par la boucle réseau, thread principal).</summary>
         internal static void Enqueue(EntitySpawnMessage msg)
@@ -107,6 +130,28 @@ namespace Coop.Client
                 Log.LogInfo(
                     $"[spawn] entité 0x{msg.Key:x16} déjà présente localement ('{duplicate.gameObject.name}') — " +
                     "aucune création.");
+                yield break;
+            }
+
+            // Le contrat de contenu : le client recalcule l'empreinte de la définition annoncée.
+            // Un hash divergent n'est pas une raison de « réessayer » — c'est une définition qu'on
+            // ne sait pas lire, et instancier quand même ferait entrer dans le monde une entité que
+            // le serveur ne décrit pas. Refus nommé, compté, et avant toute allocation.
+            var definition = msg.BuildDefinition();
+            if (!EntityDefinition.Verify(definition, msg.DefinitionHash, out var computedHash))
+            {
+                _refusedDefinition++;
+                _lastDeclaredHash = msg.DefinitionHash;
+                _lastComputedHash = computedHash;
+                _lastDefinitionSummary = definition.Canonical();
+                Log.LogError(
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "[spawn] définition REFUSÉE : hash annoncé=0x{0:x16} recalculé=0x{1:x16} pour " +
+                        "'{2}' — entité non créée.",
+                        msg.DefinitionHash,
+                        computedHash,
+                        msg.TechTypeName));
                 yield break;
             }
 
@@ -187,6 +232,10 @@ namespace Coop.Client
             _spawned++;
             _lastSpawnedKey = msg.Key;
             _lastSpawnedName = created.name;
+            _lastMessage = msg;
+            _lastDeclaredHash = msg.DefinitionHash;
+            _lastComputedHash = computedHash;
+            _lastDefinitionSummary = definition.Canonical();
 
             Log.LogInfo(
                 string.Format(

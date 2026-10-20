@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Globalization;
 using BepInEx.Logging;
+using Coop.Model;
 using Coop.Shared;
 using UnityEngine;
 
@@ -63,14 +64,48 @@ namespace Coop.Client
             var key = EntitySpawner.LastSpawnedKey;
             var vehicle = FindLocalVehicle(key);
 
-            var verdict = vehicle != null && key != 0L && EntitySpawner.BadKeyCount == 0;
+            // — Contrat de contenu (P1bis) ————————————————————————————————————————————
+            // Deux contrôles, et le second est celui qui compte : la définition annoncée doit se
+            // vérifier, et une définition **falsifiée** doit être refusée contre le même hash. Sans
+            // le second, « le hash se vérifie » serait vrai même si la vérification renvoyait
+            // toujours vrai — exactement le faux vert que la preuve discriminante du §28 a corrigé.
+            var last = EntitySpawner.LastMessage;
+            var nominal = false;
+            var falsifiedRefused = false;
+            long declared = 0L;
+            long computed = 0L;
+
+            if (last != null)
+            {
+                var definition = last.BuildDefinition();
+                nominal = EntitySpawner.ProbeDefinitionContract(definition, last.DefinitionHash, out computed);
+                declared = last.DefinitionHash;
+
+                var tampered = new EntityDefinition
+                {
+                    TechTypeName = definition.TechTypeName + "X",
+                    ScaleX = definition.ScaleX + 1f,
+                    ScaleY = definition.ScaleY,
+                    ScaleZ = definition.ScaleZ,
+                };
+
+                falsifiedRefused = !EntitySpawner.ProbeDefinitionContract(tampered, last.DefinitionHash, out _);
+            }
+
+            var verdict = vehicle != null
+                          && key != 0L
+                          && EntitySpawner.BadKeyCount == 0
+                          && nominal
+                          && falsifiedRefused
+                          && EntitySpawner.RefusedDefinitionCount == 0;
 
             Log.LogInfo(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "[sonde] apparition : verdict={0} — entités créées={1}, écartées (déjà présentes)={2}, " +
                     "échecs={3}, clés divergentes={4} ; dernière clé=0x{5:x16} '" +
-                    "{6}' — objet local retrouvé par sa clé={7}",
+                    "{6}' — objet local retrouvé par sa clé={7} ; définition vérifiée={8} " +
+                    "(hash=0x{9:x16}), définition falsifiée refusée={10}, définitions refusées={11}",
                     verdict,
                     EntitySpawner.SpawnedCount,
                     EntitySpawner.SkippedCount,
@@ -78,13 +113,33 @@ namespace Coop.Client
                     EntitySpawner.BadKeyCount,
                     key,
                     EntitySpawner.LastSpawnedName,
-                    vehicle != null));
+                    vehicle != null,
+                    nominal,
+                    declared == 0L ? computed : declared,
+                    falsifiedRefused,
+                    EntitySpawner.RefusedDefinitionCount));
 
             if (!verdict)
             {
-                Log.LogError(
-                    "[sonde] apparition : l'entité créée n'est pas retrouvée par la clé annoncée — le flux de " +
-                    "positions ne pourra pas l'apparier (identifiant du serveur non écrit ?).");
+                if (vehicle == null || key == 0L)
+                {
+                    Log.LogError(
+                        "[sonde] apparition : l'entité créée n'est pas retrouvée par la clé annoncée — le flux de " +
+                        "positions ne pourra pas l'apparier (identifiant du serveur non écrit ?).");
+                }
+
+                if (!nominal || !falsifiedRefused)
+                {
+                    Log.LogError(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "[sonde] apparition : contrat de contenu non vérifiable — définition vérifiée={0}, " +
+                            "falsifiée refusée={1}, refusées={2}, dernière définition '{3}'.",
+                            nominal,
+                            falsifiedRefused,
+                            EntitySpawner.RefusedDefinitionCount,
+                            EntitySpawner.LastDefinitionSummary));
+                }
             }
         }
 

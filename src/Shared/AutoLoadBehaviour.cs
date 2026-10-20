@@ -100,6 +100,16 @@ namespace Coop.Shared
                 yield break;
             }
 
+            // L'empreinte est publiée **avant** le chargement : c'est la même sauvegarde que celle que
+            // `Load()` va ouvrir, et le client doit l'envoyer dans son handshake (P0). Publier après
+            // reviendrait à décrire une partie qu'on a déjà commencé à modifier.
+            SaveIdentitySource.Publish(
+                Coop.Model.SaveIdentity.Create(
+                    target.saveGame,
+                    target.sessionId,
+                    target.changeSet,
+                    target.gameMode.ToString()));
+
             Log.LogInfo($"[monde] >>> chargement de la sauvegarde '{target.saveGame}'");
             target.Load();
 

@@ -970,6 +970,33 @@ namespace Coop.Client
         internal int KnownRemoteCountForProbe => _remotes.Count;
 
         /// <summary>
+        /// Nombre de **clients** distants connus, l'hôte (id 9999) exclu.
+        ///
+        /// La sonde de présence doit attendre celui-ci et non `KnownRemoteCountForProbe` : un hôte non
+        /// dédié expose lui aussi un avatar, ce qui satisfait l'attente alors que les deux mesures
+        /// mutuelles (falsification, nage) n'ont aucun observateur. Mesuré le 2026-10-19 : la sonde du
+        /// client 1 a conclu `verdict=False` 13 s après son entrée dans le monde, en comptant l'avatar de
+        /// l'hôte, pendant que le client 2 chargeait encore son monde — `PlayerId falsifié=False (défaut :
+        /// aucun joueur distant)` alors que l'autre client existait, mais pas encore.
+        /// </summary>
+        internal int KnownPeerCountForProbe
+        {
+            get
+            {
+                var count = 0;
+                foreach (var pair in _remotes)
+                {
+                    if (pair.Key != HostAvatarPlayerId)
+                    {
+                        count++;
+                    }
+                }
+
+                return count;
+            }
+        }
+
+        /// <summary>
         /// Dernier équipement **reçu du serveur** : son identifiant effectif et sa liste.
         ///
         /// C'est ce qui rend la réécriture du `PlayerId` mesurable côté client : une sonde annonce un

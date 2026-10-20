@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -164,6 +165,15 @@ namespace Coop.Client
                 go.AddComponent<PickupProbeBehaviour>();
             }
 
+            if (IsDebugFlagSet("position"))
+            {
+                // P1 / v13 : la garde de position doit refuser un téléport **et** ne pas corriger une
+                // nage normale. Les deux critères sont nécessaires : l'un sans l'autre valide un garde
+                // qui refuse tout, ou un garde qui ne refuse rien.
+                Log.LogWarning("[boot] sonde de position activée (-coopdebug=position).");
+                go.AddComponent<PositionProbeBehaviour>();
+            }
+
             Log.LogInfo(
                 $"[boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde={saveGuardInstalled}, " +
                 $"pauseCliente={(pauseGuardInstalled ? "désactivée" : "NON patchée")}, " +
@@ -228,6 +238,19 @@ namespace Coop.Client
         private double _nextReconnectTime;
         private double _nextStatsTime;
 
+        // — Empreinte de sauvegarde (v13, P0) ————————————————————————————————————————
+        // Le client ne se connecte pas avant de savoir **quelle partie** il a chargée : un handshake
+        // sans empreinte ne peut pas être honoré, et le serveur ne saurait pas distinguer « même
+        // sauvegarde » de « je ne sais pas encore ». L'attente est bornée, et son échec est nommé.
+        private double _saveWaitStarted = -1.0;
+        private bool _loggedSaveWait;
+        private bool _loggedSaveTimeout;
+
+        // — Corrections de position (v13, P1) ————————————————————————————————————————
+        private int _correctionsReceived;
+        private int _correctionsApplied;
+        private int _correctionsSkipped;
+
         private RemotePlayerManager _remotes;
 
         /// <summary>
@@ -272,6 +295,14 @@ namespace Coop.Client
         internal int VehicleControlSent => _vehicleControlSent;
         internal int VehicleControlGranted => _vehicleControlGranted;
         internal int VehicleControlRefused => _vehicleControlRefused;
+
+        // — Lecture seule des compteurs de correction (P1) ————————————————————————————
+        // Exposés pour la sonde `-coopdebug=position`, qui doit lire ce que la boucle réseau a
+        // réellement reçu et appliqué, et non réimplémenter la règle.
+        internal int CorrectionsReceived => _correctionsReceived;
+        internal int CorrectionsApplied => _correctionsApplied;
+        internal int CorrectionsSkipped => _correctionsSkipped;
+        internal bool Accepted => _accepted;
 
         /// <summary>
         /// Envoie l'état du véhicule piloté (v9). Unreliable : un état perdu est remplacé par le suivant
@@ -481,7 +512,28 @@ namespace Coop.Client
         {
             _host = host;
             _port = port;
-            _username = string.IsNullOrWhiteSpace(username) ? "joueur" : username.Trim();
+            _username = NormalizeUsername(username);
+        }
+
+        /// <summary>
+        /// Ramène le pseudo dans la forme admise par le protocole au lieu de le laisser partir tel quel.
+        ///
+        /// La règle vit dans <see cref="Usernames.Sanitize"/> — testée hors jeu — et n'est plus
+        /// réimplémentée ici : un pseudo Steam de 40 caractères faisait refuser le handshake
+        /// (« pseudo trop long »), et un pseudo avec un saut de ligne cassait les journaux. On garde
+        /// seulement le journal de ce qui a changé, pour que l'utilisateur comprenne le nom affiché.
+        /// </summary>
+        private static string NormalizeUsername(string username)
+        {
+            var sanitized = Usernames.Sanitize(username);
+            if (!string.Equals(sanitized, username, StringComparison.Ordinal))
+            {
+                CoopClientPlugin.Log.LogWarning(
+                    $"[net] pseudo normalisé : '{username}' -> '{sanitized}' " +
+                    $"(borne {Protocol.MaxUsernameLength}, caractères de contrôle retirés).");
+            }
+
+            return sanitized;
         }
 
         private void Start()
@@ -514,6 +566,46 @@ namespace Coop.Client
 
         private void Connect()
         {
+            // L'empreinte de la partie n'est connue qu'une fois le menu résolu (`AutoLoadBehaviour`).
+            // Se connecter avant enverrait un handshake incapable de nommer la sauvegarde : le refus
+            // du serveur serait exact, mais il accuserait le client de ne pas avoir de partie alors
+            // qu'il n'a simplement pas encore lu son menu. On attend donc, avec une borne : au-delà,
+            // on se connecte quand même et le refus reste **nommé**.
+            var now = _clock.Elapsed.TotalSeconds;
+            var save = SaveIdentitySource.Current;
+            if (save == null)
+            {
+                if (_saveWaitStarted < 0)
+                {
+                    _saveWaitStarted = now;
+                }
+
+                var waited = now - _saveWaitStarted;
+                if (waited < Protocol.SaveIdentityResolveTimeoutSeconds)
+                {
+                    if (!_loggedSaveWait)
+                    {
+                        _loggedSaveWait = true;
+                        CoopClientPlugin.Log.LogInfo(
+                            $"[net] attente de l'empreinte de sauvegarde avant connexion " +
+                            $"({Protocol.SaveIdentityResolveTimeoutSeconds:F0} s max) — le menu doit d'abord résoudre la partie.");
+                    }
+
+                    // Repli toutes les 500 ms : c'est la boucle de reconnexion existante qui porte
+                    // l'attente, pas une seconde boucle.
+                    _nextReconnectTime = now + 0.5;
+                    return;
+                }
+
+                if (!_loggedSaveTimeout)
+                {
+                    _loggedSaveTimeout = true;
+                    CoopClientPlugin.Log.LogWarning(
+                        $"[net] empreinte de sauvegarde toujours inconnue après {waited:F0} s — " +
+                        "connexion quand même (le serveur la refusera nommément).");
+                }
+            }
+
             CoopClientPlugin.Log.LogInfo($"[net] connexion à {_host}:{_port}...");
             _server = _net.Connect(_host, _port, Protocol.ConnectionKey);
             _nextReconnectTime = _clock.Elapsed.TotalSeconds + ReconnectDelaySeconds;
@@ -584,6 +676,103 @@ namespace Coop.Client
                 _creatures?.ReportPeriodically();
                 _vehicles?.ReportPeriodically();
                 ReportStats();
+            }
+        }
+
+        /// <summary>
+        /// Applique une position autoritaire reçue du serveur (v13, P1).
+        ///
+        /// Trois gardes, chacune pour une raison différente :
+        /// - **monde chargé** : téléporter le joueur dans la scène du menu n'a aucun sens ;
+        /// - **pas en véhicule** : le siège appartient au véhicule, et `SetPosition` sur le joueur
+        ///   pendant qu'il est monté le désolidarise du siège ;
+        /// - **seuil** : une correction de quelques centimètres est du bruit d'interpolation, pas une
+        ///   divergence ; l'appliquer ferait trembler le joueur.
+        ///
+        /// Une correction reçue mais **non appliquée** est comptée séparément : c'est elle qui dit
+        /// si le serveur corrige trop souvent (le critère d'arrêt à 5 % du §43.6 se lit sur ces
+        /// compteurs, pas sur une impression).
+        /// </summary>
+        private void ApplyPositionCorrection(PlayerCorrectionMessage correction)
+        {
+            var player = Player.main;
+            var root = Player.mainObject;
+            var applied = false;
+            var distance = 0f;
+
+            if (player != null && root != null)
+            {
+                var target = new Vector3(correction.X, correction.Y, correction.Z);
+                distance = Vector3.Distance(root.transform.position, target);
+
+                var inVehicle = player.inSeamoth || player.inExosuit;
+                applied = AutoLoadBehaviour.WorldLoaded
+                          && !inVehicle
+                          && distance > Protocol.CorrectionApplyThresholdMeters;
+
+                if (applied)
+                {
+                    player.SetPosition(target, root.transform.rotation);
+                    _correctionsApplied++;
+                }
+                else
+                {
+                    _correctionsSkipped++;
+                }
+            }
+            else
+            {
+                _correctionsSkipped++;
+            }
+
+            // Même régime que les autres diagnostics : les premiers, puis un sur trente. Un log par
+            // correction à 20 Hz noierait le journal, et un log muet ne prouverait rien.
+            if (_correctionsReceived <= 3 || _correctionsReceived % 30 == 0)
+            {
+                string why;
+                if (player == null || root == null)
+                {
+                    why = "joueur local indisponible";
+                }
+                else if (!AutoLoadBehaviour.WorldLoaded)
+                {
+                    why = "monde pas encore chargé";
+                }
+                else if (player.inSeamoth || player.inExosuit)
+                {
+                    why = "joueur en véhicule";
+                }
+                else if (!applied)
+                {
+                    why = string.Format(
+                        CultureInfo.InvariantCulture,
+                        "sous le seuil ({0:F2} m)",
+                        Protocol.CorrectionApplyThresholdMeters);
+                }
+                else
+                {
+                    why = "appliquée";
+                }
+
+                var line = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[position] correction reçue (n°{0}) : écart={1:F2} m, appliquée={2} — {3} " +
+                    "(tick serveur={4}, motif : {5})",
+                    _correctionsReceived,
+                    distance,
+                    applied ? "oui" : "non",
+                    why,
+                    correction.ServerTick,
+                    correction.Reason);
+
+                if (applied)
+                {
+                    CoopClientPlugin.Log.LogInfo(line);
+                }
+                else
+                {
+                    CoopClientPlugin.Log.LogWarning(line);
+                }
             }
         }
 
@@ -845,6 +1034,8 @@ namespace Coop.Client
                 $"couleurPerso={_assignedColorIndex} snapshotsCreatures={_creatureSnapshotsReceived} etatsCreatures={_creatureStatesReceived} " +
                 $"snapshotsVehicules={_vehicleSnapshotsReceived} etatsVehicules={_vehicleStatesReceived} " +
                 $"vehicules={(_vehicles != null ? _vehicles.Describe() : "(aucun suivi)")} " +
+                $"correctionsRecues={_correctionsReceived} correctionsAppliquees={_correctionsApplied} " +
+                $"correctionsIgnorees={_correctionsSkipped} " +
                 $"creatures={(_creatures != null ? _creatures.Describe() : "(aucun suivi)")}");
         }
 
@@ -870,6 +1061,13 @@ namespace Coop.Client
 
         private void SendHandshake()
         {
+            // L'empreinte part avec le handshake : c'est elle qui transforme « les deux instances
+            // chargent la même sauvegarde » d'hypothèse en contrat vérifié (P0). Si elle n'est pas
+            // encore résolue, elle part vide — et le serveur la refuse nommément plutôt que de
+            // laisser une divergence silencieuse.
+            var save = SaveIdentitySource.Current
+                       ?? SaveIdentity.Create(string.Empty, string.Empty, -1, string.Empty);
+
             _writer.Reset();
             new HandshakeRequest
             {
@@ -877,10 +1075,12 @@ namespace Coop.Client
                 GameVersion = _gameVersion,
                 ModListHash = _modListHash,
                 Username = _username,
+                Save = save,
             }.Write(_writer);
 
             _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
-            CoopClientPlugin.Log.LogInfo($"[net] handshake envoyé (protocole v{Protocol.Version}, jeu={_gameVersion})");
+            CoopClientPlugin.Log.LogInfo(
+                $"[net] handshake envoyé (protocole v{Protocol.Version}, jeu={_gameVersion}, save={save.Describe()})");
         }
 
         private void OnNetworkReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod method)
@@ -959,6 +1159,14 @@ namespace Coop.Client
                         CoopClientPlugin.Log.LogInfo($"[ping] seq={pong.Sequence} rtt={rtt}ms tickServeur={pong.ServerTick}");
                     }
 
+                    break;
+                }
+
+                case MessageType.PlayerCorrection:
+                {
+                    var correction = PlayerCorrectionMessage.Read(reader);
+                    _correctionsReceived++;
+                    ApplyPositionCorrection(correction);
                     break;
                 }
 

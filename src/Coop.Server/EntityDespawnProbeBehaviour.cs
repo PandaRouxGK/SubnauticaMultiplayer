@@ -26,18 +26,23 @@ namespace Coop.Server
         private const float WorldTimeoutSeconds = 180f;
         private const float ClientWaitSeconds = 120f;
 
-        /// <summary>Nombre de clients attendus par l'étape O (deux).</summary>
-        private const int ExpectedClients = 2;
+        /// <summary>
+        /// Nombre de clients attendus avant de fabriquer : deux pour l'étape O (les deux doivent avoir le
+        /// véhicule avant sa destruction). L'étape Q n'en attend **qu'un**, pour que le second arrive
+        /// **après** le retrait et ne reçoive que le rejeu (P2) — `COOP_DESPAWN_CLIENTS=1`.
+        /// </summary>
+        private const int DefaultExpectedClients = 2;
         private const float FirstAttemptSeconds = 10f;
         private const float RetrySeconds = 5f;
         private const float SpawnTimeoutSeconds = 60f;
 
         /// <summary>
-        /// Délai entre la fabrication et la destruction : assez pour qu'un client qui charge encore son
-        /// monde ait créé l'objet (mesuré en N : ≈ 3 s après la réception, une fois le monde chargé), et
-        /// assez court pour que l'étape reste bornée.
+        /// Délai par défaut entre la fabrication et la destruction : assez pour qu'un client qui charge
+        /// encore son monde ait créé l'objet (mesuré en N : ≈ 3 s après la réception, une fois le monde
+        /// chargé), et assez court pour que l'étape reste bornée. `COOP_DESPAWN_DELAY` le raccourcit pour
+        /// l'étape Q, où le client tardif ne doit surtout pas être là au moment de la destruction.
         /// </summary>
-        private const float DestroyDelaySeconds = 40f;
+        private const float DefaultDestroyDelaySeconds = 40f;
 
         private IEnumerator Start()
         {
@@ -61,7 +66,8 @@ namespace Coop.Server
             // des clients qui n'ont jamais reçu la création. On attend **deux** clients quand il y en a deux
             // à attendre : mesuré à l'étape O, un délai fixe de 30 s après le **premier** client ne laissait
             // que 13 s au second, qui recevait alors le retrait avant d'avoir chargé son monde.
-            const int target = ExpectedClients;
+            var target = ExpectedClients();
+            var destroyDelay = DestroyDelaySeconds();
             var clientDeadline = Time.realtimeSinceStartup + ClientWaitSeconds;
             while (CoopServerPlugin.Network != null &&
                    CoopServerPlugin.Network.AcceptedClients < target &&
@@ -124,9 +130,9 @@ namespace Coop.Server
                     name,
                     key,
                     mechanism,
-                    DestroyDelaySeconds));
+                    destroyDelay));
 
-            yield return new WaitForSecondsRealtime(DestroyDelaySeconds);
+            yield return new WaitForSecondsRealtime(destroyDelay);
 
             if (created == null || created.gameObject == null)
             {
@@ -146,10 +152,28 @@ namespace Coop.Server
                     "(pos=({3:F1}, {4:F1}, {5:F1})) — le serveur doit l'annoncer aux clients.",
                     name,
                     key,
-                    DestroyDelaySeconds,
+                    destroyDelay,
                     position.x,
                     position.y,
                     position.z));
+        }
+
+        /// <summary>Clients à attendre avant de fabriquer (`COOP_DESPAWN_CLIENTS`, défaut 2).</summary>
+        private static int ExpectedClients()
+        {
+            var raw = Environment.GetEnvironmentVariable("COOP_DESPAWN_CLIENTS");
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) && value > 0
+                ? value
+                : DefaultExpectedClients;
+        }
+
+        /// <summary>Délai fabrication → destruction (`COOP_DESPAWN_DELAY`, défaut 40 s).</summary>
+        private static float DestroyDelaySeconds()
+        {
+            var raw = Environment.GetEnvironmentVariable("COOP_DESPAWN_DELAY");
+            return float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value >= 1f
+                ? value
+                : DefaultDestroyDelaySeconds;
         }
 
         private static HashSet<long> SnapshotKeys()

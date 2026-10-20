@@ -47,9 +47,27 @@ namespace Coop.Client
         /// </summary>
         private static readonly HashSet<long> Removed = new HashSet<long>();
 
+        /// <summary>
+        /// Ordre d'arrivée des clés retirées, pour borner <see cref="Removed"/> comme le carnet du serveur
+        /// (`256`). Sans cette borne, une session longue accumulait un hashset sans limite : une entrée par
+        /// objet ramassé. La règle ne change pas — une apparition tardive de la même clé reste refusée —
+        /// seule la mémoire est bornée, et les clés les plus anciennes (donc les moins susceptibles d'être
+        /// encore en course avec un chargement en cours) sont oubliées les premières.
+        /// </summary>
+        private static readonly Queue<long> RemovedOrder = new Queue<long>();
+
+        private const int MaxRememberedRemovals = 256;
+
         private static int _vehiclesRemoved;
         private static int _itemsRemoved;
         private static int _absent;
+
+        /// <summary>
+        /// Dernière clé **annoncée** retirée, qu'elle ait été trouvée localement ou non. Une sonde qui arrive
+        /// après le retrait (P2) doit pouvoir nommer l'entité dont elle constate l'absence : sans cette
+        /// affectation dans la branche « absente », la clé restait à 0 et la sonde concluait False alors que
+        /// l'absence était justement le comportement attendu.
+        /// </summary>
         private static long _lastRemovedKey;
         private static long _lastVehicleKey;
 
@@ -67,7 +85,7 @@ namespace Coop.Client
                 return;
             }
 
-            Removed.Add(msg.Key);
+            RememberRemoval(msg.Key);
 
             if (!AutoLoadBehaviour.WorldLoaded)
             {
@@ -79,6 +97,20 @@ namespace Coop.Client
             }
 
             Apply(msg);
+        }
+
+        private static void RememberRemoval(long key)
+        {
+            if (!Removed.Add(key))
+            {
+                return;
+            }
+
+            RemovedOrder.Enqueue(key);
+            while (RemovedOrder.Count > MaxRememberedRemovals)
+            {
+                Removed.Remove(RemovedOrder.Dequeue());
+            }
         }
 
         private void Update()
@@ -121,6 +153,7 @@ namespace Coop.Client
             if (vehicle == null)
             {
                 _absent++;
+                _lastRemovedKey = msg.Key;
                 Log.LogInfo(
                     $"[disparition] véhicule 0x{msg.Key:x16} absent localement — rien à retirer " +
                     $"(motif serveur « {msg.Reason} »). Ce client ne l'avait pas.");
@@ -147,6 +180,7 @@ namespace Coop.Client
             if (item == null)
             {
                 _absent++;
+                _lastRemovedKey = msg.Key;
                 Log.LogInfo(
                     $"[disparition] objet 0x{msg.Key:x16} absent du monde local — rien à retirer " +
                     $"(motif serveur « {msg.Reason} »). Il est peut-être dans un inventaire, ici.");

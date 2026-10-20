@@ -74,6 +74,7 @@
     <Compile Include="..\Shared\VehicleIdentity.cs" Link="VehicleIdentity.cs" />
     <Compile Include="..\Shared\ItemIdentity.cs" Link="ItemIdentity.cs" />
     <Compile Include="..\Shared\ViewDirection.cs" Link="ViewDirection.cs" />
+    <Compile Include="..\Shared\SaveIdentitySource.cs" Link="SaveIdentitySource.cs" />
   </ItemGroup>
 
 </Project>

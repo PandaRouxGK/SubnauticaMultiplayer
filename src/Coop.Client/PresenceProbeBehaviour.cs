@@ -45,8 +45,12 @@ namespace Coop.Client
         private const float WorldTimeoutSeconds = 240f;
 
         /// <summary>
-        /// Attente maximale (s) d'un **joueur distant** avant de poser l'équipement.
+        /// Attente maximale (s) d'un **autre client** avant de poser l'équipement.
         ///
+        /// L'hôte (id 9999) ne compte pas, même s'il expose un avatar : les mesures mutuelles de cette
+        /// sonde (falsification, nage) n'ont d'observateur que chez un **client**. Attendre le premier
+        /// joueur distant venu faisait conclure le client 1 sur l'avatar de l'hôte, 13 s après son entrée
+        /// dans le monde, alors que le client 2 chargeait encore — un faux négatif mesuré le 2026-10-19.
         /// Ce n'est pas du confort : c'est ce qui fait que l'autre client reçoit un **changement**
         /// d'équipement (et exécute donc `équipement appliqué sur l'avatar de …`) au lieu de le mémoriser à
         /// l'admission. Au-delà du délai, on pose quand même l'équipement — un client seul doit pouvoir
@@ -265,21 +269,26 @@ namespace Coop.Client
             yield return EquipAndVerify(Wanted, "posé");
             _equipOk = _lastEquipOk;
 
-            // — Attendre un vrai joueur distant : c'est ce qui transforme la pièce ajoutée en *changement* vu
-            //   par l'autre client, au lieu d'un état appris à l'admission.
+            // — Attendre un vrai **autre client** : c'est ce qui transforme la pièce ajoutée en *changement*
+            //   vu par l'autre client, au lieu d'un état appris à l'admission. L'hôte est exclu du compte :
+            //   son avatar satisfait « un joueur distant existe » sans jamais pouvoir observer une
+            //   falsification ni une nage (le serveur ne renvoie pas un message à son émetteur).
             var remoteDeadline = Time.realtimeSinceStartup + RemotePlayerWaitSeconds;
-            while (remotes != null && remotes.KnownRemoteCountForProbe == 0 && Time.realtimeSinceStartup < remoteDeadline)
+            while (remotes != null && remotes.KnownPeerCountForProbe == 0 && Time.realtimeSinceStartup < remoteDeadline)
             {
                 yield return new WaitForSeconds(1f);
             }
 
             var remotesKnown = remotes != null ? remotes.KnownRemoteCountForProbe : 0;
+            var peersKnown = remotes != null ? remotes.KnownPeerCountForProbe : 0;
             Log.LogInfo(
-                remotesKnown > 0
-                    ? $"[sonde] présence : {remotesKnown} joueur(s) distant(s) connu(s) — la pièce ajoutée sera un " +
-                      "changement reçu par l'autre client, pas un état appris à l'admission."
-                    : $"[sonde] présence : aucun joueur distant après {RemotePlayerWaitSeconds:F0}s — l'équipement est " +
-                      "posé et relu (mesurable seul), mais l'autre moitié ne le sera pas.");
+                peersKnown > 0
+                    ? $"[sonde] présence : {peersKnown} autre(s) client(s) connu(s) ({remotesKnown} joueur(s) " +
+                      "distant(s) au total, hôte compris) — la pièce ajoutée sera un changement reçu par " +
+                      "l'autre client, pas un état appris à l'admission."
+                    : $"[sonde] présence : aucun autre client après {RemotePlayerWaitSeconds:F0}s " +
+                      $"({remotesKnown} joueur(s) distant(s) connu(s), hôte compris) — l'équipement est " +
+                      "posé et relu (mesurable seul), mais les mesures mutuelles ne le seront pas.");
 
             // — Attendre un avatar distant, puis **changer** l'équipement : c'est ce changement-là que
             //   l'autre client verra arriver sur un avatar déjà instancié (ligne directe).
