@@ -213,10 +213,12 @@ namespace Coop.Server
 
         /// <summary>
         /// Objet du monde → joueur qui l'a réclamé le premier (M5). C'est la **décision** du serveur :
-        /// une clé déjà présente ne peut plus être accordée à quelqu'un d'autre. La carte vit aussi
-        /// longtemps que la session serveur — un objet ramassé ne réapparaît pas.
+        /// une clé déjà présente ne peut plus être accordée à quelqu'un d'autre. Le registre vit aussi
+        /// longtemps que la session serveur — un objet ramassé ne réapparaît pas — et libère les clés
+        /// d'un joueur qui part (<see cref="PickupClaimLedger.Release"/>), sinon elles resteraient
+        /// tenues au nom d'un joueur qui n'existe plus.
         /// </summary>
-        private readonly Dictionary<long, ushort> _pickupClaims = new Dictionary<long, ushort>();
+        private readonly PickupClaimLedger _pickupClaims = new PickupClaimLedger();
 
         /// <summary>Clés d'objets **déjà retirées** du monde simulé après un ramassage accordé (v11).</summary>
         private readonly HashSet<long> _pickupRemoved = new HashSet<long>();
@@ -704,31 +706,12 @@ namespace Coop.Server
                 // `REFUSÉE (déjà tenue par id 2)` — donc perdu pour tout le monde après une simple
                 // déconnexion. L'objet accordé est déjà retiré du monde serveur ; la réclamation ne
                 // protège plus rien une fois son détenteur parti.
-                List<long> released = null;
-                foreach (var pair in _pickupClaims)
+                var releasedClaims = _pickupClaims.Release(session.PlayerId);
+
+                if (releasedClaims > 0)
                 {
-                    if (pair.Value != session.PlayerId)
-                    {
-                        continue;
-                    }
-
-                    if (released == null)
-                    {
-                        released = new List<long>();
-                    }
-
-                    released.Add(pair.Key);
-                }
-
-                if (released != null)
-                {
-                    foreach (var key in released)
-                    {
-                        _pickupClaims.Remove(key);
-                    }
-
                     _log.LogInfo(
-                        $"[net] pickup : {released.Count} réclamation(s) libérée(s) par la déconnexion de " +
+                        $"[net] pickup : {releasedClaims} réclamation(s) libérée(s) par la déconnexion de " +
                         $"'{session.Username}'#{session.PlayerId} — les clés redeviennent réclamables.");
                 }
             }
@@ -1450,7 +1433,7 @@ namespace Coop.Server
             // échouerait et le motif deviendrait « objet inconnu » — vrai, mais muet sur le fait qu'un
             // joueur le détient. La carte des réclamations est le registre durable ; elle passe en premier.
             if (msg.ItemKey != 0L &&
-                _pickupClaims.TryGetValue(msg.ItemKey, out var alreadyHeld) &&
+                _pickupClaims.TryGetHolder(msg.ItemKey, out var alreadyHeld) &&
                 alreadyHeld != session.PlayerId)
             {
                 PickupClaimsRefused++;
@@ -1526,7 +1509,7 @@ namespace Coop.Server
                     $"[net] pickup : clé nulle réclamée par '{session.Username}'#{session.PlayerId} " +
                     $"('{tech}') -> REFUSÉE (aucune identité d'objet)");
             }
-            else if (_pickupClaims.TryGetValue(msg.ItemKey, out var existing))
+            else if (_pickupClaims.TryGetHolder(msg.ItemKey, out var existing))
             {
                 holder = existing;
                 granted = existing == session.PlayerId;
@@ -1549,7 +1532,7 @@ namespace Coop.Server
             }
             else
             {
-                _pickupClaims[msg.ItemKey] = session.PlayerId;
+                _pickupClaims.Claim(msg.ItemKey, session.PlayerId);
                 granted = true;
                 PickupClaimsGranted++;
                 _log.LogInfo(

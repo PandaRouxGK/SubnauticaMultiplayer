@@ -11,6 +11,37 @@ namespace Coop.Model.Tests
             Assert.Throws<System.ArgumentNullException>(() => MessageCodec.Encode(null));
         }
 
+        /// <summary>
+        /// Une écriture qui lève laisse des octets partiels dans le tampon. Le writer réutilisé doit
+        /// repartir de zéro (c'est `Reset` en tête d'`Encode`), pas recoller la suite au message
+        /// avorté — sinon un message refusé corromprait le suivant, silencieusement.
+        /// </summary>
+        [Fact]
+        public void Un_writer_reutilise_apres_une_ecriture_avortee_repart_proprement()
+        {
+            var writer = new PacketWriter();
+            var poison = new EntityDespawnMessage { Key = 0L, Kind = EntityKind.Item, Reason = "détruit" };
+            Assert.Throws<ProtocolException>(() => MessageCodec.Encode(poison.Write, writer));
+
+            var pong = new PongMessage
+            {
+                Sequence = 7L,
+                ClientTimeMs = 11L,
+                ServerTick = 13L,
+                ServerTimeMs = 17L,
+            };
+
+            var reused = MessageCodec.Encode(pong.Write, writer);
+            var fresh = MessageCodec.Encode(pong.Write);
+
+            Assert.Equal(fresh, reused);
+
+            var reader = new PacketReader(reused);
+            Assert.Equal((byte)MessageType.Pong, reader.ReadByte());
+            Assert.Equal(7L, PongMessage.Read(reader).Sequence);
+            Assert.Equal(0, reader.Remaining);
+        }
+
         [Fact]
         public void Une_disparition_avec_une_cle_nulle_est_refusee_a_l_ecriture()
         {

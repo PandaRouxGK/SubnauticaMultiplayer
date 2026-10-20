@@ -29,10 +29,10 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`entités créées ici=0`) ;
 - **contrat de contenu (P1bis)** : étape N verte — `définition vérifiée=True (hash=0x3da1f4bf782becdf)`
   et `définition falsifiée refusée=True` chez **les deux** clients, `définitions refusées=0` ;
-- **batterie des dix-sept étapes (A–Q)** : chaque étape a un verdict vert le 2026-10-19 (`PLAN.md` §46).
-  Une **dix-huitième**, `R`, prouve depuis le 2026-10-20 le refus P0 « deux sauvegardes différentes »
-  en jeu (`étape R : OK (62s)` : client 1 sur `slot0000` admis, client 2 sur `slot0001` refusé
-  nommément, `PLAN.md` §49.5).
+- **batterie des dix-huit étapes (A–R)** : les dix-sept premières ont un verdict vert le 2026-10-19
+  (`PLAN.md` §46) ; la **dix-huitième**, `R`, prouve depuis le 2026-10-20 le refus P0 « deux sauvegardes
+  différentes » en jeu (`étape R : OK (62s)` : client 1 sur `slot0000` admis, client 2 sur `slot0001`
+  refusé nommément, `PLAN.md` §49.5). `tools/verify.sh` sans `--only` lance bien les dix-huit.
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente

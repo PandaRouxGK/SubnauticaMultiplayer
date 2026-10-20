@@ -76,7 +76,10 @@ Cinq points de contrat que ces messages portent :
   joueur est **refusée** avec le détenteur nommé, et une réclamation du même joueur est idempotente. Le
   `PlayerId` du message n'est jamais recopié : la décision est attribuée à la session, et l'écart est
   compté (`ForgedPickupIds`) — la même règle que #10/#11/#12, appliquée à une **décision** et non à un
-  relais.
+  relais. Ce registre est `PickupClaimLedger` (`src/Coop.Model/`) : ses clés sont **libérées quand leur
+  détenteur se déconnecte** (`Release`, compte journalisé `réclamation(s) libérée(s) par la déconnexion`).
+  Sans cette libération, la clé restait refusée au nom d'un joueur qui n'existe plus — mesuré le
+  2026-10-20 : `REFUSÉE (déjà tenue par id 2)` après un simple kill du client.
 - **L'annonce d'une entité fabriquée transporte son identité (#19, v10).** Le serveur diffuse la clé
   **et** l'identifiant du jeu (`UniqueIdentifier.Id`) du véhicule qu'il vient de fabriquer, et le client
   **écrit cet identifiant** sur son exemplaire : sans lui, deux instances d'un même `spawn` calculeraient
@@ -402,7 +405,9 @@ clients** — un véhicule fabriqué **chez un client** n'existe pas dans le mon
   entité qu'il sait **déjà** résoudre. Le contrat v13 (`DefinitionHash`) vérifie cette définition ; il ne
   permet pas d'en livrer une nouvelle.
 - **La reconnexion n'est pas un cycle de vie** : depuis la v13 (P2, première moitié), un client admis
-  reçoit le rejeu des **apparitions et des retraits** ; il ne récupère ni ses claims de ramassage, ni un
-  volant, ni une resynchronisation de baseline. Un client relancé est un nouveau joueur.
+  reçoit le rejeu des **apparitions et des retraits** ; il ne récupère ni ses réclamations de ramassage, ni
+  un volant, ni une resynchronisation de baseline. Les réclamations du joueur **parti** sont libérées (pas
+  transmises) et un client relancé est un nouveau joueur, avec un nouvel id. Mesuré le 2026-10-20 :
+  `PlayerLeft`, `handshake ACCEPTÉ … id=3`, retraits rejoués, `avatarsActifs=1` (aucun fantôme).
 - **Version 13** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
   tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

@@ -3194,7 +3194,7 @@ pas. Confiance globale : **moyenne**. Rapport et transcript : `docs/council/`.
 ### 43.2 Ce qui ne va pas
 
 > **Photo datée du 2026-10-19**, conservée telle quelle. Les correctifs depuis sont au §44 (P0/P1/P1bis),
-> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**260** tests),
+> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**269** tests),
 > `PlayerPlausibility` garde la position, la sauvegarde est un contrat, et `verify.sh` compte désormais
 > 18 étapes (A–R, dont R pour le refus P0, §49).
 
@@ -3537,8 +3537,8 @@ Preuve (`étape L : OK (94s)`) :
 L'étape B affirme en plus que la sonde a attendu **un autre client** (`autre(s) client(s) connu(s)`) : si
 l'avatar de l'hôte redevenait un pair acceptable, l'étape échouerait en nommant la cause au lieu d'attendre
 un `verdict=False` tardif. `tools/check-verify-assertions.sh` couvre désormais B (fixture + retrait de la
-ligne) en plus de P, Q et N : dix échecs nommés après retrait de sept lignes exigées, et les dix-sept étapes
-déclarées restent toutes acceptées par `--only`.
+ligne) en plus de P, Q, N et R : **douze** échecs nommés après retrait de **neuf** lignes exigées (relevé le
+2026-10-20), et les **dix-huit** étapes déclarées restent toutes acceptées par `--only`.
 
 ---
 
@@ -3815,3 +3815,64 @@ et la réclamation de `#3` sur la clé retirée reçoit désormais le motif exac
 **État P2 après cette mesure : la reconnexion n'est plus « non mesurée » ; elle est mesurée, un défaut
 réel a été trouvé et corrigé.** Restent ouverts : une sonde de reconnexion avec verdict, un run avec
 véhicule, et la session longue.
+
+## 51. Session autonome du 2026-10-20 : le registre de ramassage devient testable (soir)
+
+Rien de nouveau dans le protocole : trois défauts de **couverture**, pas de conception.
+
+### 51.1 Le correctif P2 n'était couvert par aucun test
+
+La libération des réclamations à la déconnexion (`PLAN.md` §50.3) n'avait qu'une preuve : un run manuel
+de deux minutes, avec un kill. Un `Dictionary<long, ushort>` dans `ServerNetwork` ne se teste pas hors jeu.
+
+Extrait dans `src/Coop.Model/PickupClaimLedger.cs` (classe pure : `Claim`, `TryGetHolder`, `Release`,
+`KeysOf`, `Count`), consommé par `ServerNetwork`. Le serveur garde la résolution du monde, la portée, les
+journaux et la clé `0` ; le registre ne porte que la **décision**.
+
+`tests/Coop.Model.Tests/PickupClaimLedgerTests.cs` — sept cas, dont ceux qui auraient attrapé le défaut :
+
+| Cas | Ce qu'il fixe |
+|---|---|
+| première réclamation d'une clé libre | `GrantedFirst`, détenteur enregistré |
+| clé tenue par un autre | `RefusedOtherHolder`, détenteur **inchangé** |
+| même joueur, même clé | `GrantedSameHolder`, une seule entrée |
+| `Release` du joueur parti | rend **2**, laisse la clé du survivant, les deux autres redeviennent libres |
+| clé libérée puis réclamée par un autre | `GrantedFirst` pour le nouveau, l'ancien détenteur a disparu |
+| `Release` d'un joueur sans clé | rend **0**, ne touche à rien |
+| `KeysOf` | rend les clés du joueur demandé, pas celles des autres |
+
+### 51.2 Un writer réutilisé après une écriture refusée
+
+`MessageCodec.Encode` commence par `writer.Reset()`, donc un message qui lève au milieu de son écriture ne
+corrompt pas le suivant — mais rien ne le vérifiait. Test ajouté : `EntityDespawn` clé 0 (refusée) puis
+`Pong` sur le **même** writer ; les octets sont identiques à un encodage neuf, le message se relit, zéro
+octet restant.
+
+### 51.3 Une étape que le défaut de `verify.sh` sautait
+
+`tools/verify.sh` annonçait « les dix-huit étapes », mais ses deux messages d'usage et son défaut
+`${ONLY:-…}` s'arrêtaient à **Q**. Un run sans `--only` — le cas normal — **n'exécutait donc jamais R**.
+Corrigé (`…P,Q,R`) et vérifié par `bash -n` ; `README.md` dit désormais que le défaut lance les dix-huit.
+
+### 51.4 Ce qui n'est pas fait
+
+- Le registre n'est pas encore utilisé pour les **collisions de clé** (deux objets partageant une clé) :
+  c'est toujours compté, pas arbitré (§ M5).
+- Aucun nouveau run en jeu : le comportement du serveur est identique (même décision, même journal), seule
+  la **localisation** du code change. La preuve d'intégration reste le run §50.3.
+- La reconnexion complète reste ouverte : sonde dédiée avec verdict, volant tenu pendant le kill, baseline.
+
+### 51.5 Un opcode ne peut plus échapper au harnais de fuzz
+
+`MessageFuzzTests` avait une liste de 22 lecteurs et un test qui affirmait « 22 ». Un vingt-troisième
+message ajouté au protocole serait donc passé sans jamais être lu par le harnais. Le nouveau test compare
+les **noms** de `MessageType` aux noms de la liste : toute addition, tout renommage ou toute entrée
+orpheline casse la suite (`dotnet test` **269/269**).
+
+### 51.6 Le défaut sauté est désormais un échec de script
+
+`tools/check-verify-assertions.sh` comparait `--only` aux étapes déclarées, mais pas la liste **par
+défaut** — d'où le défaut du jour. Il extrait maintenant chaque `${ONLY:-…}` de `verify.sh` et exige
+l'égalité avec les étapes déclarées : sur une copie où `R` manque au défaut, le script rend
+`ECHEC : le défaut de verify.sh (ABCDEFGHIJKLMNOPQ) ne lance pas toutes les étapes déclarées (…R)` et le
+code de sortie 1.

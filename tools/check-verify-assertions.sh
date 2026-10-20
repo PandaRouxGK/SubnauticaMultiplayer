@@ -59,6 +59,23 @@ if [ -n "$missing" ]; then
 fi
 echo "OK   les ${#declared} étapes déclarées ($declared) sont toutes acceptées par --only"
 
+# 0 bis. Le **défaut** doit lancer les mêmes étapes. Le 2026-10-20, `--only` acceptait R mais la liste
+#    par défaut (`${ONLY:-…}`) s'arrêtait à Q : un run sans `--only` — le cas normal — sautait R en
+#    silence, alors que le script annonçait « les dix-huit étapes ». Ce contrôle-là l'aurait vu.
+defaults=$(grep -oE 'ONLY:-[A-Z](,[A-Z])*' "$VERIFY" | sed 's/^ONLY:-//' | tr -d ',' | sort -u)
+if [ -z "$defaults" ]; then
+    echo "ECHEC : aucune liste par défaut (\${ONLY:-…}) trouvée dans $VERIFY" >&2
+    exit 1
+fi
+while read -r defaultSteps; do
+    [ -z "$defaultSteps" ] && continue
+    if [ "$defaultSteps" != "$declared" ]; then
+        echo "ECHEC : le défaut de verify.sh ($defaultSteps) ne lance pas toutes les étapes déclarées ($declared)" >&2
+        exit 1
+    fi
+done <<< "$defaults"
+echo "OK   le défaut de verify.sh lance les ${#declared} étapes déclarées"
+
 write_fixtures() {
     cat > "$WORK_DIR/P/coop-client.log" <<'LOG'
 [net] handshake envoyé (protocole v13, jeu=2019.4.36f1, save=slot='slot0000' session='aae68629' changeSet=3 mode=Survival hash=0x1234)

@@ -38,6 +38,27 @@ namespace Coop.Model.Tests
             ("EntityDespawn", r => EntityDespawnMessage.Read(r)),
         };
 
+        /// <summary>
+        /// Le harnais de fuzz ne vaut que s'il couvre **tous** les messages. Un opcode ajouté à
+        /// `MessageType` sans entrée ici passerait les tests sans jamais être lu par personne :
+        /// l'égalité nom pour nom rend cet oubli impossible à commettre silencieusement.
+        /// </summary>
+        [Fact]
+        public void La_liste_des_lecteurs_couvre_exactement_les_opcodes_de_MessageType()
+        {
+            var opcodes = System.Enum.GetNames(typeof(MessageType));
+            var readers = new string[Readers.Length];
+
+            for (var index = 0; index < Readers.Length; index++)
+            {
+                readers[index] = Readers[index].Name;
+            }
+
+            Assert.Equal(
+                System.Linq.Enumerable.OrderBy(opcodes, name => name),
+                System.Linq.Enumerable.OrderBy(readers, name => name));
+        }
+
         [Fact]
         public void Aucun_paquet_aleatoire_ne_leve_autre_chose_qu_une_ProtocolException()
         {
