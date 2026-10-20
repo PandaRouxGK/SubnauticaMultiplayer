@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les dix-huit étapes, et ce que chacune prouve :
+# Les vingt-et-une étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -75,10 +75,21 @@
 #      `handshake REFUSÉ` — pendant que le client 1, lui, est admis. C'est le refus P0 mesuré en jeu : sans
 #      cette étape il n'était prouvé que hors jeu. La copie `slot0001` est supprimée à la fin de l'étape
 #      si elle n'existait pas avant.
+#   S  deux clients, **session** de sauvegarde différente -> le client 2 charge `slot0000` mais annonce
+#      `-coopsession=deadbeef` : le serveur refuse `session de sauvegarde différente` et le lui rend ; le
+#      client 1, lui, est admis. Le champ divergent est nommé, donc ni la version ni le pseudo ne peuvent
+#      satisfaire l'étape.
+#   T  deux clients, **mode** différent -> même sauvegarde, même session, `-coopgamemode=Freedom` sur le
+#      client 2 : refus `mode de jeu différent`, client 1 admis. P0 est alors mesuré sur slot, session et
+#      mode ; seul le refus `changeSet` plus ancien reste hors jeu.
+#   U  deux clients, client 2 **tué puis relancé** -> le serveur diffuse `PlayerLeft`, libère les
+#      réclamations du parti (`réclamation(s) libérée(s)`), admet le revenu sous un nouvel id, lui rejoue
+#      les retraits ; le survivant finit avec `joueursDistants=1 avatarsActifs=1` (aucun fantôme) et
+#      aucune clé n'est refusée au nom du mort. C'est P2, rejoué à chaque batterie.
 #
 # Usage :
-#   tools/verify.sh                    # les dix-huit étapes
-#   tools/verify.sh --only=B           # une seule étape (A..R, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les vingt-et-une étapes
+#   tools/verify.sh --only=B           # une seule étape (A..U, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -125,7 +136,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R  étapes à lancer (défaut : les dix-huit)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U  étapes à lancer (défaut : les vingt-et-une)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -145,9 +156,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKLMNOPQR,]*)
+    *[!ABCDEFGHIJKLMNOPQRSTU,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A..U, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -407,6 +418,59 @@ assert_e() {
         "client 1 : la copie avance à chaque image, pas par paliers de 10 Hz"
     expect E "$c2" 'image\(s\) animée\(s\)=[1-9][0-9]*' \
         "client 2 : la copie avance à chaque image, pas par paliers de 10 Hz"
+}
+
+assert_s() {
+    local c1="$WORK_DIR/S/coop-client.log"
+    local c2="$WORK_DIR/S/coop-client-2.log"
+    local server="$WORK_DIR/S/coop-server.log"
+
+    # Le client 2 a chargé **la même** sauvegarde que l'hôte : seule la session annoncée diffère.
+    expect S "$c2" 'empreinte ANNONCÉE différente de la sauvegarde chargée'         "client 2 : l'override est annoncé dans le journal, pas appliqué en silence"
+    expect S "$c2" "save=slot='slot0000' session='deadbeef'"         "client 2 : le handshake annonce la session imposée, sur le bon slot"
+
+    expect S "$server" "handshake REFUSÉ pour .*: session de sauvegarde différente \(client='deadbeef', serveur='[0-9A-Za-z_-]+'\)"         "le serveur refuse en nommant la session (et pas autre chose)"
+    expect S "$c2" "handshake REFUSÉ par le serveur : session de sauvegarde différente"         "client 2 : le refus lui est rendu"
+
+    expect S "$c1" "save=slot='slot0000'" "client 1 : il annonce la sauvegarde de l'hôte"
+    expect S "$c1" "handshake ACCEPTÉ" "client 1 : la même sauvegarde est admise dans le même run"
+    expect_missing S "$c2" "handshake ACCEPTÉ" "client 2 n'est jamais admis"
+}
+
+assert_t() {
+    local c1="$WORK_DIR/T/coop-client.log"
+    local c2="$WORK_DIR/T/coop-client-2.log"
+    local server="$WORK_DIR/T/coop-server.log"
+
+    expect T "$c2" 'empreinte ANNONCÉE différente de la sauvegarde chargée'         "client 2 : l'override de mode est annoncé"
+    expect T "$c2" "save=slot='slot0000'.*mode=Freedom"         "client 2 : le handshake annonce le mode imposé, sur le bon slot"
+
+    expect T "$server" "handshake REFUSÉ pour .*: mode de jeu différent \(client='Freedom', serveur='[A-Za-z]+'\)"         "le serveur refuse en nommant le mode"
+    expect T "$c2" "handshake REFUSÉ par le serveur : mode de jeu différent"         "client 2 : le refus lui est rendu"
+
+    expect T "$c1" "handshake ACCEPTÉ" "client 1 : admis dans le même run"
+    expect_missing T "$c2" "handshake ACCEPTÉ" "client 2 n'est jamais admis"
+}
+
+assert_u() {
+    local c1="$WORK_DIR/U/coop-client.log"
+    local c2b="$WORK_DIR/U/coop-client-2-b.log"
+    local server="$WORK_DIR/U/coop-server.log"
+
+    # Le départ du client tué est constaté **et diffusé** : sans cela, son avatar resterait chez l'autre.
+    expect U "$server" 'PlayerLeft diffusé pour .* \(id=2\)' "le serveur diffuse le départ du client tué"
+    expect U "$server" 'réclamation\(s\) libérée\(s\) par la déconnexion de .*#2'         "les clés réclamées par le client tué redeviennent réclamables (correctif P2)"
+    expect_missing U "$server" 'déjà tenue par id 2' "aucune clé n'est plus refusée au nom du joueur parti"
+
+    # Nouvelle session, nouvel id : le serveur ne réutilise pas celui du mort.
+    expect U "$server" "handshake ACCEPTÉ : .*\(id=3" "le client relancé est admis sous un nouvel id"
+    expect U "$c2b" 'handshake ACCEPTÉ' "côté client : la reconnexion est acceptée"
+    expect U "$c2b" 'MONDE CHARGÉ' "côté client : le monde est rechargé"
+    expect U "$server" 'disparition : [0-9]+ entité\(s\) disparue\(s\) rejouée\(s\) pour .*#3'         "les retraits sont rejoués au client revenu"
+
+    # Aucun fantôme : l'état final du survivant ne compte qu'un joueur distant et un avatar.
+    expect_last U "$c1" '\[ping\] id=' 'joueursDistants=1 avatarsActifs=1'         "chez le survivant : un seul joueur distant, un seul avatar actif"
+    expect U "$c1" 'id=3' "le survivant voit le nouveau venu (id=3), pas l'ancien"
 }
 
 assert_d() {
@@ -783,9 +847,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1041,7 +1105,7 @@ if wanted L "$ONLY"; then
     args=(--clients=2 --together --timeout=240
         "--host-args=-coopmode=server"
         "--client-args=-coopmode=client -coopdebug=pickup"
-        "--client-marker=\\[sonde\\] ramassage : verdict=")
+        "--client-marker=\[sonde\] ramassage : verdict=")
     if [ "$NO_BUILD" = 1 ]; then
         args+=(--no-build)
     fi
@@ -1125,6 +1189,54 @@ if wanted R "$ONLY"; then
             echo "  sauvegarde : slot0001 (copie de test) supprimée"
         fi
     fi
+fi
+
+if wanted S "$ONLY"; then
+    # P0 — la **session** de sauvegarde. Le client 2 charge slot0000 comme l'hôte, mais annonce
+    # `-coopsession=deadbeef` : le slot est identique, donc aucun autre motif ne peut produire ce refus.
+    args=(--clients=2 --together --timeout=300
+        "--host-args=-coopmode=server -batchmode -nographics -coopsave=slot0000"
+        "--client-args=-coopmode=client -coopsave=slot0000"
+        "--client-2-args=-coopmode=client -coopsave=slot0000 -coopsession=deadbeef"
+        "--client-marker=connecté au serveur|handshake REFUSÉ")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step S "refus P0 : une session de sauvegarde différente est refusée, la même est admise" assert_s "${args[@]}"
+fi
+
+if wanted T "$ONLY"; then
+    # P0 — le **mode**. Même sauvegarde, même session, seul le mode annoncé change (`Freedom` contre le
+    # mode de la fixture). L'ordre de `SaveCompatibility.Explain` garantit que le refus nomme le mode si
+    # les champs précédents sont identiques : c'est ce que les assertions vérifient.
+    args=(--clients=2 --together --timeout=300
+        "--host-args=-coopmode=server -batchmode -nographics -coopsave=slot0000"
+        "--client-args=-coopmode=client -coopsave=slot0000"
+        "--client-2-args=-coopmode=client -coopsave=slot0000 -coopgamemode=Freedom"
+        "--client-marker=connecté au serveur|handshake REFUSÉ")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step T "refus P0 : un mode de jeu différent est refusé, le mode identique est admis" assert_t "${args[@]}"
+fi
+
+if wanted U "$ONLY"; then
+    # P2 — reconnexion. Deux clients avec la sonde de ramassage ; le client 2 est **tué** une fois sa
+    # sonde finie, le serveur doit diffuser son départ et libérer ses réclamations, puis il revient
+    # **sans sonde** (journal `coop-client-2-b.log`) et le survivant ne doit garder aucun avatar fantôme.
+    args=(--clients=2 --together --timeout=420
+        "--host-args=-coopmode=server -batchmode -nographics -coopsave=slot0000"
+        "--client-args=-coopmode=client -coopsave=slot0000 -coopdebug=pickup"
+        "--client-2-args=-coopmode=client -coopsave=slot0000 -coopdebug=pickup"
+        "--client-marker=\[sonde\] ramassage : verdict="
+        "--reconnect=2"
+        "--reconnect-args=-coopmode=client -coopsave=slot0000"
+        "--reconnect-marker=connecté au serveur"
+        "--reconnect-settle=12")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step U "reconnexion P2 : départ diffusé, réclamations libérées, retour admis, aucun fantôme" assert_u "${args[@]}"
 fi
 
 if wanted D "$ONLY"; then

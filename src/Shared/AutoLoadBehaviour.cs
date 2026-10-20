@@ -152,12 +152,27 @@ namespace Coop.Shared
             // L'empreinte est publiée **avant** le chargement : c'est la même sauvegarde que celle que
             // `Load()` va ouvrir, et le client doit l'envoyer dans son handshake (P0). Publier après
             // reviendrait à décrire une partie qu'on a déjà commencé à modifier.
-            SaveIdentitySource.Publish(
-                Coop.Model.SaveIdentity.Create(
-                    target.saveGame,
-                    target.sessionId,
-                    target.changeSet,
-                    target.gameMode.ToString()));
+            var identity = Coop.Model.SaveIdentity.Create(
+                target.saveGame,
+                target.sessionId,
+                target.changeSet,
+                target.gameMode.ToString());
+
+            // Overrides de **mesure** (`-coopsession`, `-coopgamemode`) : le client annonce autre chose
+            // que ce qu'il a chargé, pour éprouver les refus P0 session et mode sans dupliquer une
+            // sauvegarde. Sans override, l'empreinte est celle de la partie ouverte.
+            identity = Coop.Model.SaveIdentityOverride.Apply(identity);
+
+            if (!string.Equals(identity.SessionId, target.sessionId, System.StringComparison.Ordinal)
+                || !string.Equals(identity.GameMode, target.gameMode.ToString(), System.StringComparison.OrdinalIgnoreCase))
+            {
+                Log.LogWarning(
+                    $"[monde] empreinte ANNONCÉE différente de la sauvegarde chargée (mesure P0) : " +
+                    $"session='{identity.SessionId}' mode='{identity.GameMode}' " +
+                    $"(réels : session='{target.sessionId}' mode='{target.gameMode}').");
+            }
+
+            SaveIdentitySource.Publish(identity);
 
             Log.LogInfo($"[monde] >>> chargement de la sauvegarde '{target.saveGame}'");
             target.Load();

@@ -3194,7 +3194,7 @@ pas. Confiance globale : **moyenne**. Rapport et transcript : `docs/council/`.
 ### 43.2 Ce qui ne va pas
 
 > **Photo datée du 2026-10-19**, conservée telle quelle. Les correctifs depuis sont au §44 (P0/P1/P1bis),
-> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**271** tests),
+> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**280** tests),
 > `PlayerPlausibility` garde la position, la sauvegarde est un contrat, et `verify.sh` compte désormais
 > 18 étapes (A–R, dont R pour le refus P0, §49).
 
@@ -3867,7 +3867,7 @@ Corrigé (`…P,Q,R`) et vérifié par `bash -n` ; `README.md` dit désormais qu
 `MessageFuzzTests` avait une liste de 22 lecteurs et un test qui affirmait « 22 ». Un vingt-troisième
 message ajouté au protocole serait donc passé sans jamais être lu par le harnais. Le nouveau test compare
 les **noms** de `MessageType` aux noms de la liste : toute addition, tout renommage ou toute entrée
-orpheline casse la suite (`dotnet test` **271/271**).
+orpheline casse la suite (`dotnet test` **280/280**).
 
 ### 51.6 Le défaut sauté est désormais un échec de script
 
@@ -3876,3 +3876,59 @@ défaut** — d'où le défaut du jour. Il extrait maintenant chaque `${ONLY:-�
 l'égalité avec les étapes déclarées : sur une copie où `R` manque au défaut, le script rend
 `ECHEC : le défaut de verify.sh (ABCDEFGHIJKLMNOPQ) ne lance pas toutes les étapes déclarées (…R)` et le
 code de sortie 1.
+
+## 52. P0 clos pour la session et le mode, P2 rejouable (2026-10-20, soir)
+
+### 52.1 P0 : les refus session et mode, mesurés en jeu
+
+Le refus de slot était prouvé par l'étape R ; session et mode ne l'étaient qu'hors jeu, parce que les
+trois champs vivent dans le même fichier de sauvegarde : on ne peut pas faire diverger un seul champ
+sans dupliquer la partie.
+
+Deux arguments de **sonde** (et rien d'autre) permettent de l'annoncer : `-coopsession=<id>` et
+`-coopgamemode=<mode>` (`src/Coop.Model/SaveIdentityOverride.cs`, appliqués dans `AutoLoadBehaviour`
+juste avant `Publish`). Le client charge **la même** sauvegarde, mais son handshake annonce autre chose ;
+`SaveCompatibility.Explain` refuse alors sur le champ divergent, dans l'ordre slot → session → mode.
+Le journal dit explicitement que l'empreinte annoncée diffère de la partie chargée, donc la mesure ne
+peut pas passer pour une vraie partie.
+
+| Étape | Run | Relevé |
+|---|---|---|
+| **S** (session) | 62 s, vert | client 2 : `handshake REFUSÉ par le serveur : session de sauvegarde différente (client='deadbeef', serveur='aae68629-…')` ; serveur : `handshake REFUSÉ pour 'killi' : session de sauvegarde différente (…)` ; client 1 `handshake ACCEPTÉ` dans le même run |
+| **T** (mode) | 62 s, vert | client 2 : `handshake REFUSÉ par le serveur : mode de jeu différent (client='Freedom', serveur='Creative')` ; client 1 admis ; `expect_missing` confirme que le client 2 n'est jamais admis |
+
+Les deux étapes nomment le champ refusé : ni un refus de version, ni un refus de pseudo ne peut les
+satisfaire. Les tests d'`SaveIdentityOverride` (**9**) couvrent la lecture des arguments, le rejet des
+valeurs douteuses et le recalcul du hash.
+
+Reste hors jeu : le refus `changeSet` plus ancien (le probe devrait annoncer un entier antérieur — même
+mécanisme, non exercé).
+
+### 52.2 P2 : la reconnexion devient une étape rejouable
+
+`tools/run-session.sh` gagne `--reconnect=N` : une fois le client N prêt, il est **tué**, le harnais
+attend `PlayerLeft diffusé` côté serveur, attend `--reconnect-delay`, puis le relance sous un journal
+séparé (`coop-client-N-b.log`) et attend son marqueur. Ce qui était une manipulation manuelle est
+maintenant une étape de la batterie.
+
+**Étape U** (130 s, verte) : deux clients avec la sonde de ramassage, client 2 tué puis relancé sans
+sonde. Assertions, toutes relevées :
+
+```
+[net] PlayerLeft diffusé pour 'killi' (id=2)
+[net] pickup : 1 réclamation(s) libérée(s) par la déconnexion de 'killi'#2 — les clés redeviennent réclamables.
+[net] handshake ACCEPTÉ : 'killi' (id=3, …)
+[net] disparition : 2 entité(s) disparue(s) rejouée(s) pour 'killi'#3
+client 1 (dernier [ping]) : joueursDistants=1 avatarsActifs=1
+```
+
+`expect_missing` vérifie qu'aucune clé n'est refusée au nom du joueur parti (`déjà tenue par id 2`) : la
+régression du §50.3 est donc gardée par une étape, plus seulement par un test du registre.
+
+### 52.3 Ce qui n'est pas encore couvert
+
+- Aucun volant n'est tenu pendant le kill : la libération des conducteurs reste couverte par le code et
+  l'étape M, pas par U.
+- Pas de resynchronisation de baseline (aucune n'existe) : la reconnexion repose sur les snapshots
+  continus et le rejeu des retraits.
+- Les étapes S, T et U allongent la batterie : 21 étapes, ~3 min de plus qu'avant en run complet.

@@ -66,6 +66,16 @@ TOGETHER=0
 # Écart (s) entre deux lancements de clients en mode `--together`.
 CLIENT_STAGGER=6
 
+# Reconnexion (P2) : tuer un client déjà prêt, attendre que le serveur le constate, puis le relancer
+# avec d'autres arguments (sans sonde, le plus souvent) et attendre son marqueur. Zéro = désactivé.
+RECONNECT_CLIENT=0
+RECONNECT_ARGS=""
+RECONNECT_MARKER=""
+RECONNECT_DELAY=6
+RECONNECT_SERVER_MARKER="PlayerLeft diffusé"
+RECONNECT_SETTLE=10
+LAST_WINPID=""
+
 # Marqueur de « le monde est chargé » d'un client — sert à ne pas lancer le suivant pendant ce chargement.
 CLIENT_WORLD_MARKER="MONDE CHARGÉ"
 HOST_ENV=""
@@ -97,6 +107,13 @@ Options :
   --keep                ne tue pas les instances à la fin (leurs PID restent enregistrés)
   --kill-all            arrête TOUS les Subnautica.exe de la machine, pas seulement ceux lancés ici
   --no-build            ne reconstruit pas et ne redéploie pas les DLL
+  --reconnect=N         tue le client N une fois prêt, attend « PlayerLeft diffusé » côté serveur,
+                        puis le relance (journal coop-client-N-b.log) — scénario P2
+  --reconnect-args="…"  arguments du client relancé (défaut : ceux du client N)
+  --reconnect-marker=REGEX  marqueur attendu du client relancé (défaut : CLIENT_MARKER)
+  --reconnect-delay=S   attente entre le kill et la relance (défaut : 6)
+  --reconnect-server-marker=REGEX  ligne serveur attendue après le kill (défaut : PlayerLeft diffusé)
+  --reconnect-settle=S  attente après la relance pour laisser les compteurs se réécrire (défaut : 10)
 OPTIONS
 }
 
@@ -116,6 +133,12 @@ for argument in "$@"; do
         --keep) KEEP=1 ;;
         --kill-all) KILL_ALL=1 ;;
         --no-build) BUILD=0 ;;
+        --reconnect=*) RECONNECT_CLIENT="${argument#*=}" ;;
+        --reconnect-args=*) RECONNECT_ARGS="${argument#*=}" ;;
+        --reconnect-marker=*) RECONNECT_MARKER="${argument#*=}" ;;
+        --reconnect-delay=*) RECONNECT_DELAY="${argument#*=}" ;;
+        --reconnect-server-marker=*) RECONNECT_SERVER_MARKER="${argument#*=}" ;;
+        --reconnect-settle=*) RECONNECT_SETTLE="${argument#*=}" ;;
         -h|--help) usage; exit 0 ;;
         *) echo "option inconnue : $argument (--help)" >&2; exit 2 ;;
     esac
@@ -211,6 +234,7 @@ launch_instance() {
 
     mkdir -p "$LOG_DIR"
     echo "$winpid" >> "$PID_STATE"
+    LAST_WINPID="$winpid"
     echo "      $label lancé (PID Windows $winpid)"
     return 0
 }
@@ -338,6 +362,7 @@ echo "[3/3] $CLIENTS client(s) : $CLIENT_ARGS${CLIENT_ARGS_2:+ (clients 2+ : $CL
 client_logs=()
 client_suffixes=()
 client_starts=()
+client_pids=()
 
 for index in $(seq 1 "$CLIENTS"); do
     if [ "$index" = "1" ]; then
@@ -353,6 +378,7 @@ for index in $(seq 1 "$CLIENTS"); do
         client_suffixes+=("-$index")
     fi
     client_starts+=("0")
+    client_pids+=("")
 done
 
 launch_client() { # $1 = index
@@ -371,6 +397,8 @@ launch_client() { # $1 = index
     else
         launch_instance "" "$client_args" "client $index" || true
     fi
+
+    client_pids[$((index - 1))]="$LAST_WINPID"
 }
 
 wait_client() { # $1 = index
@@ -406,6 +434,53 @@ else
     done
 fi
 
+# Reconnexion (P2) : le client N est **tué** une fois sa sonde terminée, le serveur doit le constater
+# (`PlayerLeft diffusé`), puis il revient sous un nouveau journal. Sans ce mécanisme, la reconnexion ne
+# pouvait être mesurée qu'à la main — c'est-à-dire pas rejouée, donc pas une preuve.
+if [ "$RECONNECT_CLIENT" -gt 0 ]; then
+    idx="$RECONNECT_CLIENT"
+    if [ "$idx" -gt "$CLIENTS" ]; then
+        echo "[échec] --reconnect=$idx : seuls $CLIENTS client(s) sont lancés" >&2
+        kill_instances
+        exit 2
+    fi
+
+    pid="${client_pids[$((idx - 1))]}"
+    if [ -z "$pid" ]; then
+        echo "[échec] --reconnect=$idx : PID du client $idx inconnu (lancement raté ?)" >&2
+        kill_instances
+        exit 1
+    fi
+
+    echo "[reconnexion] arrêt forcé du client $idx (PID Windows $pid)"
+    taskkill //F //PID "$pid" >/dev/null 2>&1 || true
+
+    # Le PID tué ne doit plus figurer dans l'état : la fin de run l'ignorerait sinon (et dirait
+    # « taskkill a échoué » sur un processus qui n'existe plus).
+    if [ -f "$PID_STATE" ]; then
+        grep -vx "$pid" "$PID_STATE" > "$PID_STATE.tmp" 2>/dev/null || true
+        mv -f "$PID_STATE.tmp" "$PID_STATE"
+    fi
+
+    wait_for_marker "$SERVER_LOG" "$RECONNECT_SERVER_MARKER" "serveur (déconnexion du client $idx)"         || { kill_instances; exit 1; }
+
+    echo "[reconnexion] attente de ${RECONNECT_DELAY}s avant la relance du client $idx"
+    sleep "$RECONNECT_DELAY"
+
+    reconnect_args="$RECONNECT_ARGS"
+    [ -n "$reconnect_args" ] || reconnect_args="$CLIENT_ARGS"
+    reconnect_marker="$RECONNECT_MARKER"
+    [ -n "$reconnect_marker" ] || reconnect_marker="$CLIENT_MARKER"
+    reconnect_log="$LOG_DIR/coop-client-$idx-b.log"
+
+    launch_instance "COOP_LOG_SUFFIX=-$idx-b" "$reconnect_args" "client $idx (relancé)" || true
+    client_pids[$((idx - 1))]="$LAST_WINPID"
+    wait_for_marker "$reconnect_log" "$reconnect_marker" "client $idx (relancé)"         || { kill_instances; exit 1; }
+
+    echo "[reconnexion] client $idx revenu — ${RECONNECT_SETTLE}s pour que les compteurs se réécrivent"
+    sleep "$RECONNECT_SETTLE"
+fi
+
 # Autotest de l'hôte : il se déclenche après la connexion des clients et finit bien après. Sans cette
 # attente, le harnais rendrait la main, `verify.sh` copierait les journaux, et le verdict — écrit plus tard —
 # ne serait pas dans la copie.
@@ -426,6 +501,12 @@ if [ -n "$FAIL_IF" ]; then
             client_log="$CLIENT_LOG"
         else
             client_log="$LOG_DIR/coop-client-$index.log"
+        fi
+
+        if [ "$RECONNECT_CLIENT" = "$index" ] && [ -s "$LOG_DIR/coop-client-$index-b.log" ]; then
+            # Le client relancé écrit dans un journal séparé : sans cette ligne, un verdict False
+            # émis après la reconnexion passerait sous le radar.
+            client_log="$LOG_DIR/coop-client-$index-b.log"
         fi
 
         if [ -s "$client_log" ] && grep -qE "$FAIL_IF" "$client_log"; then
