@@ -74,6 +74,8 @@ RECONNECT_MARKER=""
 RECONNECT_DELAY=6
 RECONNECT_SERVER_MARKER="PlayerLeft diffusé"
 RECONNECT_SETTLE=10
+# Attente après les marqueurs, avant l'arrêt : laisse les compteurs périodiques (`[ping]`) se réécrire.
+SETTLE=0
 LAST_WINPID=""
 
 # Marqueur de « le monde est chargé » d'un client — sert à ne pas lancer le suivant pendant ce chargement.
@@ -114,6 +116,7 @@ Options :
   --reconnect-delay=S   attente entre le kill et la relance (défaut : 6)
   --reconnect-server-marker=REGEX  ligne serveur attendue après le kill (défaut : PlayerLeft diffusé)
   --reconnect-settle=S  attente après la relance pour laisser les compteurs se réécrire (défaut : 10)
+  --settle=S            attente après les marqueurs, avant l'arrêt (défaut : 0) — pour lire un compteur
 OPTIONS
 }
 
@@ -139,6 +142,7 @@ for argument in "$@"; do
         --reconnect-delay=*) RECONNECT_DELAY="${argument#*=}" ;;
         --reconnect-server-marker=*) RECONNECT_SERVER_MARKER="${argument#*=}" ;;
         --reconnect-settle=*) RECONNECT_SETTLE="${argument#*=}" ;;
+        --settle=*) SETTLE="${argument#*=}" ;;
         -h|--help) usage; exit 0 ;;
         *) echo "option inconnue : $argument (--help)" >&2; exit 2 ;;
     esac
@@ -479,6 +483,11 @@ if [ "$RECONNECT_CLIENT" -gt 0 ]; then
 
     echo "[reconnexion] client $idx revenu — ${RECONNECT_SETTLE}s pour que les compteurs se réécrivent"
     sleep "$RECONNECT_SETTLE"
+fi
+
+if [ "$SETTLE" -gt 0 ]; then
+    echo "[attente] ${SETTLE}s après les marqueurs (compteurs périodiques)"
+    sleep "$SETTLE"
 fi
 
 # Autotest de l'hôte : il se déclenche après la connexion des clients et finit bien après. Sans cette

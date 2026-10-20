@@ -29,11 +29,12 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`entités créées ici=0`) ;
 - **contrat de contenu (P1bis)** : étape N verte — `définition vérifiée=True (hash=0x3da1f4bf782becdf)`
   et `définition falsifiée refusée=True` chez **les deux** clients, `définitions refusées=0` ;
-- **batterie des vingt-et-une étapes (A–U)** : les dix-sept premières ont un verdict vert le 2026-10-19
+- **batterie des vingt-trois étapes (A–W)** : les dix-sept premières ont un verdict vert le 2026-10-19
   (`PLAN.md` §46) ; `R`, `S` et `T` prouvent les refus P0 en jeu (slot, session, mode — client divergent
-  refusé nommément, l'autre admis), et `U` la reconnexion (départ diffusé, réclamations libérées, retour
-  admis, aucun avatar fantôme) (`PLAN.md` §49.5 et §52). `tools/verify.sh` sans `--only` lance bien les
-  vingt-et-une.
+  refusé nommément, l'autre admis), `U` la reconnexion (départ diffusé, réclamations libérées, retour admis, aucun avatar fantôme),
+  `V` la présence à **trois** clients et `W` les créatures à trois clients, avec les états périmés
+  écartés (`PLAN.md` §49.5, §52 et §53). `tools/verify.sh` sans `--only` lance bien les
+  vingt-trois.
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
@@ -110,8 +111,8 @@ avec `-nographics`. Ce n'est pas un binaire serveur.
 | `dotnet run --project tools/NetProbe -- selftest` | secondes | aller-retour de chaque message, refus des paquets tronqués et des `NaN` |
 | `tools/deploy.sh --verify` | secondes | binaires installés = manifeste |
 | `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only` **et** lancées par le défaut, et les assertions P/Q/N/B/R acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
-| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–U) |
-| `tools/verify.sh` | long (~40 min) | les vingt-et-une étapes, un seul verdict |
+| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–W) |
+| `tools/verify.sh` | long (~45 min) | les vingt-trois étapes, un seul verdict |
 
 `verify.sh` et `run-session.sh` lancent de vraies instances : ils exigent le jeu, une sauvegarde
 `slot0000` et Git Bash. Les tests hors jeu ne remplacent pas ces runs — ils les rendent moins

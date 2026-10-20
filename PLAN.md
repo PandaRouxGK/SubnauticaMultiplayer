@@ -3932,3 +3932,53 @@ régression du §50.3 est donc gardée par une étape, plus seulement par un tes
 - Pas de resynchronisation de baseline (aucune n'existe) : la reconnexion repose sur les snapshots
   continus et le rejeu des retraits.
 - Les étapes S, T et U allongent la batterie : 21 étapes, ~3 min de plus qu'avant en run complet.
+
+## 53. M2 et M3 à trois clients ; un défaut de livraison hors ordre corrigé (2026-10-20, nuit)
+
+### 53.1 M2 : la présence n'avait jamais été mesurée à trois
+
+`RemotePlayerManager` et l'équipement fonctionnaient à deux ; au-delà, rien ne le prouvait. L'étape **V**
+(trois instances, sans sonde — la sonde d'avatar attend un pair précis et ne conclut pas à trois)
+affirme l'état réel : le serveur admet `id=3`, et **chez les trois** clients le dernier compteur `[ping]`
+vaut `joueursDistants=2 avatarsActifs=2`. Run vert en 104 s, avec `--settle=12` (nouvelle option de
+`run-session.sh`) pour laisser les compteurs se réécrire après le dernier marqueur.
+
+Ce que V ne dit pas : que les avatars se **voient** bouger (la sonde d'avatar le fait à deux et ne
+conclut pas à trois). Le nombre d'avatars et leur mouvement sont deux faits distincts.
+
+### 53.2 M3 : trois clients révélaient un vrai défaut — les états périmés
+
+Première tentative de l'étape **W** (trois clients, sonde de créatures) : le client 1 rendait `True`,
+les clients 2 et 3 `False` avec
+
+```
+écart max=2.60m sur états consécutifs ('Peeper(Clone)' … sur un intervalle de 0.03s)
+écart max=2.99m … 0.04s
+```
+
+soit 65–87 m/s pour des créatures qui nagent à 2 m/s. Le serveur, lui, n'avait pas bougé : `CreatureSnapshot`
+voyage en **Unreliable**, et un état plus ancien livré après un plus récent **reculait** la créature. À
+deux clients la rafale était rare ; à trois, elle arrivait en continu.
+
+**Correctif** (`RemoteCreatureManager.OnSnapshot`) : un état dont le `ServerTick` n'est pas **postérieur**
+au dernier appliqué est ignoré et compté (`états périmés ignorés=`). Un serveur **redémarré** repart de
+zéro : un recul de plus de 2 000 ticks (100 s à 20 Hz) est traité comme un redémarrage, pas comme du
+retard, sinon un client ne verrait plus jamais rien après la relance du serveur.
+
+**Seconde mesure** : étape W verte en 126 s, `verdict=True` chez les trois, avec `états périmés
+ignorés=2591 / 1704 / 951`. Le défaut n'était donc pas une mesure fragile : 951 à 2 591 états par client
+écrivaient une position ancienne.
+
+### 53.3 Ce qui n'est pas fait, et pourquoi
+
+- **M4** (véhicule) : énergie, modules/upgrades et dégâts ne sont **pas** transportés. Ce n'est pas une
+  omission de mesure : il faut un message (ou des champs dans `VehicleSnapshot`) et leur application côté
+  client — un changement de protocole, pas une heure de travail. `spawn` initié par un client n'existe
+  toujours pas.
+- **M5** (ramassage) : objets mobiles mal jugés, collisions de clé **comptées mais non arbitrées**, retour
+  arrière jamais exercé. Les collisions demandent un schéma d'identité (clé + position ?) et une décision
+  de conception, pas un correctif local.
+- **M6** (contenu) : le pipeline AssetBundle est **gelé** par décision (§43.5) jusqu'à ce qu'une session
+  réelle de 30 minutes tienne. Le livrer ici reviendrait à rouvrir un gel sans la mesure qui le justifie.
+- Les trois clients de V et W ne testent **pas** 4 à 10 joueurs ; `MaxClients=10` reste non exercé au-delà
+  de trois.

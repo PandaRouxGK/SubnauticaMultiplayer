@@ -57,7 +57,7 @@ par l'hôte, disparaît chez les deux clients — ou n'y a jamais été créé, 
 avec l'empreinte de sauvegarde acceptée dans le même run).
 Depuis le
 2026-10-17, `tools/run-session.sh` **fait échouer le run** (code de sortie 1) dès qu'un `verdict=False`
-apparaît dans un journal de client, et `tools/verify.sh` rejoue les **vingt-et-une** runs (A avatar + créatures,
+apparaît dans un journal de client, et `tools/verify.sh` rejoue les **vingt-trois** runs (A avatar + créatures,
 B deux clients en sonde de présence, C plafond abaissé, D autotest de la garde cliente, E créatures seules à
 deux clients, F sauvegarde de l'hôte, G Seamoth en mouvement, H serveur dédié, I menu Échap du client,
 J diffusion et interpolation du véhicule, K clé nominale du Seamoth de la sauvegarde, L ramassage

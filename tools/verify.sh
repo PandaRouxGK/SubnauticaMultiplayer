@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les vingt-et-une étapes, et ce que chacune prouve :
+# Les vingt-trois étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -88,8 +88,8 @@
 #      aucune clé n'est refusée au nom du mort. C'est P2, rejoué à chaque batterie.
 #
 # Usage :
-#   tools/verify.sh                    # les vingt-et-une étapes
-#   tools/verify.sh --only=B           # une seule étape (A..U, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les vingt-trois étapes
+#   tools/verify.sh --only=B           # une seule étape (A..W, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -136,7 +136,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U  étapes à lancer (défaut : les vingt-et-une)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W  étapes à lancer (défaut : les vingt-trois)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -156,7 +156,7 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKLMNOPQRSTU,]*)
+    *[!ABCDEFGHIJKLMNOPQRSTUVW,]*)
         if [ -n "$ONLY" ]; then
             echo "étape inconnue : « $ONLY » (attendu A..U, ou une liste comme A,D)" >&2
             exit 2
@@ -471,6 +471,33 @@ assert_u() {
     # Aucun fantôme : l'état final du survivant ne compte qu'un joueur distant et un avatar.
     expect_last U "$c1" '\[ping\] id=' 'joueursDistants=1 avatarsActifs=1'         "chez le survivant : un seul joueur distant, un seul avatar actif"
     expect U "$c1" 'id=3' "le survivant voit le nouveau venu (id=3), pas l'ancien"
+}
+
+assert_v() {
+    local c1="$WORK_DIR/V/coop-client.log"
+    local c2="$WORK_DIR/V/coop-client-2.log"
+    local c3="$WORK_DIR/V/coop-client-3.log"
+    local server="$WORK_DIR/V/coop-server.log"
+
+    # M2 au-delà de deux joueurs : la présence n'avait **jamais** été mesurée à trois instances. Les
+    # compteurs périodiques `[ping]` sont l'état, et chacun doit voir **deux** avatars actifs.
+    expect V "$server" "handshake ACCEPTÉ : .*\(id=3" "le serveur admet un troisième joueur, id=3"
+    expect_last V "$c1" '\[ping\] id=' 'joueursDistants=2 avatarsActifs=2' "client 1 : deux joueurs distants, deux avatars actifs"
+    expect_last V "$c2" '\[ping\] id=' 'joueursDistants=2 avatarsActifs=2' "client 2 : deux joueurs distants, deux avatars actifs"
+    expect_last V "$c3" '\[ping\] id=' 'joueursDistants=2 avatarsActifs=2' "client 3 : deux joueurs distants, deux avatars actifs"
+    expect_any V 'avatar instancié pour' "les avatars distants sont instanciés chez les trois" "$c1" "$c2" "$c3"
+}
+
+assert_w() {
+    local c1="$WORK_DIR/W/coop-client.log"
+    local c2="$WORK_DIR/W/coop-client-2.log"
+    local c3="$WORK_DIR/W/coop-client-3.log"
+
+    # M3 à trois clients : la même créature suivie par trois instances. Le verdict de la sonde contient
+    # déjà `clé inconnue=0` et `clés partagées=0` : pas besoin de les répéter ici.
+    expect W "$c1" '\[sonde\] créatures : verdict=True' "client 1 : le suivi des créatures rend True à trois clients"
+    expect W "$c2" '\[sonde\] créatures : verdict=True' "client 2 : le suivi des créatures rend True à trois clients"
+    expect W "$c3" '\[sonde\] créatures : verdict=True' "client 3 : le suivi des créatures rend True à trois clients"
 }
 
 assert_d() {
@@ -847,9 +874,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1237,6 +1264,33 @@ if wanted U "$ONLY"; then
         args+=(--no-build)
     fi
     step U "reconnexion P2 : départ diffusé, réclamations libérées, retour admis, aucun fantôme" assert_u "${args[@]}"
+fi
+
+if wanted V "$ONLY"; then
+    # M2 — présence à **trois** instances. Sans sonde : la sonde d'avatar attend un pair précis et ne
+    # rend pas son verdict à trois ; les compteurs `[ping]` disent la même chose (deux avatars actifs),
+    # et `--settle` laisse le temps de les réécrire après le dernier marqueur.
+    args=(--clients=3 --together --timeout=480 --settle=12
+        "--host-args=-coopmode=server -batchmode -nographics -coopsave=slot0000"
+        "--client-args=-coopmode=client -coopsave=slot0000"
+        "--client-marker=avatar instancié pour")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step V "présence à trois clients : chacun voit les deux autres avatars" assert_v "${args[@]}"
+fi
+
+if wanted W "$ONLY"; then
+    # M3 — créatures à **trois** instances. Séparée de V : la sonde de présence téléporte le joueur, ce
+    # qui change le rayon de pertinence et fabrique des clés inconnues qui ne disent rien du suivi.
+    args=(--clients=3 --together --timeout=480
+        "--host-args=-coopmode=server -batchmode -nographics -coopsave=slot0000"
+        "--client-args=-coopmode=client -coopsave=slot0000 -coopdebug=creature"
+        "--client-marker=\[sonde\] créatures : verdict=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step W "créatures à trois clients : les trois suivent le même monde" assert_w "${args[@]}"
 fi
 
 if wanted D "$ONLY"; then

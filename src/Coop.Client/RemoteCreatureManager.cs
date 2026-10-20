@@ -215,6 +215,17 @@ namespace Coop.Client
         private float _nextReport;
 
         private long _snapshotsReceived;
+
+        /// <summary>
+        /// Dernier tick serveur appliqué. Les états de créatures voyagent en Unreliable : un état plus
+        /// ancien peut arriver après un plus récent, et l'appliquer ferait **reculer** la créature d'un
+        /// bond. Mesuré à trois clients le 2026-10-20 : 2,60 m et 2,99 m sur 0,03–0,04 s, ce qui faisait
+        /// échouer le verdict M3 alors que le serveur, lui, n'avait pas bougé.
+        /// </summary>
+        private long _lastSnapshotTick;
+
+        /// <summary>États ignorés parce que leur tick n'était pas postérieur au dernier appliqué.</summary>
+        private int _staleSnapshots;
         private long _statesReceived;
         private long _statesMatched;
         private long _statesUnknownKey;
@@ -637,6 +648,21 @@ namespace Coop.Client
                 return 0;
             }
 
+            // Un état dont le tick n'avance pas est un état **déjà vu**, livré en retard. On l'ignore
+            // plutôt que d'écrire une position ancienne par-dessus une récente. La seule exception est un
+            // serveur **redémarré** : son tick repart de zéro, donc un recul de plus de 2 000 ticks (100 s
+            // à 20 Hz) est traité comme un redémarrage, pas comme du retard.
+            if (message.ServerTick > 0)
+            {
+                if (message.ServerTick <= _lastSnapshotTick && _lastSnapshotTick - message.ServerTick < 2000)
+                {
+                    _staleSnapshots++;
+                    return 0;
+                }
+
+                _lastSnapshotTick = message.ServerTick;
+            }
+
             _snapshotsReceived++;
             EnsureRegistry();
             var applied = 0;
@@ -969,6 +995,7 @@ namespace Coop.Client
                 MaxPendingCutDriftLabel,
                 MaxLocalJitterMeters,
                 MaxLocalJitterLabel)
+            + $", états périmés ignorés={_staleSnapshots}"
             + ", " + DescribeFrameSteps();
 
         /// <summary>Une ligne par créature adoptée : c'est ce qu'une sonde peut vérifier.</summary>
