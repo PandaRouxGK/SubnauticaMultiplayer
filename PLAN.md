@@ -14,8 +14,8 @@
 | Injection | **BepInEx 5.x** (Mono, pas IL2CPP) + **HarmonyX** | Le jeu est Mono → le path le plus simple |
 | Transport | **LiteNetLib** (UDP, canaux reliable/unreliable) | Même choix que Nitrox, éprouvé |
 | Tick serveur | 20 Hz (50 ms) simulation / 20 Hz snapshots | Compromis latence/bande passante |
-| Autorité | Serveur = vérité sur **tout** sauf le transform du joueur local | Corrige la faille de Nitrox |
-| Prédiction client | Joueur local uniquement, avec réconciliation | Obligatoire pour le ressenti |
+| Autorité | Serveur = vérité sur **tout** sauf le transform du joueur local, qui est **client-authoritatif** — relayé aujourd'hui **sans borne** (constaté au §43.3) | Corrige la faille de Nitrox **partout sauf sur le joueur** ; la revendication est corrigée au §43.3, et P1 doit la rendre vraie |
+| Prédiction client | Joueur local uniquement — **sans réconciliation à ce jour** (§43.3) | Obligatoire pour le ressenti, et c'est le trou d'autorité qui reste |
 | Sérialisation | Binaire compact maison (quantization) ou MemoryPack | Snapshot à 20 Hz → compacité critique |
 | Contenu | Registre serveur + **AssetBundles** poussés au client + hash de mod-list au login | Un seul mod serveur à maintenir |
 | Runtime cible | Plugins client/serveur en **net472** (à vérifier en inspectant le jeu) ; lib partagée en `netstandard2.0` | Doit matcher le runtime Mono du jeu |
@@ -147,6 +147,10 @@ serveur qu'une valeur falsifiée est rejetée.
 
 M3 est le vrai test : si une créature pilotée serveur avec IA client désactivée rend
 correctement chez 2 clients, l'architecture est bonne pour tout le reste.
+
+> **Révisé au §43 (2026-10-19)** : ce tableau est un journal de jalons, pas l'état courant. La séquence
+> qui fait foi pour la suite est celle du §43.5, et **M6-contenu (AssetBundles) y est gelé** jusqu'à ce
+> qu'une session réelle de 30 minutes tienne.
 
 ---
 
@@ -3161,3 +3165,509 @@ Deux propriétés manquaient, et toutes deux se voient à l'usage :
   souvent retiré **avant** que le refusé ne clique : l'étape L accepte donc « geste bloqué » ou « objet déjà
   retiré », et nomme lequel des deux a joué. L'assertion n'a pas été affaiblie à l'aveugle : les deux issues
   sont écrites par la sonde, et l'objet ne rentre pas dans l'inventaire dans les deux cas.
+
+---
+
+## 43. Revue d'architecture : ce qui tient, ce qui ne tient pas, et la suite replanifiée (2026-10-19)
+
+**Verdict : la couche de transport est bonne et la question de recherche est tranchée ; c'est l'ordre du plan
+qui est faux.** Le projet mesure des **systèmes**, pas une **session** : 21 672 lignes, 15 étapes de
+vérification (16 runs), **aucun test hors-jeu**, et aucune preuve qu'on puisse jouer trente minutes à deux. La suite est
+replanifiée autour de trois propriétés manquantes — la prémisse de sauvegarde, l'autorité réelle du joueur, le
+cycle de vie de session — **avant** tout nouveau mécanisme.
+
+Cette revue est un conseil à cinq lentilles (Red Team, First Principles, Expansionist, Outsider, Executor),
+revue croisée anonymisée et débat forcé. Accord **4,0/5** sur la destination, désaccord réel sur le premier
+pas. Confiance globale : **moyenne**. Rapport et transcript : `docs/council/`.
+
+### 43.1 Ce qui est bon, et qu'il ne faut pas défaire
+
+| Actif | Preuve |
+|---|---|
+| Les deux inconnues les plus lourdes ont été levées **en premier** | M0/M0.5 : plugin chargé, monde chargé sans intervention, tick à pas fixe 20 Hz mesuré à 19,98–20,03/s (§9–§11) |
+| La discipline de preuve | chaque affirmation porte son instrument ; les sondes rendent `verdict=True/False` ; `verify.sh` rend **un** verdict ; `expect_last`, restauration de fixture et tests discriminants ont corrigé de faux verts (§35, §37) |
+| Les décisions sont écrites avec ce qui les falsifierait | §28 (identité des créatures), §33 (cadence vs interpolation), §39 (portée de ramassage) |
+| La séparation `Coop.Model` / Unity | protocole binaire écrit à la main, testable sans socket ; 35/35 au selftest |
+| Les victoires mesurées, pas regardées | interpolation véhicule `0,39 m/image` et `0` image ≥ 1 m sur 10 259 ; créatures `0,19 m` max ; pickup refusé nommé ; spawn/despawn avec identité serveur ; volant libéré et repris en 0,65 s |
+| Les limites sont écrites, pas cachées | chaque chapitre a sa section « ce que ça ne prouve pas » |
+
+### 43.2 Ce qui ne va pas
+
+> **Photo datée du 2026-10-19**, conservée telle quelle. Les correctifs depuis sont au §44 (P0/P1/P1bis),
+> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**243** tests),
+> `PlayerPlausibility` garde la position, la sauvegarde est un contrat, et `verify.sh` compte 17 étapes.
+
+| Défaut | Fait | Conséquence |
+|---|---|---|
+| **Aucun test hors-jeu** | `tests/` était prévu au §2, n'existe pas ; 21 672 lignes, 0 test unitaire | la seule porte est une batterie de 16 runs in-game (un run complet documenté : **1 559 s**), Windows + jeu + `slot0000` ; boucle de feedback lente, non portable, non-CI |
+| **Le joueur n'est pas autoritaire** | `HandlePlayerPosition` ne vérifie que NaN/Inf et l'ordre des séquences : toute position est relayée ; aucune prédiction/réconciliation dans le code | la promesse fondatrice (« corrige la faille de Nitrox ») est fausse sur la surface la plus visible ; un client peut se téléporter |
+| **La prémisse « même sauvegarde » n'est pas un contrat** | le handshake vérifie `gameVersion` + `modListHash`, **pas** la sauvegarde ; l'identité des créatures en dépend entièrement (§28) | un client qui charge une vieille sauvegarde désynchronise **silencieusement** ; c'est la panne la plus probable d'une session de 30 min |
+| **Pas de cycle de vie de session** | pas de reconnexion/resync ; les claims, retraits et conducteurs vivent avec la session ; les runs durent 40–240 s | fuites, dérives et pertes d'état longues ne sont pas mesurées ; un client qui plante ne revient pas proprement |
+| **Monolithes** | `ServerNetwork.cs` 3 098 l. (handshake, présence, créatures, véhicules, pickup, volants, spawn/despawn, contrôle launcher) ; `Messages.cs` 1 185 ; `Plugin.cs` client 1 157 ; `AvatarProbe` 1 912 | chaque système futur édite le même fichier ; le coût de chaque correctif augmente |
+| **M6 contenu est le prochain puits** | coût inconnu (AssetBundles Unity 2019), identité d'une entité custom non conçue, contrat de version non exprimable par l'égalité stricte v12 | des semaines possibles sans réponse mesurable, alors que la boucle de jeu n'est pas prouvée |
+| **Rien n'est distribuable** | launcher hors dépôt, pas de `README`, pas de `.sln`, pas de script de déploiement, pas de CI ; hôte = instance complète (~2 Go, device D3D11) | le test prescrit (« deux humains, 30 min ») ne peut pas être délégué : le bus factor reste à 1 |
+| **Le plan n'est plus pilotable** | `PLAN.md` = journal de 3 261 lignes / 216 Ko, sans état courant ni prochaines étapes en tête ; le tableau §6 est un journal de statuts, pas un état courant — il faut lire sept sections pour savoir ce qui reste ouvert | un lecteur (ou l'auteur dans trois semaines) ne sait pas ce qui reste |
+| **Trois schémas d'identité** | créature = prefab + position d'apparition ; véhicule = `UniqueIdentifier` ; objet = les deux avec repli, 5 clés partagées sur 449 objets | chaque schéma a ses limites ; aucune couche d'identité commune |
+
+### 43.3 La revendication à corriger, tout de suite
+
+Le mot **« autoritaire »** est exact pour les créatures (IA coupée), les véhicules (position, droit de conduire),
+le ramassage, la couleur, la création et le retrait d'entités. Il est **faux pour le joueur** : le serveur
+relaie sa position et ne peut pas la contredire.
+
+Décision : soit on rend la revendication vraie (P1 ci-dessous), soit on la renomme. Une heuristique de
+plausibilité ne s'appelle pas « autorité » : elle s'appelle **garde anti-téléport**, et c'est ce que le code
+dira. Tant que la mesure n'existe pas, le §1 et `docs/authority.md` portent la correction — faite le 2026-10-19 :
+le §1 dit que le joueur n'est qu'un relais, et `docs/authority.md` §2 ouvre une ligne « Position du joueur »
+qui nomme ce que le client décide encore et l'expérience qui le fermerait.
+
+### 43.4 Deux portes, pas une
+
+Le conseil a refusé de faire de la session de 30 minutes l'unique porte : elle juge l'intégration, pas la
+régression, et elle est trop lente pour être une boucle.
+
+1. **Porte de régression — rejeu hors jeu.** Enregistrer les flux d'une vraie session et les rejouer dans les
+   mêmes gestionnaires, sans Unity, avec une horloge simulée. **On ne supprime aucune assertion** : on change
+   leur substrat. Objectif : quelques secondes, n'importe quelle machine, exécutable en CI. Commencer par
+   créatures, véhicules et décisions de ramassage (les gestionnaires ne consomment que messages + temps).
+2. **Porte d'intégration — session réelle de 30 min à deux**, installée **par un second humain**, avec un
+   manifeste de version épinglé. C'est un jalon, pas une boucle : on le passe quand il passe, et il ne
+   remplace pas la porte 1.
+
+### 43.5 Séquence replanifiée
+
+| # | Travail | Jours | Critère observable |
+|---|---|---|---|
+| **P0** | La prémisse devient un contrat : empreinte de sauvegarde au handshake (slot + hash), **refus nommé** ; `README` + script de déploiement des DLL + manifeste épinglé ; `.sln` + `tests/Coop.Model.Tests` | 1–2 | deux instances sur des sauvegardes différentes sont **refusées avec leur raison** ; `dotnet test` vert en < 10 s |
+| **P1** | Autorité joueur honnête : borne vitesse/déplacement, `PlayerCorrection`, compteur de faux positifs | 2–3 | une téléportation de 100 m est **refusée et journalisée** ; une nage normale produit **0 correction** ; le taux de faux positifs est publié |
+| **P1bis** | Contrat de contenu (pas le pipeline) : une entité définie par le serveur, identité + `definitionHash`, instanciée par un client qui ne l'a jamais vue | 1 | le client instancie et **retrouve l'entité par sa clé** ; un hash divergent est refusé |
+| **P2** | Reconnexion : rejeu des claims, apparitions, retraits, conducteurs à l'admission + resync de baseline | 2 | client tué puis relancé : `N claim(s) rejoué(s)`, aucun fantôme, objet absent des deux côtés |
+| **P3** | Substrat de vérification : enregistreur + rejeu hors jeu, **toutes les assertions conservées** | 3–5 | une régression d'interpolation est détectée **hors du jeu**, en secondes |
+| **P4** | Session réelle 30 min, deux joueurs, installation faite par le second | 2–3 | `0 exception`, `0 désync > 2 m`, sauvegarde + rechargement + reconnexion, verdict unique |
+| **P5** | Découper `ServerNetwork` en cinq systèmes (présence, créatures, véhicules, pickup, spawn/despawn) | 5 | `verify.sh` identique, comportement inchangé, aucun nouveau message |
+| — | **Gelé** : pipeline AssetBundles, énergie/modules de véhicule, nouvelles sondes, host migration, matchmaking | — | se rouvre après P4, sur décision explicite |
+
+Ordonnancement : **P0 → P1 → P2 → P4** est le chemin critique (≈ 8–11 jours) ; **P1bis** et **P3** se font en
+parallèle ; **P5** après, parce que découper un fichier qu'on va encore corriger coûte deux fois.
+
+> **État au 2026-10-19** : P0 (nominal), P1 et P1bis sont **mesurés en jeu** (étapes P et N, §45.6) ;
+> le refus P0 sur deux sauvegardes différentes reste hors jeu. P2 est **entamé** (rejeu des retraits,
+> §45) mais la reconnexion complète n'est pas faite. P3, P4 et P5 restent à faire.
+
+### 43.6 Critères d'arrêt
+
+1. Après P1, **plus de 5 % de corrections** sur une nage normale → la validation a posteriori n'est pas viable :
+   il faudra transporter les entrées (chantier d'une autre nature), et la revendication « autoritaire » doit
+   être abandonnée pour le joueur.
+2. Session de 30 min avec **plus de 3 désyncs > 2 m** ou **une exception par 10 min** → le problème n'est pas
+   « il manque un message » : la simulation des deux mondes diverge structurellement, et la prémisse « deux
+   instances chargent le même monde » doit être reposée.
+3. Un rechargement qui **perd les clés d'entités** → l'identité par position/identifiant sérialisé n'est pas
+   stable ; M6 (création, retrait, contenu) est bâti sur du sable.
+
+### 43.7 Ce que cette revue ne prouve pas
+
+- Les avis sont des raisonnements sur les documents et le code, **pas** des mesures : rien ici ne remplace un run.
+- Le coût des étapes est une estimation, pas une mesure ; l'auteur est seul, et P5 peut doubler.
+- La question « pourquoi ce projet » (apprendre, jouer entre amis, servir de base à des serveurs moddés) change
+  la réponse sur le contenu : la revue tranche pour « jouer d'abord », et le dit.
+- Le rejeu hors jeu n'est **pas** démontré faisable pour `RemoteAvatar`/équipement (dépendances Unity non
+  mesurées) : P3 commence par les flux qui s'y prêtent, et son périmètre peut se réduire.
+
+---
+
+## 44. P0, P1 et P1bis : implémentation et preuves hors jeu (2026-10-19, mesures en jeu au §45.6)
+
+**Verdict : les trois fermetures sont dans le code, en protocole v13, et elles sont vérifiables sans lancer
+le jeu — 35 tests, 61 assertions de selftest, un déploiement qui détecte une DLL altérée. Aucune n'est encore
+validée par un run en jeu, et c'est écrit tel quel.**
+
+### 44.1 Ce qui a été ajouté
+
+| Brique | Fichiers | Ce que ça change |
+|---|---|---|
+| Empreinte de sauvegarde (P0) | `Coop.Model/SaveIdentity.cs`, `HandshakeRequest.Save`, `Shared/SaveIdentitySource.cs`, `AutoLoadBehaviour` | le handshake transporte `slot + session + changeSet + mode` ; une partie différente, plus ancienne ou altérée est **refusée avec son motif** ; le serveur admet sous réserve pendant la course de démarrage, puis vérifie au tick |
+| Garde de plausibilité (P1) | `Coop.Model/PlayerPlausibility.cs`, `PlayerCorrectionMessage` (#22), `ServerNetwork.HandlePlayerPosition`, `Coop.Client/Plugin.cs` | le serveur juge le déplacement contre la **dernière position acceptée**, refuse, renvoie la position acceptée, publie son taux de refus ; 3 refus consécutifs = resynchronisation, budget de 5/min au-delà duquel la session est éjectée ; le client applique la correction hors véhicule et au-delà de 0,75 m |
+| Contrat de contenu (P1bis) | `Coop.Model/EntityDefinition.cs`, `EntitySpawnMessage.DefinitionHash/Scale`, `EntitySpawner`, sonde d'apparition | le serveur transporte la définition et son empreinte ; le client **recalcule** et refuse avant d'instancier ; la sonde prouve le contrôle en falsifiant une définition |
+| Distribution (P0) | `README.md`, `tools/deploy.sh`, `tools/mod.manifest.json`, `SubnauticaCoop.sln` | construire, installer, vérifier une installation (sha256 + version de protocole) et lancer, sans lire le plan |
+
+### 44.2 Ce qui est prouvé, et par quelle commande
+
+| Vérification | Résultat relevé le 2026-10-19 |
+|---|---|
+| `dotnet build SubnauticaCoop.sln` | vert, 0 avertissement, 0 erreur (Model netstandard2.0, plugins net472, tests net9.0) |
+| `dotnet test` | **35/35**, 0 échec, ~75 ms — identité de sauvegarde et ses douze cas de compatibilité, plausibilité (nominal, téléport, rafale, trou, véhicule, NaN), définition (canonical, quantification au mm, refus), messages (aller-retour, troncature, `definitionHash=0`) |
+| `dotnet run --project tools/NetProbe -- selftest` | **61 assertions OK**, `SELFTEST: SUCCES`, exit 0 — dont `PlayerCorrection` et `EntitySpawn` avec hash |
+| `tools/deploy.sh --game-dir=<temp>` | installe 4 DLL et écrit un manifeste (protocole v13, commit, sha256, tailles) |
+| `tools/deploy.sh --verify` | conforme ; après avoir ajouté un octet à `Coop.Client.dll`, **exit 1** et le fichier fautif nommé |
+
+### 44.3 Décisions à ne pas défaire
+
+- **L'empreinte est une lignée, pas un hash de fichiers.** L'hôte sauvegarde pendant la session : un client
+  tardif lit une sauvegarde plus récente que celle que le serveur a lue au démarrage. Un hash de fichiers
+  refuserait toute reconnexion légitime ; `changeSet` client **≥** serveur est donc accepté, client plus
+  ancien refusé.
+- **Le client attend son empreinte, mais pas indéfiniment.** 20 s, puis il se connecte quand même et le refus
+  est nommé — une attente infinie serait un blocage silencieux.
+- **La garde est un anti-téléport, pas une autorité de simulation.** 15 m/s hors véhicule, 35 m/s en véhicule,
+  2 m de tolérance. Un client qui ment sur `InSeamoth` obtient la borne véhicule : c'est une limite écrite,
+  pas un oubli. Le mot « autoritaire » ne vaut pour le joueur que dans le sens « le serveur peut refuser ».
+- **Une correction reçue en véhicule n'est pas appliquée.** Le siège appartient au véhicule ; téléporter le
+  joueur le désolidariserait. Elle est comptée, pas ignorée.
+- **Le hash de définition couvre une forme canonique quantifiée au millimètre**, pas les flottants bruts :
+  deux runtimes (Mono du jeu, .NET des tests) doivent calculer le même hash. Un `ToString` culturel ferait
+  échouer un hash correct.
+
+### 44.4 Ce que ce chapitre ne prouve pas
+
+- **Mis à jour le 2026-10-19** : l'application d'une correction, le chemin nominal de l'empreinte
+  (étape P) et le contrat de contenu (étape N) sont **mesurés en jeu** (§45.6). Reste prouvé hors jeu
+  seulement : le refus d'une sauvegarde **différente**.
+- **Le taux de faux positifs de P1 n'existe pas encore** : la nage de 6 s de l'étape P a produit 0
+  correction, mais une session de 30 min n'est pas mesurée. C'est le critère d'arrêt à 5 % qui tranchera.
+- **Le contrat de contenu n'est pas un pipeline** : aucun AssetBundle, aucun prefab inconnu du client. Il
+  vérifie ce que le client sait déjà résoudre.
+- **La distribution n'a pas été testée sur une seconde machine** : le script a été exercé sur un dossier de
+  jeu temporaire, pas par un autre humain qui installe et lance.
+- **Le protocole passe à v13** : un client v12 est refusé au handshake (comportement voulu), et les deux
+  plugins doivent être redéployés ensemble (`tools/deploy.sh`).
+
+### 44.5 Prochain pas
+
+1. **P2** (reconnexion : claims, apparitions, retraits, conducteurs) — entamé le 2026-10-19 : les retraits
+   sont rejoués à l'admission (§45) ; restent les claims, les conducteurs et la resynchronisation de base.
+2. **Valider P0/P1/P1bis en jeu** — P0 (nominal), P1 et P1bis sont mesurés par les étapes P et N, vertes le 2026-10-19 (§45.6) ; le refus P0 sur deux sauvegardes différentes reste à mesurer.
+3. Ensuite seulement P4 (session de 30 min) puis P5 (découpage).
+
+---
+
+## 45. P2 (rejeu des retraits) et mesures en jeu de P0/P1/P1bis (2026-10-19)
+
+**Verdict : P, Q et N ont tourné en jeu et sont vertes — 61 s, 124 s et 78 s (§45.6). P0 (chemin
+nominal), P1, P1bis et le rejeu P2 sont donc mesurés ; le refus P0 sur deux sauvegardes différentes
+reste prouvé hors jeu, et la reconnexion complète reste à faire.**
+
+### 45.1 Rejeu des retraits (P2, première moitié)
+
+| Brique | Fichier | Ce que ça change |
+|---|---|---|
+| Carnet de retraits | `Coop.Server/ServerNetwork.cs` (`RememberDespawn`, `_despawnedEntities`, `_despawnOrder`, `MaxRememberedDespawns = 256`) | un client admis reçoit les `EntityDespawn` survenus **avant** son arrivée, après le rejeu des apparitions ; sans ça il recharge la même sauvegarde et voit réapparaître l'objet ramassé ou le véhicule détruit |
+| Cohérence des deux carnets | `RememberSpawn` / `BroadcastDespawn` | une clé recréée efface son ancien retrait (sinon le client créerait puis retirerait) ; une clé retirée sort du carnet d'apparitions ; la file de retraits ne contient jamais deux fois la même clé (sinon une éviction consommerait un créneau sans rien retirer) |
+
+Ce qui reste de P2 et n'est pas fait : rejeu des **claims** de ramassage, des **conducteurs**, et
+resynchronisation de **baseline** pour un client tué puis relancé. Le critère du §43.5 (`N claim(s)
+rejoué(s)`, aucun fantôme) n'est donc pas atteignable aujourd'hui.
+
+### 45.2 Sonde de position (`-coopdebug=position`)
+
+`Coop.Client/PositionProbeBehaviour.cs`, dans **deux phases**, avec un verdict unique :
+
+1. **nage nominale** — 30 pas de 0,25 m toutes les 0,2 s (1,25 m/s, 6 s) : critère `0 correction reçue` ;
+2. **téléport** — 100 m maintenus 0,6 s image par image pour que l'envoi 20 Hz les émette : attente jusqu'à
+   10 s d'une correction **reçue et appliquée**, puis restauration de la position d'origine.
+
+La sonde refuse de conclure si le joueur est en véhicule (la correction n'y est pas appliquée, par décision
+du §44.3) et échoue nommément si le monde, le joueur ou le handshake manque. Elle lit les compteurs réels
+`CorrectionsReceived/Applied/Skipped` exposés par `ClientNetworkBehaviour`. **Limite** : elle n'affiche pas
+l'écart en mètres de la correction appliquée — le gestionnaire réseau le journalise mais ne le stocke pas.
+
+### 45.3 Étapes P et Q de `tools/verify.sh`
+
+**P** — un client, hôte `-batchmode -nographics`, ~300 s : `save=slot=` et `empreinte de sauvegarde
+acceptée` (P0 nominal), `[sonde] position : verdict=True`, `nage normale : 0 correction`, `téléport de
+100 m : correction reçue=True, appliquée=True`, puis côté serveur `position REFUSÉE`, `RESYNCHRONISÉE` et
+le taux publié.
+
+**Q** — deux clients **séquentiels**, hôte `-coopdebug=despawn` avec `COOP_DESPAWN_CLIENTS=1` : la sonde
+de l'hôte attend un seul client, fabrique le Seamoth, le détruit 20 s plus tard (`COOP_DESPAWN_DELAY`) ; le client 1 ne rend la
+main qu'après son verdict, donc le client 2 démarre **après** le retrait. Les assertions portent sur le
+rejeu (`[net] disparition : 1 entité(s) disparue(s) rejouée(s) pour …#2`), sur l'absence locale chez le
+tardif (`véhicule 0x… absent localement`), sur son verdict, et sur l'**absence** de `[spawn] entité créée`
+— un fantôme serait la régression que le carnet doit empêcher. C'est la première mesure du rejeu P2.
+
+Le script compte désormais **dix-sept étapes (A–Q)** et **dix-huit runs** (K en compte deux).
+
+### 45.4 Ce qui a été exécuté, et ce qui ne l'a pas été
+
+| Vérification | Résultat |
+|---|---|
+| `dotnet build SubnauticaCoop.sln` | vert, 0 avertissement, 0 erreur (après les ajouts P2 et la sonde) |
+| `dotnet test` | **35/35** (le modèle n'a pas changé depuis le §44.2) |
+| `NetProbe selftest` | **61 assertions**, `SELFTEST: SUCCES`, exit 0 |
+| `bash -n tools/deploy.sh tools/verify.sh tools/check-verify-assertions.sh` | OK |
+| `tools/check-verify-assertions.sh` | vert : les **17 étapes déclarées** sont toutes acceptées par `--only` (le bug A–O ne peut plus revenir), les assertions P, Q et N acceptent les journaux au format du code, et **8 échecs nommés** apparaissent après retrait de cinq lignes exigées — satisfiables **et** discriminantes, sans lancer le jeu |
+| `tools/verify.sh --only=P` | **vert, 61 s** : `verdict=True`, 0 correction en nage, téléport refusé, correction reçue et appliquée, empreinte acceptée |
+| `tools/verify.sh --only=Q` | **vert, 124 s** : rejeu `1 entité(s) disparue(s) rejouée(s) pour 'killi'#2`, absence locale, `entités créées ici=0` chez le tardif |
+| `tools/verify.sh --only=N` | **vert, 78 s** : `définition vérifiée=True (hash=0x3da1f4bf782becdf)`, `définition falsifiée refusée=True`, `définitions refusées=0` chez les deux clients |
+| Run de reconnexion (client tué puis relancé) | **non exécuté** : aucune étape ne le couvre |
+
+### 45.5 Ce que ce chapitre ne prouve pas
+
+- **Le rejeu des retraits n'a aucun test automatique** : le carnet vit dans `ServerNetwork`, qui dépend
+  d'Unity et de LiteNetLib. Sa preuve est le run de l'étape Q (vert le 2026-10-19), pas un test. Ce qui est vérifié hors jeu est
+  plus étroit : `tools/check-verify-assertions.sh` extrait `expect`/`assert_p`/`assert_q`/`assert_n` de `verify.sh` et
+  montre qu'elles acceptent les formats de journal du code, puis qu'elles échouent sur des lignes retirées
+  — les assertions sont satisfiables et discriminantes, **pas** la mesure.
+- **La sonde de position peut produire un faux négatif** : si le serveur n'a pas encore reçu la première
+  position avant la nage, ou si le monde se charge lentement, elle échoue nommément plutôt que de conclure —
+  c'est voulu, mais ça ne mesure pas la garde.
+- **Le taux de refus de 5 % du §43.6 n'est toujours pas mesuré.** L'étape P imprime le taux, elle ne
+  l'affirme pas sous 5 % : un taux élevé sur une nage de 6 s ne dirait rien d'une session de 30 min. C'est
+  P4 qui tranchera.
+
+### 45.6 Mesures en jeu du 2026-10-19 : P, Q et N sont vertes
+
+**P** (`étape P : OK (61s)`) — hôte dédié, un client, sonde `-coopdebug=position` :
+
+```
+[sonde] position : verdict=True — nage normale : 0 correction sur 6.0s (seuil 0),
+téléport de 100 m : correction reçue=True, appliquée=True (2 appliquée(s))
+```
+
+L'étape affirme aussi, côté serveur, `position REFUSÉE … correction renvoyée`, `RESYNCHRONISÉE` et le
+taux publié, ainsi que `save=slot=…` + `empreinte de sauvegarde acceptée` : le chemin nominal de P0 est
+mesuré, pas seulement testé. Le refus d'une sauvegarde **différente** reste prouvé hors jeu (douze cas).
+
+**Q** (`étape Q : OK (124s)`) — deux clients séquentiels, `COOP_DESPAWN_CLIENTS=1` :
+
+```
+[net] disparition : 1 entité(s) disparue(s) rejouée(s) pour 'killi'#2 (arrivé après leur retrait).
+[disparition] retrait de 0x7bc634c3cde1d338 mis en attente — le monde n'est pas encore chargé
+[disparition] véhicule 0x7bc634c3cde1d338 absent localement — rien à retirer
+[sonde] disparition : verdict=True — … cette instance ne l'a jamais eu, et ne l'a pas recréé … entités créées ici=0
+```
+
+C'est la première preuve que le carnet de retraits (P2) sert à quelque chose : un client qui n'était pas
+là à la destruction ne voit ni fantôme ni objet à réclamer. Le défaut `LastRemovedKey` trouvé en écrivant
+Q aurait rendu cette ligne rouge ; il est corrigé et **exercé** par ce run.
+
+**N** (`étape N : OK (78s)`) — hôte `-coopdebug=spawn`, deux clients dont un arrivé après la fabrication :
+
+```
+[sonde] apparition : verdict=True — entités créées=1, écartées (déjà présentes)=0, échecs=0, clés divergentes=0 ;
+objet local retrouvé par sa clé=True ; définition vérifiée=True (hash=0x3da1f4bf782becdf),
+définition falsifiée refusée=True, définitions refusées=0
+```
+
+Les deux clients, y compris celui arrivé après le `spawn`, vérifient donc la définition **et** refusent
+une définition falsifiée, sans qu'aucune définition réelle ne soit refusée (`définitions refusées=0`).
+
+Ce que ces trois runs ne prouvent pas : le refus P0 sur deux sauvegardes différentes, le taux de faux
+positifs sur 30 min, et la reconnexion complète.
+
+> **Correctif de harnais trouvé en lançant P** : la validation de `--only` n'acceptait que A–O, donc les
+> étapes P et Q étaient **inatteignables** (`étape inconnue`). Corrigé (`[!ABCDEFGHIJKLMNOPQ,]`) avant le
+> run ; sans cet essai, les deux étapes seraient restées « écrites » sans jamais pouvoir s'exécuter.
+- **P2 n'est pas « la reconnexion »** : un client relancé ne récupère ni ses claims, ni un volant, ni une
+  baseline ; il ne reçoit que les retraits et les apparitions mémorisés.
+- **L'étape Q ne prouve pas un retrait « avant chargement » de façon garantie** : selon le moment où le
+  handshake tombe, le retrait est mis en file ou appliqué tout de suite. L'assertion porte donc sur
+  l'**effet** (`absent localement`, verdict, pas de fantôme), pas sur un chemin de file précis.
+- **Un défaut trouvé en écrivant Q, et corrigé** : la branche « l'entité est absente localement » de
+  `EntityDespawner` n'affectait pas `LastRemovedKey`, donc la sonde de disparition concluait **False**
+  (`key != 0` faux) précisément dans le cas que P2 doit rendre vert. La clé est maintenant mémorisée dans
+  les deux branches ; aucun run ne l'a encore exercé.
+
+## 46. Batterie complète rejouée le 2026-10-19 : deux faux négatifs de sonde corrigés
+
+La batterie des dix-sept étapes a été rejouée après l'ajout de la garde de position (P1) et du contrat de
+contenu (v13). Deux étapes sont tombées — **B** (présence) et **L** (ramassage) — et ni l'une ni l'autre
+n'était un défaut du protocole : dans les deux cas, la **sonde** mesurait autre chose que ce qu'elle
+affirmait. Les deux causes sont mesurées, corrigées, et les étapes rejouées vertes.
+
+### 46.1 B — l'hôte compté comme un pair
+
+La sonde de présence attendait `KnownRemoteCountForProbe` (tout joueur distant) avant de commencer ses
+mesures mutuelles. Avec un hôte **non dédié**, l'avatar `HoteServeur` (id 9999) satisfaisait cette attente ;
+la sonde du client 1 a donc conclu **13 s** après son entrée dans le monde — `PlayerId falsifié=False (défaut :
+aucun joueur distant)`, `nage=False` — pendant que le client 2 chargeait encore son monde. Mesure du
+2026-10-19 02:00 : `[sonde] présence : verdict=False` à 01:57:55, client 2 connecté à 01:58:00.
+
+Correctif : `RemotePlayerManager.KnownPeerCountForProbe` (hôte exclu) et l'attente porte dessus. Le drapeau
+« non exercé = défaut » continue de compter **tous** les distants, donc un run où l'hôte est seul échoue
+toujours : la discrimination n'est pas affaiblie.
+
+Preuve (`étape B : OK (119s)`, rejouée seule) :
+
+```
+[sonde] présence : 1 autre(s) client(s) connu(s) (2 joueur(s) distant(s) au total, hôte compris)
+[sonde] présence : PlayerId falsifié — 'killi' a annoncé [Tank, Fins] sous l'id 1 (le mien) ; le relais
+                   me l'a diffusé sous l'id 2 … -> verdict=True
+[sonde] présence : nage puis arrêt vus par 'killi' (id=2) — vitesse max 2.60 m/s, déplacement 11.38 m,
+                   avancées vues=54, écart à l'arrêt max=0.00 m -> verdict=True
+```
+
+### 46.2 L — téléportation refusée par P1, et client 2 arrivé après la réclamation
+
+Cinq assertions rouges, deux causes :
+
+1. **Le second client n'était pas encore là.** Client 1 a réclamé à 12:37:11 ; le client 2 s'est connecté à
+   12:37:20. Le serveur a donc écrit `annoncée à 0 client(s)`, et le client 2 n'a pu ni voir le retrait ni
+   observer l'accord.
+2. **La mise en place téléportait le joueur.** `PlaceNear` faisait un `SetPosition` de 16 m en une image ;
+   la garde P1 refuse (≈320 m/s), resynchronise le client, et le joueur restait à **15.99 m** de l'objet —
+   la réclamation à id falsifié était alors refusée « hors portée (16.0 m > 6.0 m) », un refus de distance
+   qui ressemble à s'y méprendre à une règle d'identité respectée.
+
+Correctifs : la sonde du client 1 attend l'**avatar du pair** (90 s) avant sa première réclamation ; et
+`PlaceNear` approche par pas de 1,5 m toutes les 0,15 s (10 m/s, sous les 15 m/s admis), en journalisant le
+nombre de pas et en **avertissant** si la portée n'est pas atteinte après l'approche.
+
+Preuve (`étape L : OK (94s)`) :
+
+```
+[net] disparition : clé=0x10ee181a0699267d (objet) — annoncée à 1 client(s), motif « ramassée par 'killi'#1 »
+[sonde] ramassage : joueur placé à 1.74 m de l'objet (portée admise par le serveur : 6.0 m ; approche en 11 pas)
+[sonde] ramassage : verdict=True — id=2, clé partagée … accordée=False tenue par 1 ; clé inventée … refusée ;
+                    id falsifié 0xbd613fd07fc6fef1 reçue=True accordée=True tenue par 2 revendiquée sous l'id 1
+```
+
+### 46.3 Ce que la batterie ne prouve toujours pas
+
+- Le refus P0 sur **deux sauvegardes différentes** (tests hors jeu seulement).
+- Le taux de faux positifs de P1 sur 30 min (seuil 5 %, §43.6).
+- La **reconnexion complète** : claims, conducteurs, baseline.
+- La batterie n'a pas tourné en **un seul** passage : A–J dans une passe interrompue (B rouge, corrigée et
+  rejouée), puis N, O, Q, M, L, I, P, D, puis H, K, J. Chaque étape a son verdict vert, mais le temps total
+  d'un passage unique n'est pas mesuré.
+
+### 46.4 Ce que la batterie sait maintenant refuser
+
+L'étape B affirme en plus que la sonde a attendu **un autre client** (`autre(s) client(s) connu(s)`) : si
+l'avatar de l'hôte redevenait un pair acceptable, l'étape échouerait en nommant la cause au lieu d'attendre
+un `verdict=False` tardif. `tools/check-verify-assertions.sh` couvre désormais B (fixture + retrait de la
+ligne) en plus de P, Q et N : dix échecs nommés après retrait de sept lignes exigées, et les dix-sept étapes
+déclarées restent toutes acceptées par `--only`.
+
+---
+
+## 47. Durcissement du modèle et rejeu ciblé en jeu (2026-10-19, session autonome)
+
+**Verdict : le modèle pur a été durci sans changer les hashes normaux, et sept étapes critiques ont été
+rejouées vertes après les changements — P, Q, N, B, L, O et D.**
+
+### 47.1 Correctifs de fond (hors jeu)
+
+| Défaut | Correctif | Preuve |
+|---|---|---|
+| `PacketReader(offset, length)` acceptait un `offset + length` qui débordait un `int` | contrôle par soustraction `offset > data.Length - length` | 2 000 fenêtres aléatoires + cas `int.MaxValue` |
+| `ReadFloat` allouait un tableau de 4 octets **par float** | tampon `[ThreadStatic]` | 200 000 lectures < 4 Ko alloués ; 4 threads × 20 000 valeurs sans mélange |
+| Une séquence UTF-8 invalide devenait silencieusement U+FFFD | décodeur strict, `DecoderFallbackException` → `ProtocolException` | overlong, continuation isolée, séquence tronquée refusés ; accents/emoji acceptés |
+| `SaveCompatibility` ne vérifiait que le hash **client** | hash serveur vérifié aussi, motif distinct | test de champ serveur altéré |
+| `SaveIdentity.Canonical` pouvait collisionner (`slot="a\|b"/session="c"` vs `slot="a"/session="b\|c"`) | échappement de `\`, `\|`, `\n`, `\r` ; valeurs usuelles inchangées | forme canonique normale épinglée |
+| `ModListHash` collisionnait sur `["a\nb"]` vs `["a","b"]` | échappement des séparateurs après tri brut ; hash normal `d8132ec29283184a` inchangé | 10 tests dédiés |
+| `EntityDefinition.Milli` quantifiait en `int` : deux échelles opposées > 2 147 km collisionnaient | quantification en `long`, saturation signée | hash normal `0x3da1f4bf782becdf` inchangé (étape N) |
+| `EntityDespawn` n'appliquait pas la règle documentée « clé 0 refusée » | refus à l'écriture **et** à la lecture | paquet forgé testé |
+| `PickupResult.Write` acceptait un `TechTypeName` que la lecture refusait | même borne de 64 caractères des deux côtés | écriture et lecture testées |
+| `PlayersSnapshot` acceptait jusqu'à 255 joueurs alors que `MaxClients = 10` | plafond `MaxClients` des deux côtés | écriture et lecture forgée |
+| `PlayerPlausibility` rejetait sans motif une position précédente non finie, et laissait passer un `NaN` d'intervalle | refus nommés ; changement Seamoth → Exosuit traité comme saut légitime | 8 tests de bornes + 2 tests d'intervalles infinis |
+| `LaunchModeParser` acceptait `-coopmodeevil=server` (préfixe seul) | nom exact suivi de `=` | 4 cas négatifs |
+| `MessageCodec.Encode(null)` levait une `NullReferenceException` | `ArgumentNullException` | test dédié |
+| `EntitySpawnMessage.Write` acceptait `DefinitionHash=0` et des coordonnées `NaN`/∞ que la lecture refusait | mêmes refus à l'écriture : hash nul, position/quaternion/échelle non finis | 3 tests d'écriture + paquet forgé |
+| `EntitySpawnMessage` acceptait la clé 0, alors qu'une telle entité ne peut jamais être retirée ni réclamée (les deux messages refusent 0) | clé 0 refusée à l'écriture **et** à la lecture | paquet forgé + 2 tests |
+| `PlayerCorrectionMessage.Write` acceptait une position `NaN`/∞ que la lecture refusait | même contrôle `EnsureFinite` des deux côtés | 2 tests (NaN, -∞) |
+| `PacketWriter.WriteString` remplaçait un surrogate isolé par U+FFFD : le message relu n'était pas celui émis | encodage UTF-8 strict, `ProtocolException` à l'écriture | surrogate refusé, emoji accepté |
+| Un paquet réduit à son opcode pouvait lever autre chose qu'une `ProtocolException` sans qu'aucun test ne le vérifie sur les 22 messages | test fuzz dédié : les 22 lecteurs refusent explicitement | 1 test, 22 lecteurs |
+
+### 47.2 Contrôles hors jeu au moment du résumé
+
+| Commande | Résultat |
+|---|---|
+| `dotnet test SubnauticaCoop.sln` | **243/243**, 0 échec, 0 avertissement |
+| `dotnet run --project tools/NetProbe -- selftest` | **94/94**, `SELFTEST: SUCCES`, exit 0 |
+| `tools/check-verify-assertions.sh` | vert (17 étapes acceptées, P/Q/N/B discriminantes) |
+| builds `Coop.Client` + `Coop.Server` (Release) | 0 avertissement, 0 erreur |
+| `tools/deploy.sh --no-build` + `--verify` (dossier temporaire) | manifeste v13, sha256 et tailles conformes |
+
+### 47.3 Rejeu en jeu après les correctifs
+
+| Étape | Résultat | Ce qu'elle vérifie |
+|---|---|---|
+| **P** | `OK (63s)` | handshake + empreinte acceptée, nage sans correction, téléport de 100 m refusé puis correction appliquée |
+| **Q** | `OK (100s)` | retrait rejoué au client tardif, `absents localement=1`, `entités créées ici=0` |
+| **N** | `OK (75s)` | `définition vérifiée=True (hash=0x3da1f4bf782becdf)`, falsifiée refusée, chez les deux clients |
+| **B** | `OK (105s)` | présence des deux clients (`verdict=True` des deux côtés) avec le plafond `PlayersSnapshot` |
+| **L** | `OK (94s)` | ramassage accordé/refusé, id falsifié réattribué, objet retiré par disparition |
+| **O** | `OK (121s)` | véhicule détruit chez l'hôte : retiré chez les deux clients, aucune réapparition |
+| **D** | `OK (50s)` | garde cliente : `sauvegarde cliente bloquée (entrée+écriture) -> verdict=True`, aucun `verdict=False` |
+
+Aucune de ces étapes n'a produit de `verdict=False`, et chaque run a arrêté ses propres instances.
+
+### 47.4 Limites réaffirmées
+
+- **P1 attrape un téléport, pas un speedhack progressif** : à 20 Hz, 2 m de tolérance par message
+  autorisent 40 m/s. C'est écrit dans `docs/authority.md` et `docs/protocol.md`.
+- Le refus P0 sur **deux sauvegardes différentes** reste prouvé hors jeu.
+- La batterie complète n'a **pas** été rejouée en un seul passage dans cette session ; sept étapes
+  critiques l'ont été, les dix autres gardent leur verdict du 2026-10-19 (§46).
+
+## 48. Symétrie écriture/lecture du codec (2026-10-20, session autonome)
+
+La session précédente (§47) avait fermé les refus **à la lecture**. Restait une classe de défauts
+inverse : un message que le serveur pouvait **écrire** et qu'aucun client n'aurait accepté. Un tel
+message ne produit pas d'erreur visible côté émetteur — l'entité n'existe simplement jamais chez les
+autres. Les correctifs ci-dessous alignent l'écriture sur la lecture, et les tests vérifient les deux
+sens.
+
+### 48.1 Correctifs
+
+| Défaut | Correctif | Preuve |
+|---|---|---|
+| `EntitySpawnMessage.Write` acceptait `DefinitionHash=0` | refus nommé à l'écriture, comme à la lecture | 1 test + contrôle `NetProbe` |
+| `EntitySpawnMessage.Write` acceptait une position, un quaternion ou une échelle `NaN`/∞ | `EnsureFinite` appliqué des deux côtés | 2 tests + contrôle `NetProbe` |
+| `EntitySpawnMessage` acceptait la clé `0` : une telle entité ne peut être ni retirée ni réclamée, puisque `EntityDespawn` et `PickupClaim` refusent `0` | clé `0` refusée à l'écriture **et** à la lecture | 2 tests (dont paquet forgé) + 2 contrôles `NetProbe` |
+| `PlayerCorrectionMessage.Write` acceptait une position `NaN`/∞ | même contrôle qu'à la lecture | 2 tests + 1 contrôle `NetProbe` |
+| `PacketWriter.WriteString` remplaçait un surrogate isolé par U+FFFD : le message relu n'était pas celui émis | encodage UTF-8 strict à l'écriture | 2 tests (surrogate refusé, emoji accepté) |
+| Aucun test ne vérifiait qu'un paquet réduit à son opcode est refusé par **tous** les lecteurs | test dédié sur les 22 messages, `ProtocolException` uniquement | `MessageFuzzTests` |
+
+Décision assumée : la clé `0` est désormais refusée pour `EntitySpawn` comme elle l'était pour
+`EntityDespawn`. Aucun chemin du serveur ne produit `0` (les clés viennent de `VehicleIdentity` et de
+`ItemIdentity`) ; le refus ferme un cas limite plutôt qu'une fonctionnalité.
+
+### 48.2 Contrôles hors jeu
+
+| Commande | Résultat |
+|---|---|
+| `dotnet test SubnauticaCoop.sln` | **243/243**, 0 échec (Debug et Release) |
+| `dotnet run --project tools/NetProbe -- selftest` | **94/94**, `SELFTEST: SUCCES`, exit 0 |
+| builds `Coop.Client` + `Coop.Server` | Debug et Release, 0 erreur |
+| `tools/check-verify-assertions.sh` | vert (17 étapes acceptées) |
+| `tools/deploy.sh` dans un dossier temporaire | manifeste v13, sha256 et tailles conformes |
+
+### 48.3 Ce que cette session ne prouve pas
+
+- Aucune étape de `tools/verify.sh` n'a été rejouée en jeu : les verdicts datent du 2026-10-19 (§46,
+  §47.3). Les correctifs sont hors jeu, sur le modèle pur, et n'ajoutent aucun chemin de jeu.
+- Le refus P0 sur deux sauvegardes différentes, le taux de faux positifs P1 sur 30 minutes, la
+  reconnexion complète et le contenu AssetBundle restent non mesurés — inchangé depuis §47.4.
+
+### 48.4 Bornes du handshake, identifiant d'entité, et un pseudo trop long
+
+Trois champs restaient sans borne **à l'entrée du protocole**, alors qu'ils viennent d'un pair encore
+inconnu ou d'un identifiant dont dépend la correspondance d'entité :
+
+| Défaut | Correctif | Preuve |
+|---|---|---|
+| `HandshakeRequest.GameVersion` et `ModListHash` acceptaient jusqu'à 64 Ko chacun, comparés puis refusés par le serveur | constantes `MaxGameVersionLength=32` et `MaxModListHashLength=64`, refusées à l'écriture **et** à la lecture | 5 tests + 2 contrôles `NetProbe` |
+| Un pseudo Steam de plus de 32 caractères faisait refuser le handshake (« pseudo trop long ») : le joueur ne pouvait pas se connecter | `NormalizeUsername` tronque à `MaxUsernameLength`, sans couper une paire de surrogates, et le journalise | build client rc=0 |
+| `EntitySpawnMessage` acceptait `UniqueId` vide : le client s'en sert comme `UniqueIdentifier` pour retrouver l'entité dans sa sauvegarde, donc une chaîne vide ne désigne rien | identifiant vide refusé à l'écriture **et** à la lecture | 2 tests + 2 contrôles `NetProbe` |
+
+Contrôles hors jeu après ces ajouts : `dotnet test` **243/243**, `NetProbe selftest` **94/94**.
+
+### 48.5 Zéro allocation à l'écriture, culture, et mémoire du retrait côté client
+
+| Défaut | Correctif | Preuve |
+|---|---|---|
+| `PacketWriter.WriteFloat` appelait `BitConverter.GetBytes`, soit 4 octets alloués **par float** — des milliers d'allocations par seconde sur un snapshot complet | union explicite `FloatBits` et écriture little-endian par décalages, sans allocation | test de motifs de bits + 100 000 écritures avec **0 octet** alloué ; contrôle `NetProbe` |
+| Aucun test ne vérifiait que les empreintes sont indépendantes de la culture de la machine, alors qu'elles sont recalculées des deux côtés | tests sous `tr-TR`, `fr-FR`, `ar-SA` pour `EntityDefinition`, `SaveIdentity` et `ModListHash`, plus forme canonique épinglée | 8 tests |
+| Le registre client `EntityDespawner.Removed` grandissait sans borne pendant une session (une entrée par objet ramassé) | registre borné à **256** clés, éviction FIFO, comme le carnet du serveur ; la règle « une apparition tardive ne recrée rien » est conservée | build client rc=0 |
+
+### 48.6 Pseudo normalisé et motifs bornés
+
+| Défaut | Correctif | Preuve |
+|---|---|---|
+| La normalisation du pseudo vivait dans `Plugin.cs` (Unity, non testée) et le serveur recopiait `request.Username` brut dans les journaux, `PlayerJoined` et le nom du clone d'avatar | `Usernames.Sanitize` dans `Coop.Model` : trim, caractères de contrôle retirés, repli `joueur`, troncature à 32 sans couper une paire de surrogates ; utilisé par le client **et** le serveur | 10 tests |
+| `HandshakeResponse.Reason`, `Disconnect.Reason` et `PlayerLeft.Reason` n'avaient aucune borne : un pair pouvait faire transporter 64 Ko de texte dans un champ journalisé | `Protocol.MaxReasonTextLength=160` appliqué à l'écriture **et** à la lecture via `MessageText.Reason` | 4 tests + 2 contrôles `NetProbe` |
+| `PacketReader.Rewind`, `Remaining` et `ReadRemainingBytes` n'étaient exercés par aucun test direct | 8 tests de primitives (décalage de départ, reste exact, copie, lecture après la fin) | `dotnet test` |
+
+Contrôles hors jeu à la clôture : `dotnet test` **243/243**, `NetProbe selftest` **94/94**.

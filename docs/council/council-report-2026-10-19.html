@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conseil d'architecture — Coop Subnautica (2026-10-19)</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161d26; --panel2:#1c2530; --text:#e6edf3; --muted:#9aa7b4;
+    --line:#2a3542; --accent:#4da3ff; --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:1040px;margin:0 auto;padding:32px 20px 80px}
+  header.top{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:28px}
+  .kicker{color:var(--accent);font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:600}
+  h1{font-size:28px;line-height:1.25;margin:8px 0 10px;font-weight:650}
+  .meta{color:var(--muted);font-size:13px;display:flex;gap:14px;flex-wrap:wrap}
+  .meta span{white-space:nowrap}
+  .badge{display:inline-block;border:1px solid var(--line);background:var(--panel2);color:var(--muted);
+    border-radius:999px;padding:2px 10px;font-size:11.5px;letter-spacing:.04em;text-transform:uppercase}
+  .badge.deep{color:#a371f7;border-color:#3d2a5c}
+  .badge.codex{color:var(--good);border-color:#1f4429}
+  .confidence-block{border:1px solid var(--line);border-left:4px solid var(--warn);background:var(--panel);
+    border-radius:8px;padding:16px 18px;margin:22px 0}
+  .confidence-high{border-left-color:var(--good)} .confidence-medium{border-left-color:var(--warn)}
+  .confidence-low{border-left-color:var(--bad)}
+  .confidence-block .line{font-weight:600;margin-bottom:6px}
+  .confidence-block .sub{color:var(--muted);font-size:14px}
+  h2{font-size:19px;margin:36px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:15.5px;margin:24px 0 8px}
+  p{margin:10px 0}
+  ul,ol{margin:10px 0 10px 22px;padding:0}
+  li{margin:6px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:16px 0}
+  .card-title{font-weight:650;font-size:14px;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+  .grid-table,.rice-table,.ds-table{width:100%;border-collapse:collapse;font-size:13.5px}
+  .grid-table th,.rice-table th,.ds-table th{text-align:left;color:var(--muted);font-weight:600;
+    border-bottom:1px solid var(--line);padding:8px 10px;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  .grid-table td,.rice-table td,.ds-table td{border-bottom:1px solid var(--line);padding:9px 10px;vertical-align:top}
+  .grid-table tr:last-child td,.rice-table tr:last-child td{border-bottom:none}
+  code,.mono{font-family:var(--mono);font-size:12.8px;background:#111820;border:1px solid var(--line);
+    border-radius:4px;padding:1px 5px}
+  pre{background:#0b1016;border:1px solid var(--line);border-radius:8px;padding:14px;overflow:auto;font-family:var(--mono);font-size:12.5px}
+  .verdict h2{border:none;margin-top:22px;font-size:16px;color:var(--accent)}
+  .verdict h2:first-child{margin-top:0}
+  .dissent-ledger{border:1px dashed #5a4a1f;background:#1a1710;border-radius:8px;padding:14px 18px;margin:18px 0}
+  .dissent-ledger strong{color:#e3b341;display:block;margin-bottom:8px;font-size:13px;letter-spacing:.06em;text-transform:uppercase}
+  .bias-flags{border:1px solid #3d2a5c;background:#171326;border-radius:8px;padding:14px 18px;margin:18px 0;font-size:14px}
+  .bias-flags strong{color:#a371f7}
+  details{background:var(--panel);border:1px solid var(--line);border-radius:8px;margin:10px 0;overflow:hidden}
+  summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:14px;list-style:none;display:flex;
+    align-items:center;justify-content:space-between;gap:10px}
+  summary::-webkit-details-marker{display:none}
+  summary:after{content:"+";color:var(--muted);font-weight:400;font-size:18px}
+  details[open] summary:after{content:"–"}
+  .detail-body{padding:0 16px 16px;color:#cdd7e1;font-size:14px;border-top:1px solid var(--line)}
+  .conf{font-size:11px;text-transform:uppercase;letter-spacing:.06em;border-radius:999px;padding:1px 8px;border:1px solid}
+  .conf-high{color:var(--good);border-color:#1f4429;background:#0f1a12}
+  .conf-medium{color:var(--warn);border-color:#4a3a12;background:#1a1710}
+  .conf-low{color:var(--bad);border-color:#4a1f1f;background:#1a1010}
+  .debate-callout{border-left:3px solid var(--bad);padding:10px 14px;margin:12px 0;background:#1a1010;border-radius:0 6px 6px 0}
+  .debate-callout.def{border-left-color:var(--good);background:#0f1a12}
+  .debate-label{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+  .kv{display:grid;grid-template-columns:180px 1fr;gap:6px 14px;font-size:14px}
+  .kv dt{color:var(--muted)} .kv dd{margin:0}
+  footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+  footer a{color:var(--accent);text-decoration:none}
+  @media (max-width:640px){ .kv{grid-template-columns:1fr} h1{font-size:22px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="kicker">LLM Council · revue d'architecture</div>
+  <h1>Coop Subnautica : la couche de transport tient, l'ordre du plan ne tient pas</h1>
+  <div class="meta">
+    <span>2026-10-19</span>
+    <span>Mode Standard</span>
+    <span>5 lentilles · 5 revues · débat forcé · double présidence</span>
+    <span class="badge">q2026-10-19</span>
+    <span class="badge">accord 4,0/5</span>
+  </div>
+</header>
+
+<div class="confidence-block confidence-medium">
+  <div class="line">Council confidence: medium — 3/5 high (Red Team, First Principles, Outsider), 2/5 medium (Expansionist, Executor), 0/5 low</div>
+  <div class="sub"><strong>Hypothèse dominante :</strong> les deux instances chargent la même sauvegarde, donc l'identité dérivée du contenu (position d'apparition, <code>UniqueIdentifier</code>) désigne la même entité des deux côtés.</div>
+  <div class="sub"><strong>Ce qui renverse la recommandation :</strong> (1) une session de 30 min qui passe <em>sans</em> inventaire/craft partagés ; (2) une empreinte de sauvegarde divergente après une sauvegarde d'hôte client connecté ; (3) plus de 5 % de corrections sur une nage normale.</div>
+</div>
+
+<h2>Question soumise</h2>
+<pre>DÉCISION : l'architecture « serveur autoritaire = instance Subnautica headless pilotée par
+BepInEx + netcode maison + preuve par sondes in-game » est-elle la bonne trajectoire pour
+obtenir un coop réellement jouable, et quelle est la prochaine étape ?
+
+CONTEXTE : 5 jours, 25 commits, 21 672 lignes, protocole v12, 15 étapes de vérification (16 runs),
+7 sondes in-game, avatars/créatures/véhicules/pickup/spawn/despawn mesurés,
+aucun test hors-jeu, launcher hors dépôt, une seule sauvegarde de test.
+
+ENJEUX : temps d'un développeur seul ; valeur réelle du produit (présence synchronisée ≠ jeu
+partagé) ; dette de vérification (batterie de 1 559 s) ; risque de bâtir M6 sur une identité
+non stable.
+
+OPTIONS : A. continuer (M6 contenu) · B. consolider (autorité, tests, découpage)
+          C. tranche jouable, gel du reste · D. reposer l'architecture</pre>
+
+<div class="bias-flags">
+  <strong>Scan de biais pré-conseil</strong> — audit non délégué (outils d'orchestration indisponibles en cours de run), signaux et non verdicts :
+  cadrage de confirmation (« replanifie si besoin » suppose qu'il faut replanifier) ;
+  coût irrécupérable (25 commits) ; optimisme de mesure (« prouvé » = une ligne de journal d'un run non rejouable) ;
+  ancrage interne (le plan se cite lui-même) ; disponibilité (une sauvegarde, une zone, deux clients).
+</div>
+
+<h2>Verdict</h2>
+<div class="verdict">
+
+<h2>Recommandation</h2>
+<p>Ne pas ajouter de mécanisme avant d'avoir prouvé une session. La prochaine étape est une <strong>session réelle de 30 minutes à deux joueurs</strong>, préparée par trois fermetures peu coûteuses : la prémisse « même sauvegarde » devient un refus nommé au handshake ; l'autorité du joueur est soit rendue vraie (garde de plausibilité + correction + taux de faux positifs mesuré), soit renommée dans la documentation ; la reconnexion rejoue claims, apparitions, retraits et conducteurs. M6 contenu/AssetBundles est gelé ; seul le <strong>contrat</strong> de contenu (identité + hash de définition) est instruit, une journée, parce qu'il teste la thèse sans construire le pipeline.</p>
+
+<h2>Pourquoi</h2>
+<p>La couche de transport est la partie saine : tick fixe à 20 Hz, snapshots quantifiés, relevancy, interpolation mesurée image par image, autorité réelle sur les créatures (IA coupée côté client), les véhicules (position + droit de conduire), le ramassage, la création et le retrait d'entités. Rien de tout cela n'est à refaire.</p>
+<p>Ce qui n'est pas prouvé, c'est la <strong>boucle</strong>. Les preuves viennent d'une sauvegarde, d'une zone, de runs de 40 à 240 secondes. Trois propriétés qu'une session de 30 minutes exige manquent ou sont partielles : la continuité de session (reconnexion, resync), la propriété partagée de l'économie (inventaire, craft, dégâts), et la continuité d'exécution (fuites, dérive sur la durée). La session de 30 minutes est le seul instrument qui les mesure toutes les trois à la fois.</p>
+<p>Le coût de vérification est devenu un coût produit : 16 runs, un run complet documenté à 1 559 s, une seule machine, une seule sauvegarde. Chaque système ajouté allonge la batterie. Le rejeu hors jeu n'est pas un luxe : c'est ce qui permet de garder toutes les assertions en revenant à une boucle de quelques secondes.</p>
+
+<h2>Ce qui est bon</h2>
+<ul>
+  <li><strong>Les deux inconnues majeures ont été levées en premier</strong> : plugin chargé, monde chargé sans intervention, tick à pas fixe mesuré à 19,98–20,03/s.</li>
+  <li><strong>La discipline de preuve</strong> : chaque affirmation porte son instrument, les sondes rendent un verdict binaire, <code>verify.sh</code> rend un verdict unique, <code>expect_last</code> et la restauration de fixture ont corrigé de faux verts.</li>
+  <li><strong>Les décisions sont écrites avec ce qui les falsifierait</strong> (identité des créatures, cadence vs interpolation, portée de ramassage).</li>
+  <li><strong>La séparation du modèle</strong> : protocole binaire écrit à la main, testable sans socket, 35/35 au selftest.</li>
+  <li><strong>Des victoires mesurées, pas regardées</strong> : 0,39 m par image sur 10 259 images pour un véhicule, 0,19 m max pour les créatures, refus de ramassage nommé, volant libéré puis repris en 0,65 s.</li>
+  <li><strong>Les limites sont écrites</strong> : chaque chapitre a sa section « ce que ça ne prouve pas ».</li>
+</ul>
+
+<h2>Ce qui ne l'est pas</h2>
+<ul>
+  <li><strong>Aucun test hors-jeu</strong> : <code>tests/</code> était prévu, n'existe pas. 21 672 lignes, 0 test unitaire. La seule porte est une batterie de 16 runs in-game, Windows + jeu + une sauvegarde.</li>
+  <li><strong>Le joueur n'est pas autoritaire</strong> : <code>HandlePlayerPosition</code> ne vérifie que NaN/Inf et l'ordre des séquences. La promesse fondatrice (« corrige la faille de Nitrox ») est fausse sur la surface la plus visible, et la prédiction/réconciliation du §1 n'existe pas.</li>
+  <li><strong>La prémisse « même sauvegarde » n'est pas un contrat</strong> : le handshake vérifie la version du jeu et la mod-list, pas la sauvegarde, alors que toute l'identité des créatures en dépend. Un client sur une vieille sauvegarde désynchronise silencieusement.</li>
+  <li><strong>Pas de cycle de vie de session</strong> : pas de reconnexion/resync ; claims, retraits et conducteurs vivent avec la session.</li>
+  <li><strong>Monolithes</strong> : <code>ServerNetwork</code> 3 098 lignes pour neuf responsabilités, <code>Messages</code> 1 185, <code>Plugin</code> client 1 157, <code>AvatarProbe</code> 1 912.</li>
+  <li><strong>M6 contenu est le prochain puits</strong> : coût inconnu, identité d'une entité custom non conçue, contrat de version non exprimable par l'égalité stricte v12.</li>
+  <li><strong>Rien n'est distribuable</strong> : launcher hors dépôt, pas de README, pas de <code>.sln</code>, pas de script de déploiement, pas de CI ; hôte = instance complète (~2 Go, device D3D11).</li>
+  <li><strong>Le plan n'est plus pilotable</strong> : 3 261 lignes de journal, sans état courant en tête ; le tableau des jalons est un journal de statuts, pas un état courant — il faut lire sept sections pour savoir ce qui reste ouvert.</li>
+  <li><strong>Trois schémas d'identité</strong> (créature, véhicule, objet) avec 5 clés partagées sur 449 objets côté serveur.</li>
+</ul>
+
+<h2>Où le conseil se divise</h2>
+<ol>
+  <li><strong>Premier pas</strong> — autorité (Red Team, Executor) contre session (First Principles, Outsider) contre outillage (Expansionist). Tranché : la session est le <em>juge</em>, l'autorité est le premier des trois prérequis, parce qu'une session sans correction prouve seulement qu'un client peut se téléporter.</li>
+  <li><strong>Autorité joueur</strong> — vraie validation contre sur-investissement contre heuristique mal nommée. Tranché : garde + correction, nommée honnêtement, critère d'arrêt à 5 % de faux positifs.</li>
+  <li><strong>Contenu</strong> — geler contre contrat en un jour. Tranché : contrat oui, pipeline non.</li>
+  <li><strong>Substrat des preuves</strong> — rejeu contre crainte de couper les sondes. Tranché : mêmes assertions, autre substrat.</li>
+</ol>
+
+</div>
+
+<div class="dissent-ledger">
+  <strong>Dissent Ledger — ce que le consensus a adouci</strong>
+  <ul>
+    <li><strong>Le mot « autoritaire » est faux là où un joueur le remarque en premier.</strong> Le conseil l'a corrigé en note ; la dissidence exige que ce soit un critère d'acceptation, pas une phrase de documentation.</li>
+    <li><strong>La prémisse « même sauvegarde » est l'architecture, pas un détail.</strong> Un hash au handshake coûte une journée ; sans lui, l'identité restera une heuristique à trois têtes.</li>
+    <li><strong>Rien n'est distribuable, et aucune des étapes ne le mesure.</strong> La session prescrite ne peut pas être déléguée aujourd'hui : bus factor 1, et le test devient auto-réalisateur.</li>
+    <li><strong>Le contrat de contenu n'est pas le pipeline de contenu.</strong> Une journée pour prouver identité + hash garde la thèse vivante sans payer AssetBundles.</li>
+    <li><strong>La batterie est un actif, pas un coût.</strong> Changer son substrat, jamais retirer une assertion — le §35.2 est la preuve de ce que coûte un contrôle incapable d'échouer.</li>
+  </ul>
+</div>
+
+<h2>Où le conseil s'accorde</h2>
+<div class="card">
+  <div class="card-title">Grille d'accord</div>
+  <table class="grid-table">
+    <thead><tr><th>Lentille</th><th>Confiance</th><th>Thèse centrale</th><th>Premier pas proposé</th></tr></thead>
+    <tbody>
+      <tr><td>Red Team</td><td><span class="conf conf-high">high</span></td><td>Prototype-miroir : tout se synchronise, rien ne se joue ensemble</td><td>Session 30 min comme seul critère</td></tr>
+      <tr><td>First Principles</td><td><span class="conf conf-high">high</span></td><td>La question de recherche est tranchée ; la boucle ne l'est pas</td><td>Session 30 min non scriptée</td></tr>
+      <tr><td>Expansionist</td><td><span class="conf conf-medium">medium</span></td><td>Enregistrer/rejouer une session hors jeu, maintenant que le flux est simple</td><td>Enregistreur + rejeu</td></tr>
+      <tr><td>Outsider</td><td><span class="conf conf-high">high</span></td><td>Spike de R&amp;D instrumenté, pas encore un produit</td><td>Session d'abord ; spec exécutable</td></tr>
+      <tr><td>Executor</td><td><span class="conf conf-medium">medium</span></td><td>Chemin critique de 14 jours, avec critères d'arrêt</td><td>Autorité joueur minimale</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>Priorisation (lentille Executor)</h2>
+<div class="card">
+  <div class="card-title">RICE — Reach = sert le but « jouable »</div>
+  <table class="rice-table">
+    <thead><tr><th>Candidat</th><th>Reach</th><th>Impact</th><th>Conf.</th><th>Effort</th><th>Score</th></tr></thead>
+    <tbody>
+      <tr><td>Autorité joueur + correction</td><td>1</td><td>5</td><td>5</td><td>3 j</td><td><strong>8,3</strong></td></tr>
+      <tr><td>Reconnexion + rejeu complet</td><td>1</td><td>4</td><td>4</td><td>2 j</td><td><strong>8,0</strong></td></tr>
+      <tr><td>Session 30 min scénarisée</td><td>1</td><td>5</td><td>4</td><td>3 j</td><td><strong>6,7</strong></td></tr>
+      <tr><td>Découpage <code>ServerNetwork</code></td><td>1</td><td>3</td><td>5</td><td>5 j</td><td>3,0</td></tr>
+      <tr><td>M6 AssetBundles</td><td>0</td><td>4</td><td>2</td><td>15 j</td><td>0,5</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>Débat forcé</h2>
+<div class="card">
+  <div class="card-title">Procureur contre consensus</div>
+  <div class="debate-callout">
+    <div class="debate-label">Procureur</div>
+    <p>« Le conseil traite un problème de <em>mesure</em> comme un problème de <em>séquencement</em>, et retire en silence les deux choses qui rendent le projet digne d'être construit : l'autorité sur le contenu et la prémisse anti-confiance. »</p>
+    <ul>
+      <li>La session de 30 min mesure l'absence de crash et la patience de l'auteur ; elle cache l'installation, la version, l'hébergement.</li>
+      <li>Geler le contenu, c'est geler la raison d'exister — mais geler le <em>pipeline</em> et prouver le <em>contrat</em> en un jour est recevable.</li>
+      <li>Une borne de vitesse est un limiteur de débit, pas une autorité : elle ne peut pas arbitrer un désaccord.</li>
+      <li>Couper des sondes rouvre la classe de bug du §35.2 ; il faut changer leur substrat, pas leur nombre.</li>
+      <li>La prémisse non nommée : les deux instances chargent et simulent le même monde. Trois rustines, une seule prémisse.</li>
+    </ul>
+  </div>
+  <div class="debate-callout def">
+    <div class="debate-label">Défenseur</div>
+    <p>« La réponse à “l'autorité est mal nommée” n'est pas de supprimer la revendication, c'est de la rendre vraie là où elle compte et de la renommer ailleurs. »</p>
+    <ul>
+      <li>Chef 1 : concédé à moitié — deux portes, mais la session reste le seul instrument d'intégration ; on ajoute l'installabilité, on ne remplace pas.</li>
+      <li>Chef 2 : concédé sur le pipeline, rejeté sur le contrat — la raison d'exister écrite est l'autorité, pas les AssetBundles.</li>
+      <li>Chef 3 : concédé sur le vocabulaire, rejeté sur l'alternative — simuler le motor côté serveur est un autre chantier.</li>
+      <li>Chef 4 : entièrement concédé, et ce n'était pas un désaccord.</li>
+      <li>Chef 5 : concédé, et c'est la meilleure contribution du débat — la connexion doit être un <em>diff</em>.</li>
+    </ul>
+  </div>
+</div>
+
+<h2>La suite replanifiée</h2>
+<div class="card">
+  <div class="card-title">Séquence, avec un critère observable par étape</div>
+  <table class="ds-table">
+    <thead><tr><th>#</th><th>Travail</th><th>Jours</th><th>Critère observable</th></tr></thead>
+    <tbody>
+      <tr><td>P0</td><td>Empreinte de sauvegarde au handshake (slot + hash) et refus nommé ; README, script de déploiement, manifeste épinglé, <code>.sln</code>, projet de tests</td><td>1–2</td><td>Deux instances sur des sauvegardes différentes sont refusées avec leur raison ; <code>dotnet test</code> vert en &lt; 10 s</td></tr>
+      <tr><td>P1</td><td>Autorité joueur honnête : borne vitesse/téléport, <code>PlayerCorrection</code>, compteur de faux positifs</td><td>2–3</td><td>Téléport de 100 m refusé et journalisé ; nage normale = 0 correction ; taux publié</td></tr>
+      <tr><td>P1bis</td><td>Contrat de contenu : entité définie par le serveur, identité + <code>definitionHash</code>, instanciée par un client qui ne l'a jamais vue</td><td>1</td><td>Le client retrouve l'entité par sa clé ; un hash divergent est refusé</td></tr>
+      <tr><td>P2</td><td>Reconnexion : rejeu claims, apparitions, retraits, conducteurs + resync de baseline</td><td>2</td><td>Client tué puis relancé : N claim(s) rejoué(s), aucun fantôme, objet absent des deux côtés</td></tr>
+      <tr><td>P3</td><td>Substrat de vérification : enregistreur + rejeu hors jeu, toutes les assertions conservées</td><td>3–5</td><td>Une régression d'interpolation est détectée hors du jeu, en secondes</td></tr>
+      <tr><td>P4</td><td>Session réelle 30 min, deux joueurs, installation faite par le second</td><td>2–3</td><td>0 exception, 0 désync &gt; 2 m, sauvegarde + rechargement + reconnexion, verdict unique</td></tr>
+      <tr><td>P5</td><td>Découper <code>ServerNetwork</code> en cinq systèmes</td><td>5</td><td><code>verify.sh</code> identique, comportement inchangé</td></tr>
+      <tr><td>—</td><td><strong>Gelé :</strong> pipeline AssetBundles, énergie/modules de véhicule, nouvelles sondes, host migration, matchmaking</td><td>—</td><td>Se rouvre après P4, sur décision explicite</td></tr>
+    </tbody>
+  </table>
+  <p style="margin-top:12px;color:var(--muted);font-size:13.5px">Chemin critique : P0 → P1 → P2 → P4 (≈ 8–11 jours). P1bis et P3 en parallèle. P5 après, parce que découper un fichier qu'on va encore corriger coûte deux fois.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Critères d'arrêt</div>
+  <ol>
+    <li>Après P1, <strong>plus de 5 % de corrections</strong> sur une nage normale → la validation a posteriori n'est pas viable : il faut transporter les entrées, et abandonner le mot « autoritaire » pour le joueur.</li>
+    <li>Session avec <strong>plus de 3 désyncs &gt; 2 m</strong> ou <strong>une exception par 10 min</strong> → les deux mondes divergent structurellement ; la prémisse doit être reposée.</li>
+    <li>Un rechargement qui <strong>perd les clés d'entités</strong> → l'identité sérialisée n'est pas stable, et M6 est bâti sur du sable.</li>
+  </ol>
+</div>
+
+<h2>Les cinq lentilles</h2>
+
+<details class="advisor-red-team">
+  <summary>Red Team <span class="conf conf-high">high</span></summary>
+  <div class="detail-body">
+    <p><strong>Mode de défaillance :</strong> le prototype-miroir — présence, créatures, véhicules et ramassage synchronisés, mais rien à faire ensemble au bout de trente minutes. Aucun patch de <code>LiveMixin.TakeDamage</code>, <code>EnergyMixin</code>, <code>CraftTree</code> ; ni inventaire, ni oxygène, ni jour/nuit. Les huit patches du §5 sont faits à 2/8.</p>
+    <p><strong>Cause racine :</strong> l'unité de progrès est « un système, une sonde, une ligne de log », jamais « une session ». <code>verify.sh</code> est devenu le produit : 976 lignes d'assertions pour 21 700 lignes de code.</p>
+    <p><strong>Non prouvé :</strong> l'autorité du joueur. <code>HandlePlayerPosition</code> relaie toute position après un contrôle NaN/séquence. Falsification en 30 minutes, pas en un run complet.</p>
+    <p><strong>Signal manqué :</strong> trois schémas d'identité réinventés, une seule sauvegarde chargée.</p>
+  </div>
+</details>
+
+<details class="advisor-first-principles">
+  <summary>First Principles <span class="conf conf-high">high</span></summary>
+  <div class="detail-body">
+    <p><strong>Sept propriétés d'une session de 30 min :</strong> un monde/un écrivain (existe), présence (existe), convergence (existe), cycle de vie des entités (existe, serveur → client), économie partagée (<em>partiel</em> : inventaire, craft, dégâts, oxygène restent locaux), cycle de vie de session (<em>manquant</em>), confinement des pannes (<em>non mesuré</em>).</p>
+    <p><strong>Reframings :</strong> exercice de protocole (perd), produit jouable (gagne), spike de recherche (question déjà répondue oui, deux fois, avec des chiffres).</p>
+    <p><strong>Ordre :</strong> la décomposition par système est juste en principe, fausse dans l'ordre — elle achète de la largeur pendant que la boucle reste ouverte.</p>
+  </div>
+</details>
+
+<details class="advisor-expansionist">
+  <summary>Expansionist <span class="conf conf-medium">medium</span></summary>
+  <div class="detail-body">
+    <p><strong>Option débloquée :</strong> enregistrer et rejouer une session hors du jeu. Le modèle est sans Unity, les gestionnaires ne consomment que messages + temps ; il manque l'enregistreur. Les 15 étapes deviennent des fixtures, une régression se voit en secondes.</p>
+    <p><strong>Pourquoi maintenant :</strong> le flux est encore « position + orientation + identité » ; après l'énergie, les modules, les dégâts et les inventaires, il ne sera plus rejouable sans simuler le monde.</p>
+    <p><strong>Dominante :</strong> enregistreur/rejeu (3–5 j), payé par M6-contenu. <strong>À ne pas construire :</strong> le pipeline AssetBundles — deuxième dette d'identité, contrat de version non exprimable, invérifiable avant le rejeu.</p>
+  </div>
+</details>
+
+<details class="advisor-outsider">
+  <summary>Outsider <span class="conf conf-high">high</span></summary>
+  <div class="detail-body">
+    <p><strong>Classement :</strong> spike de R&amp;D instrumenté. La question « Subnautica peut-elle être répliquée côté serveur ? » est presque répondue, et bien. Celle qui n'a pas commencé : « est-ce un jeu auquel on joue une heure ? »</p>
+    <p><strong>Confirmé :</strong> monolithes. <strong>Exonéré :</strong> l'égalité stricte de version, aujourd'hui. <strong>Partiellement exonéré :</strong> la batterie bash est bonne, mais <code>Coop.Model</code> est conçu pour être testable sans Unity et n'est jamais testé.</p>
+    <p><strong>À adopter :</strong> rendre la spécification exécutable — fixtures binaires rejouées dans <code>PacketReader</code> et les gestionnaires, en CI, en secondes.</p>
+    <p><strong>Question :</strong> si deux joueurs jouaient une heure ce soir, qu'est-ce qui casse en premier — et pourquoi n'est-ce pas le prochain jalon ?</p>
+  </div>
+</details>
+
+<details class="advisor-executor">
+  <summary>Executor <span class="conf conf-medium">medium</span></summary>
+  <div class="detail-body">
+    <p><strong>Chemin critique :</strong> autorité joueur minimale (J1–2), reconnexion (J3), session scriptée (J4–5), sauvegarde/reload avec clés stables (J6–7), découpage de <code>ServerNetwork</code> (J8–14).</p>
+    <p><strong>À couper :</strong> M6 contenu, énergie/modules véhicule, nouvelles sondes.</p>
+    <p><strong>Critères d'arrêt :</strong> &gt; 5 % de corrections sur une nage normale ; session avec &gt; 3 désyncs &gt; 2 m ou 1 exception / 10 min ; reload perdant les clés d'entité.</p>
+  </div>
+</details>
+
+<h2>Revues croisées</h2>
+
+<details>
+  <summary>Reviewer 1</summary>
+  <div class="detail-body">
+    <p><strong>Plus fort :</strong> Executor — la seule réponse exécutable dès demain.</p>
+    <p><strong>Plus dangereux si faux :</strong> « l'anti-triche est un sur-investissement » — retire la justification fondatrice <em>et</em> le seul mécanisme qui détecterait une divergence ordinaire.</p>
+    <p><strong>Manqué :</strong> l'autorité est traitée comme une propriété par message ; le client continue de simuler tous les systèmes non patchés, la divergence s'accumule <em>entre</em> les messages.</p>
+    <p><strong>Accord : 4/5.</strong></p>
+  </div>
+</details>
+
+<details>
+  <summary>Reviewer 2</summary>
+  <div class="detail-body">
+    <p><strong>Plus fort :</strong> Executor — séquence datée, falsifiable, avec critères d'arrêt.</p>
+    <p><strong>Plus dangereux si faux :</strong> abandonner l'autorité joueur sur une hypothèse d'audience (« entre amis »), sans mesure.</p>
+    <p><strong>Manqué :</strong> la simplification qui dissout le problème — un client qui ne charge pas le monde et reçoit son état.</p>
+    <p><strong>Accord : 4/5.</strong></p>
+  </div>
+</details>
+
+<details>
+  <summary>Reviewer 3</summary>
+  <div class="detail-body">
+    <p><strong>Plus fort :</strong> Red Team — nomme le mode de défaillance, sa cause et l'affirmation non prouvée.</p>
+    <p><strong>Plus dangereux si faux :</strong> la prémisse partagée que la session de 30 min est la contrainte liante.</p>
+    <p><strong>Manqué :</strong> rien ne coûte l'installabilité (DLL, épinglage, ports, pare-feu, launcher hors dépôt) — le test prescrit n'est pas délégable.</p>
+    <p><strong>Accord : 4/5.</strong></p>
+  </div>
+</details>
+
+<details>
+  <summary>Reviewer 4</summary>
+  <div class="detail-body">
+    <p><strong>Plus fort :</strong> Red Team — nomme le mécanisme que les autres décrivent.</p>
+    <p><strong>Plus dangereux si faux :</strong> le budget de « une boucle d'état partagée de bout en bout » (3–4 j) ; si l'inventaire ne se superpose pas au modèle d'autorité actuel, le chemin de 14 jours est fictif.</p>
+    <p><strong>Manqué :</strong> la distribution — qui héberge, comment un ami installe la bonne version, ce qui se passe quand l'hôte quitte.</p>
+    <p><strong>Accord : 4/5.</strong></p>
+  </div>
+</details>
+
+<details>
+  <summary>Reviewer 5</summary>
+  <div class="detail-body">
+    <p><strong>Plus fort :</strong> Executor — étapes datées, test d'acceptation et critère d'arrêt par étape.</p>
+    <p><strong>Plus dangereux si faux :</strong> client-authoritatif « entre amis » — retire la raison d'être du projet sans mesure.</p>
+    <p><strong>Manqué :</strong> l'hébergement et la distribution ; aucune des étapes ne les couvre.</p>
+    <p><strong>Accord : 4/5.</strong></p>
+  </div>
+</details>
+
+<h2>Ce que ce conseil ne prouve pas</h2>
+<ul>
+  <li>Les avis sont des raisonnements sur les documents et le code, <strong>pas des mesures</strong> : rien ici ne remplace un run.</li>
+  <li>Les coûts (jours) sont des estimations ; l'auteur est seul, et le découpage peut doubler.</li>
+  <li>La question « pourquoi ce projet » (apprendre, jouer entre amis, base de serveurs moddés) change la réponse sur le contenu : le conseil tranche pour « jouer d'abord », et le dit.</li>
+  <li>Le rejeu hors jeu n'est pas démontré faisable pour <code>RemoteAvatar</code>/équipement ; P3 commence par les flux qui s'y prêtent.</li>
+  <li>Decision Science (Codex) non exécuté : outil indisponible. Les options ont été comparées qualitativement, sans matrice chiffrée.</li>
+</ul>
+
+<footer>
+  LLM Council · Mode : Standard · Run <code>q2026-10-19</code> · <a href="council-transcript-2026-10-19.md">Transcript complet</a> · Décision consignée au §43 de <code>PLAN.md</code>
+</footer>
+
+</div>
+</body>
+</html>

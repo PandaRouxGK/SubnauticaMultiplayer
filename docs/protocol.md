@@ -12,19 +12,24 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `12` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v12` | `Protocol.ConnectionKey` |
+| Version du protocole | `13` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v13` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
-| Encodage | little-endian, tampons réutilisables, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
+| Encodage | little-endian, tampons réutilisables, chaînes UTF-8 **strictes en lecture**, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
 
 Deux classes de livraison sont utilisées, et seulement deux : `ReliableOrdered` pour tout ce qui décrit un
 état durable (handshake, entrées/sorties de joueurs, équipement, objet tenu, couleur), `Unreliable` pour les
 flux rapides qui se corrigent d'eux-mêmes (positions de joueurs, créatures, véhicules, `Pong`).
 
 Toute lecture est bornée : un paquet tronqué lève `ProtocolException` au lieu de renvoyer des valeurs
-inventées, et toute position ou quaternion non fini est refusé (`PlayerPositionMessage.EnsureFinite`).
-`tools/NetProbe` vérifie les deux dans son autotest.
+inventées, et toute position ou quaternion non fini est refusé (`PlayerPositionMessage.EnsureFinite`). Une
+séquence UTF-8 invalide est un paquet invalide (`DecoderFallbackException` converti en `ProtocolException`),
+jamais une chaîne à caractères de remplacement : un octet hostile ne devient pas silencieusement un pseudo.
+Symétriquement, l'**écriture** est stricte : une chaîne contenant un surrogate isolé (demi-paire UTF-16)
+est refusée à l'encodage au lieu d'être écrite en U+FFFD — ce qui aurait laissé passer un message dont la
+lecture ne rend pas la valeur émise. Les paires valides (emoji, accents hors BMP) traversent inchangées.
+`tools/NetProbe` vérifie ces refus dans son autotest.
 
 ---
 
@@ -37,7 +42,7 @@ et encodé en UTF-8.
 
 | # | Message | Sens | Livraison | Charge utile |
 |---|---|---|---|---|
-| 1 | `HandshakeRequest` | client → serveur | ReliableOrdered | `ProtocolVersion` int, `GameVersion` string, `ModListHash` string, `Username` string |
+| 1 | `HandshakeRequest` | client → serveur | ReliableOrdered | `ProtocolVersion` int, `GameVersion` string (≤ 32), `ModListHash` string (≤ 64), `Username` string (≤ 32, tronqué côté client), `Save` (`Slot` string ≤ 64, `SessionId` string ≤ 64, `ChangeSet` int, `GameMode` string ≤ 16, `Hash` long) — chaque borne est refusée à l'écriture **comme** à la lecture |
 | 2 | `HandshakeResponse` | serveur → client | ReliableOrdered | `Accepted` bool, `Reason` string, `ServerTick` long, `AssignedPlayerId` ushort |
 | 3 | `Ping` | client → serveur | Unreliable | `Sequence` long, `ClientTimeMs` long |
 | 4 | `Pong` | serveur → client | Unreliable | `Sequence` long, `ClientTimeMs` long, `ServerTick` long, `ServerTimeMs` long |
@@ -45,19 +50,20 @@ et encodé en UTF-8.
 | 6 | `PlayerJoined` | serveur → client | ReliableOrdered | `PlayerId` ushort, `Username` string, position (3 floats), quaternion (4 floats) |
 | 7 | `PlayerLeft` | serveur → client | ReliableOrdered | `PlayerId` ushort, `Username` string, `Reason` string |
 | 8 | `PlayerPosition` | client → serveur | Unreliable | `Sequence` int, position (3), quaternion (4), `MoveSpeed` (3), `ViewPitch`, `IsUnderwater` bool, `OnSurface` bool, `ActionFlags` octet |
-| 9 | `PlayersSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet, puis par joueur : les mêmes champs que #8 |
+| 9 | `PlayersSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet (**≤ `MaxClients`**, refusé au-delà à l'écriture comme à la lecture), puis par joueur : les mêmes champs que #8 |
 | 10 | `PlayerEquipment` | client → serveur, puis serveur → autres | ReliableOrdered | `PlayerId` ushort, compte octet, puis les noms de `TechType` |
 | 11 | `PlayerHeldItem` | client → serveur, puis serveur → autres | ReliableOrdered | `PlayerId` ushort, `TechTypeName` string, compte octet, puis les paramètres d'animation actifs |
 | 12 | `PlayerColor` | serveur → client | ReliableOrdered | `PlayerId` ushort, `ColorIndex` octet |
 | 13 | `CreatureSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte ushort, puis par créature : `Key` long, position (3), quaternion (4) |
 | 14 | `VehicleSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet, puis par véhicule : `Key` long, position (3), quaternion (4) |
 | 15 | `PickupClaim` | client → serveur | ReliableOrdered | `PlayerId` ushort (revendiqué, falsifiable), `ItemKey` long, `TechTypeName` string |
-| 16 | `PickupResult` | serveur → demandeur | ReliableOrdered | `ItemKey` long, `TechTypeName` string, `Granted` bool, `HolderId` ushort, `ClaimedBy` ushort |
+| 16 | `PickupResult` | serveur → demandeur | ReliableOrdered | `ItemKey` long, `TechTypeName` string (**≤ 64**, refusé au-delà à l'écriture comme à la lecture), `Granted` bool, `HolderId` ushort, `ClaimedBy` ushort |
 | 17 | `VehicleControl` | client → serveur | Unreliable (10 Hz) | `PlayerId` ushort (revendiqué, falsifiable), `VehicleKey` long, `Sequence` int, position et rotation (7 floats), vitesse (3 floats) |
 | 18 | `VehicleControlResult` | serveur → demandeur | ReliableOrdered | `VehicleKey` long, `Granted` bool, `DriverId` ushort |
-| 19 | `EntitySpawn` | serveur → client | ReliableOrdered | `Key` long, `UniqueId` string, `TechTypeName` string, position (3 floats), quaternion (4 floats) |
-| 20 | `EntityDespawn` | serveur → client | ReliableOrdered | `Key` long, `Kind` octet (`1` véhicule, `2` objet), `Reason` string |
+| 19 | `EntitySpawn` | serveur → client | ReliableOrdered | `Key` long (**jamais 0**), `UniqueId` string (**non vide**, ≤ 64), `TechTypeName` string (≤ 64), position (3 floats), quaternion (4 floats), échelle (3 floats), `DefinitionHash` long (**jamais 0**). Position, quaternion et échelle doivent être **finis** ; toute valeur `NaN`/∞ est refusée à l'écriture comme à la lecture |
+| 20 | `EntityDespawn` | serveur → client | ReliableOrdered | `Key` long (**jamais 0**, refusé à l'écriture comme à la lecture), `Kind` octet (`1` véhicule, `2` objet), `Reason` string (≤ 96) |
 | 21 | `VehicleRelease` | client → serveur | ReliableOrdered | `VehicleKey` long |
+| 22 | `PlayerCorrection` | serveur → client | ReliableOrdered | `ServerTick` long, position acceptée (3 floats, **finie** : `NaN`/∞ refusée à l'écriture comme à la lecture), `Reason` string (≤ 96) |
 
 Cinq points de contrat que ces messages portent :
 
@@ -81,6 +87,17 @@ Cinq points de contrat que ces messages portent :
   faire (objet ramassé). `Kind` évite deux index côté client — une clé de véhicule et une clé d'objet sont
   deux hachages de formes différentes. Le détenteur d'un objet ramassé est **exclu** de la diffusion de
   son propre retrait : son exemplaire est déjà dans son inventaire.
+- **L'empreinte de sauvegarde fait partie du handshake (#1, v13).** `Slot`, `SessionId`, `ChangeSet` et
+  `GameMode` sont joints à un `Hash` d'intégrité ; le serveur refuse une partie différente, une cliente
+  plus ancienne (`ChangeSet` inférieur) ou une empreinte altérée, avec le motif en clair. Un client sans
+  empreinte est accepté **sous réserve** pendant la course de démarrage, puis vérifié au tick — jamais
+  silencieusement. Section 4 quinquies.
+- **La définition d'une entité est un contrat falsifiable (#19, v13).** En plus de l'identité, l'annonce
+  porte l'échelle et `DefinitionHash` : le client **recalcule** l'empreinte de la définition reçue et
+  refuse l'entité avant toute allocation si elle diverge. `DefinitionHash = 0` est refusé à la lecture.
+- **Le serveur peut contredire une position (#22, v13).** Refus nommé + position acceptée renvoyée ; le
+  client l'applique hors véhicule au-delà de `CorrectionApplyThresholdMeters` (0,75 m). Ce n'est pas une
+  simulation du motor : 15 m/s hors véhicule, 35 m/s en véhicule, 2 m de tolérance (section 4 quinquies).
 - **La libération du volant voyage (#21, v12).** Le conducteur dit « je ne conduis plus », le serveur libère
   aussitôt ; un silence de `VehicleSilenceReleaseSeconds` (3 s) fait de même, au cas où le client aurait
   planté. Sans ces deux chemins, un véhicule restait attribué à son dernier conducteur jusqu'à sa
@@ -170,8 +187,30 @@ distingue en décalant la teinte de sa texture dans la bande 5°–45° (`HsvSwa
 | `ServerHostPlayerId` | `0` | identifiant réservé au personnage de l'instance serveur |
 | `MaxEntityIdLength` | `64` | longueur maximale d'un `UniqueId` dans `EntitySpawn` (#19) : un identifiant du jeu fait 36 caractères, `64` laisse de la marge sans permettre un paquet démesuré (écriture et lecture refusent au-delà) |
 | `MaxDespawnReasonLength` | `96` | motif lisible d'un `EntityDespawn` (#20) : il ne sert qu'au journal, mais une chaîne non bornée est un paquet non borné (refusé à l'écriture comme à la lecture) |
+| `SaveIdentityResolveTimeoutSeconds` | `20` | attente maximale, côté client, de sa propre empreinte avant de se connecter quand même (P0) : une attente infinie serait un blocage silencieux |
+| `MaxCorrectionReasonLength` | `96` | motif lisible d'un `PlayerCorrection` (#22) ; au-delà, l'écriture **et** la lecture lèvent `ProtocolException` |
+| `CorrectionApplyThresholdMeters` | `0.75` | en dessous, la correction n'est **pas** appliquée : le bruit d'interpolation ne doit pas téléporter le joueur pour rien |
+| `EntityDefinition.CurrentRevision` | `1` | version de la forme canonique d'une définition : un champ ajouté change le hash de tout le monde (`Milli`, quantifié au millimètre, évite qu'un arrondi de runtime fasse échouer un hash correct) |
+
+### Plausibilité des positions (v13, P1)
+
+| Constante | Valeur | Source |
+|---|---|---|
+| Vitesse maximale hors véhicule | `15 m/s` | `PlayerPlausibility.MaxSpeedMetersPerSecond` — nage ~5 m/s, chute ~10 m/s, marge incluse |
+| Vitesse maximale en véhicule | `35 m/s` | `PlayerPlausibility.MaxMountedSpeedMetersPerSecond` — Seamoth mesuré à 20 m/s |
+| Tolérance par message | `2 m` | `PlayerPlausibility.GraceMeters` |
+| Intervalle minimal jugé | `0.02 s` | `MinJudgeSeconds` : en dessous, c'est une rafale, le temps écoulé ne mesure rien |
+| Intervalle maximal jugé | `2 s` | `MaxJudgeSeconds` : au-delà, c'est un trou de flux (pause, chargement), on ne juge pas |
+| Refus consécutifs avant resynchronisation | `3` | `MaxConsecutiveRejections` — au-delà, le serveur accepte la position reçue |
+| Budget de resynchronisations | `5 / 60 s` | `ServerNetwork` : au-delà, la session est éjectée (un client qui ne peut pas revenir ne doit pas marteler) |
 | `VehicleSilenceReleaseSeconds` | `3.0` | silence au bout duquel le serveur libère un volant (v12) : le conducteur envoie à 10 Hz, donc 30 états manqués — bien au-delà d'une rafale de latence, bien en dessous de l'attente d'un joueur qui veut reprendre le véhicule |
 | Identifiant de l'hôte vu par un client | `9999` | `ServerNetwork.BroadcastSnapshots` : l'hôte est inclus comme joueur virtuel pour qu'un client seul voie aussi son personnage |
+| Position reçue ou précédente non finie, intervalle `NaN` | refus **nommé** | `PlayerPlausibility.Evaluate` : plus de rejet muet quand la distance calculée serait `NaN` ; le motif dit lequel des trois cas s'applique |
+| Changement de véhicule | non jugé | comparaison des **bits** `InSeamoth`/`InExosuit` : un passage Seamoth → Exosuit est un saut légitime, pas un déplacement ordinaire |
+
+**Limite assumée** : à 20 Hz, la tolérance de `2 m` par message autorise un pas de 2 m toutes les 50 ms, soit
+`40 m/s`. La garde attrape donc un **téléport** (dizaines de mètres en un message), **pas** un speedhack
+progressif ; la mesurer comme un anti-triche demanderait un budget glissant, qui n'existe pas encore.
 
 ---
 
@@ -271,6 +310,28 @@ seule fois, puis oubliée.
 
 ---
 
+## 4 quinquies. Contrats ajoutés en v13 : sauvegarde, contenu, position
+
+1. **L'empreinte de sauvegarde est une lignée, pas un hash de fichiers.** L'hôte peut sauvegarder pendant
+   la session : un client qui rejoint lit alors une sauvegarde plus récente que celle que le serveur a lue
+   au démarrage. `SaveCompatibility.Explain` accepte donc un `ChangeSet` client **≥** serveur, et refuse
+   un client plus ancien. Slot, session ou mode différents sont refusés, empreinte altérée aussi — le hash
+   est recalculé et comparé **des deux côtés**, client puis serveur, avant toute autre règle. La forme
+   canonique échappe `\`, `|`, `\n` et `\r` : deux répartitions de champs (`slot="a|b"/session="c"` et
+   `slot="a"/session="b|c"`) ne peuvent plus produire le même hash ; les valeurs usuelles (`slot0000`,
+   GUID, `Freedom`) sont inchangées. Le client attend sa propre empreinte au plus `20 s`
+   (`SaveIdentityResolveTimeoutSeconds`), puis se connecte quand même : le refus sera nommé, pas silencieux.
+2. **Le contrat de contenu n'est pas un pipeline.** Le serveur décrit ce qu'il annonce (espèce, échelle) et
+   son empreinte canonique quantifiée au millimètre ; le client recompute et refuse une divergence. Il ne
+   transporte **aucun** AssetBundle : une espèce que le client ne sait pas résoudre est refusée et comptée.
+3. **La correction de position est une garde, pas une autorité de simulation.** Le serveur juge le
+   déplacement contre la **dernière position acceptée** : `15 m/s` hors véhicule, `35 m/s` en véhicule,
+   `2 m` de tolérance ; rafales (< 20 ms) et trous de flux (> 2 s) ne sont pas jugés, un changement de
+   véhicule non plus. Trois refus consécutifs déclenchent une resynchronisation ; au-delà de 5 par minute,
+   la session est éjectée. Le taux est publié toutes les 5 s (`[net] position : … (x.x%)`).
+
+---
+
 ## 5. Admission et refus
 
 `ServerNetwork.Validate` (`src/Coop.Server/ServerNetwork.cs`) refuse un handshake, **en donnant la raison en
@@ -282,17 +343,30 @@ clair** dans un `HandshakeResponse.Accepted = false`, en ReliableOrdered, puis l
 | `version de protocole incompatible` | `ProtocolVersion != Protocol.Version` |
 | `serveur plein (10 clients)` | `AcceptedClients >= Protocol.MaxClients` |
 | `pseudo vide` | `IsNullOrWhiteSpace(Username)` |
-| `pseudo trop long` | `Username.Length > MaxUsernameLength` |
+| `pseudo trop long` | `Username.Length > MaxUsernameLength` (le client **et** le serveur passent par `Usernames.Sanitize` ; le refus reste pour un client tiers qui annonce un pseudo hors borne) |
 | `liste de mods différente` | `ModListHash` différent (comparaison ordinale) |
 | — | version de jeu différente (même comparaison) |
+| `empreinte de sauvegarde absente` | le serveur connaît sa partie et le client n'envoie pas d'empreinte |
+| motif de `SaveCompatibility.Explain` | slot, session ou mode différents ; `ChangeSet` client inférieur ; hash recalculé différent |
+
+### Empreinte de la liste de mods
+
+`ModListHash.Compute` (`src/Coop.Model/ModListHash.cs`) est déterministe et **indépendante de l'ordre de
+chargement** : tri `StringComparer.Ordinal` des identifiants bruts, échappement de `\`, `\n` et `\r`
+(sinon `["a\nb"]` et `["a","b"]` auraient la même empreinte), jointure par `\n`, encodage UTF-8, SHA-1,
+et conservation des **8 premiers octets** en 16 caractères hexadécimaux minuscules. La liste vide vaut
+`da39a3ee5e6b4b0d`. Les identifiants usuels (noms de DLL) ne contiennent aucun caractère échappé : leur
+empreinte est donc identique à celle de l'algorithme précédent. Le `NetProbe selftest` couvre désormais un
+aller-retour pour **chacun** des 22 messages, y compris les refus (troncature, `NaN`, clé nulle, plafonds).
 
 À l'acceptation, le serveur : attribue un `PlayerId`, assigne la couleur, envoie au nouvel arrivant un
 `PlayerJoined` + sa couleur + l'équipement et l'objet tenu des joueurs déjà présents, annonce son arrivée
 aux autres (`ServerNetwork.HandleHandshake`), puis lui **rejoue les annonces d'entités fabriquées avant son
-arrivée** (`SendSpawnedEntities`). Ce dernier point n'est pas un confort : les entités d'une sauvegarde
-existent déjà chez lui, une entité fabriquée non. Mesuré à l'étape N : le second client se connecte après
-le `spawn` de l'hôte et, sans ce rejeu, ne reçoit rien — verdict False à 150 s alors que le premier avait
-tout créé.
+arrivée** (`SendSpawnedEntities`), **apparitions puis retraits** (`EntitySpawn` #19, `EntityDespawn` #20) :
+les entités d'une sauvegarde existent déjà chez lui, une entité fabriquée non, et une entité retirée
+avant son arrivée ne doit pas revenir avec la sauvegarde. Mesuré à l'étape N : le second client se
+connecte après le `spawn` de l'hôte et, sans ce rejeu, ne reçoit rien — verdict False à 150 s alors que le
+premier avait tout créé. Les deux carnets sont bornés à `256` ; une clé recréée efface son ancien retrait.
 
 ---
 
@@ -305,21 +379,27 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   envoie son état (#17) : le serveur vérifie que la clé désigne un de ses véhicules, que le joueur est à
   moins de `10 m`, et qu'aucun autre joueur ne conduisait déjà, puis applique et rediffuse (#18 rend la
   décision au demandeur). Ne sont **pas** transportés : l'énergie, les modules, les dégâts — un client qui
-  conduit et un serveur qui ne simule pas le véhicule ne peuvent pas décider d'une panne. Il n'y a **pas
-  de libération** du véhicule : le conducteur garde la main jusqu'à sa déconnexion (`PLAN.md` §40). La  synchronisation suppose aussi un véhicule **présent dans la sauvegarde des deux côtés** : la création
+  conduit et un serveur qui ne simule pas le véhicule ne peuvent pas décider d'une panne. La
+  synchronisation suppose aussi un véhicule **présent dans la sauvegarde des deux côtés** : la création
 d'entité (v10, #19) et son retrait (v11, #20) existent désormais, mais **seulement du serveur vers les
 clients** — un véhicule fabriqué **chez un client** n'existe pas dans le monde du serveur.
 - **Le volant se libère (v12, #21)** : le conducteur qui descend le rend immédiatement, et un silence de
   `VehicleSilenceReleaseSeconds` (3 s) le libère aussi. Le véhicule n'est donc plus perdu jusqu'à la
   déconnexion de son dernier conducteur.
-- **Le ramassage est autoritaire, mais son effet sur le monde ne l'est pas** : depuis la v8 et la fin de
-  M5, le serveur accorde ou refuse une clé **d'un objet réel** (il la résout dans son propre monde, et
-  refuse ce qu'il ne trouve pas ou qui est à plus de `6 m` du joueur), et le client **bloque** le geste de
-  ramassage (`Pickupable.OnHandClick`) quand la réponse est un refus, avec retour arrière si le refus arrive
-  après un ramassage optimiste (`PLAN.md` §39). Ce qui manque : **le monde du serveur garde l'objet** —
-  aucun message ne dit « cet objet n'existe plus » —, les objets **mobiles** peuvent être jugés hors portée
-  à tort, et les objets **sans clé** ne sont pas arbitrés. Les collisions de clé sont comptées, pas
-  résolues. Aucun autre arbitrage de ressource (récolte, craft, dégâts) n'existe.
-- **Aucun transport de contenu** : pas d'AssetBundle, pas de définition d'objet envoyée au client (M6).
-- **Version 12** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
+- **Le ramassage est autoritaire, y compris son effet sur le monde** : depuis la v8, le serveur accorde ou
+  refuse une clé **d'un objet réel** (il la résout dans son propre monde, et refuse ce qu'il ne trouve pas
+  ou qui est à plus de `6 m` du joueur) ; depuis la v11, l'objet accordé est **retiré du monde serveur** et
+  annoncé aux autres (#20), le détenteur étant exclu de son propre retrait. Le client **bloque** le geste
+  (`Pickupable.OnHandClick`) quand la réponse est un refus, avec retour arrière si le refus arrive après un
+  ramassage optimiste (`PLAN.md` §39). Ce qui manque : les objets **mobiles** peuvent être jugés hors
+  portée à tort, les objets **sans clé** ne sont pas arbitrés, et le **retour arrière** n'est exercé par
+  aucune mesure. Les collisions de clé sont comptées, pas résolues. Aucun autre arbitrage de ressource
+  (récolte, craft, dégâts) n'existe.
+- **Aucun transport d'AssetBundle** (M6) : le client ne reçoit pas de prefab, seulement la définition d'une
+  entité qu'il sait **déjà** résoudre. Le contrat v13 (`DefinitionHash`) vérifie cette définition ; il ne
+  permet pas d'en livrer une nouvelle.
+- **La reconnexion n'est pas un cycle de vie** : depuis la v13 (P2, première moitié), un client admis
+  reçoit le rejeu des **apparitions et des retraits** ; il ne récupère ni ses claims de ramassage, ni un
+  volant, ni une resynchronisation de baseline. Un client relancé est un nouveau joueur.
+- **Version 13** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
   tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).
