@@ -139,10 +139,10 @@ serveur qu'une valeur falsifiée est rejetée.
 |---|---|---|---|
 | **M0** | Serveur headless boote | plugin chargé, log `tick 20 Hz OK`, monde chargé sans rendu | ⚠️ **gate bloquant** (voir §7) |
 | **M1** | Squelette réseau | handshake + ping/pong entre 2 process | faible |
-| **M2** | Présence joueurs | 2 clients se voient bouger ; self prédictif, distant interpolé | moyen |
-| **M3** | **Une créature synchro, IA client coupée** | position identique chez les 2 clients, IA uniquement serveur | **élevé — valide le modèle** |
+| **M2** | Présence joueurs | 2 clients se voient bouger ; self prédictif, distant interpolé — **clos le 2026-10-20 (§54.1)** : B (mouvement vu), interpolation `RemoteAvatar` 0,05 s, V (trois clients) | moyen |
+| **M3** | **Une créature synchro, IA client coupée** | position identique chez les 2 clients, IA uniquement serveur — **clos le 2026-10-20 (§54.2)** : E (deux clients), IA relue coupée, W (trois clients) | **élevé — valide le modèle** |
 | **M4** | Un véhicule (Seamoth) | **position diffusée à 10 Hz et interpolée côté client (fait, §33)** ; énergie/upgrades et conduite autoritaire restent ouverts | moyen |
-| **M5** | Première action autoritaire | pickup : refus serveur si déjà réclamé | moyen |
+| **M5** | Première action autoritaire | pickup : refus serveur si déjà réclamé — **clos le 2026-10-20 (§54.3)** : L (accordé/refusé, geste bloqué), O/Q (objet retiré, retrait rejoué), 9 tests du registre | moyen |
 | **M6** | Pipeline de contenu | **création et retrait d'entité faits (§41, §42)** : l'hôte fabrique, les clients instancient avec la clé du serveur ; un retrait et un ramassage se répercutent ; reste l'item **custom** et son AssetBundle livré au client | moyen |
 
 M3 est le vrai test : si une créature pilotée serveur avec IA client désactivée rend
@@ -151,6 +151,9 @@ correctement chez 2 clients, l'architecture est bonne pour tout le reste.
 > **Révisé au §43 (2026-10-19)** : ce tableau est un journal de jalons, pas l'état courant. La séquence
 > qui fait foi pour la suite est celle du §43.5, et **M6-contenu (AssetBundles) y est gelé** jusqu'à ce
 > qu'une session réelle de 30 minutes tienne.
+>
+> **État au 2026-10-20** : M0, M1, M2, M3 et M5 sont **clos** (critères du §6 prouvés, §54) ; M4 reste
+> ouvert (énergie/modules/dégâts non transportés, pas de `spawn` client) et M6 aussi (AssetBundle gelé).
 
 ---
 
@@ -3194,7 +3197,7 @@ pas. Confiance globale : **moyenne**. Rapport et transcript : `docs/council/`.
 ### 43.2 Ce qui ne va pas
 
 > **Photo datée du 2026-10-19**, conservée telle quelle. Les correctifs depuis sont au §44 (P0/P1/P1bis),
-> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**280** tests),
+> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**286** tests),
 > `PlayerPlausibility` garde la position, la sauvegarde est un contrat, et `verify.sh` compte désormais
 > 18 étapes (A–R, dont R pour le refus P0, §49).
 
@@ -3982,3 +3985,71 @@ ignorés=2591 / 1704 / 951`. Le défaut n'était donc pas une mesure fragile : 9
   réelle de 30 minutes tienne. Le livrer ici reviendrait à rouvrir un gel sans la mesure qui le justifie.
 - Les trois clients de V et W ne testent **pas** 4 à 10 joueurs ; `MaxClients=10` reste non exercé au-delà
   de trois.
+
+## 54. Clôture des jalons M2, M3 et M5 (2026-10-20)
+
+Règle appliquée : un jalon est clos quand **son critère du §6** est prouvé, pas quand tout ce qu'on
+aimerait autour l'est. Les limites connues sont écrites à côté de chaque clôture plutôt que passées sous
+silence, et elles n'invalident pas le critère.
+
+### 54.1 M2 — présence joueurs : clos
+
+| Critère §6 | Preuve |
+|---|---|
+| 2 clients se voient bouger | étape **B** verte (2026-10-17, `113 s` puis deux runs isolés `101 s`/`110 s`) : `[sonde] présence : verdict=True` des deux côtés, `nage puis arrêt vus par 'killi' (id=2)`, équipement appliqué sur l'avatar réel |
+| distant interpolé | `RemoteAvatar.InterpolationWindowSeconds = 0.05` : position et rotation interpolées entre deux annonces 20 Hz (`PLAN.md` §30.4), au lieu d'un saut par paquet |
+| self prédictif | **décision inverse, assumée** : la position locale est gardée par l'autorité serveur (P1), pas prédite. C'est écrit depuis §43.2 et mesuré par l'étape **P** (0 correction en nage normale, téléport refusé) |
+| au-delà de deux joueurs (extension, hors critère) | étape **V** verte (2026-10-20, `104 s`) : `id=3` admis, `joueursDistants=2 avatarsActifs=2` chez les trois clients |
+
+**Limites** : V prouve la présence de deux avatars, pas que l'avatar soit vu **en mouvement** à trois
+(la sonde d'avatar conclut à deux) ; 4 à 10 joueurs non exercés.
+
+### 54.2 M3 — une créature synchro, IA client coupée : clos
+
+| Critère §6 | Preuve |
+|---|---|
+| position identique chez les 2 clients | étape **E** verte (2026-10-17) : `verdict=True` des deux côtés, `clé inconnue +0`, `76 sur 76` clés communes, position journalisée identique ; interpolation par image `0,19 m` au plus sur 170 000 images |
+| IA uniquement serveur | `adoptées=65 (IA arrêtée=65)` et `IA coupée index 260 -> 0 …, lue après l'appel : 0` |
+| au-delà de deux clients (extension, hors critère) | étape **W** verte une fois (2026-10-20, `126 s`), puis **rouge** au run de contrôle après extraction du filtre de tick : `écart max=2.01m` pour un seuil de `2,0 m` sur `0,10 s` chez le client 3. **Noté bloquant** (voir §54.5) ; le critère M3 est prouvé par E, à deux clients |
+
+**Limites** : le « clignotement » à la coupure d'IA reste mesuré partiellement (§ preuves) ; une adoption
+après déplacement de l'hôte n'est pas mesurée séparément ; 4 à 10 joueurs non exercés.
+
+### 54.3 M5 — première action autoritaire : clos
+
+| Critère §6 | Preuve |
+|---|---|
+| pickup : refus serveur si déjà réclamé | étape **L** verte (`94–97 s`, rejouée le 2026-10-19) : `ACCORDÉE (premier claim …)` au client 1, `REFUSÉE (déjà tenue par 'killi'#1)` au client 2, `garde=blocage … objet dans l'inventaire=False`, clé inventée refusée, `PlayerId` falsifié réattribué |
+| conséquence du geste | étape **O** verte : l'objet accordé quitte le monde serveur et les deux clients le retirent ; le retrait est rejoué à un client tardif (étape **Q**) |
+| décision hors jeu | `PickupClaimLedger` : 9 tests (première réclamation, refus d'un autre, idempotence, libération à la déconnexion), `dotnet test` 280/280 |
+
+**Limites** : objets **mobiles** (butin porté par une créature) jugés par une position qui bouge ; objets
+sans clé non arbitrés ; **collisions de clé** comptées, pas arbitrées ; **retour arrière** jamais exercé.
+
+### 54.4 Les jalons qui restent ouverts, et ce qu'il faudrait
+
+- **M4 (véhicule)** : position 10 Hz et conduite arbitrée sont prouvées (J, M), mais l'**énergie**, les
+  **modules/upgrades** et les **dégâts** ne voyagent pas, et aucun `spawn` initié par un client n'existe.
+  Clore M4 demande un changement de protocole (`VehicleSnapshot` ou message dédié) **et** une sonde qui
+  draine une batterie / casse un module, donc plus qu'une session.
+- **M6 (contenu)** : création/retrait/livraison d'une définition sont prouvés (N, O, Q), mais l'item
+  **custom** (AssetBundle livré au client) est **gelé par décision** (§43.5) jusqu'à une session réelle
+  de 30 min. Le critère §6 le nomme explicitement : M6 reste ouvert par choix, pas par oubli.
+
+### 54.5 Le filtre de tick sort du gestionnaire — et révèle une limite de W
+
+La règle « un état plus ancien ne s'applique pas » vivait dans `RemoteCreatureManager`, donc non testable.
+Elle est maintenant `Coop.Model.SnapshotTickGate` (tick croissant accepté, égal ou ancien refusé et compté,
+recul de plus de 2 000 ticks lu comme un redémarrage serveur, tick nul accepté sans déplacer le dernier),
+avec **six tests** dans `SnapshotTickGateTests` (`dotnet test` **286/286**).
+
+**Contrôle en jeu après extraction** : `tools/verify.sh --only=W` — **rouge**, client 3 :
+`verdict=False … écart max=2.01m sur états consécutifs … sur un intervalle de 0.10s`, avec un
+`mouvement local ≤1.47m` de la même `Peeper`. Le filtre a bien écarté `2602` états périmés chez ce client ;
+l'écart vient donc d'ailleurs — probablement l'IA qui continue de faire nager la créature entre deux
+relâchées, c'est-à-dire le « clignotement à la coupure » déjà partiellement mesuré.
+
+- Ce n'est **pas** corrigé ici : la piste demande de mesurer les réadoptions (pourquoi `Peeper` bouge
+  encore localement) avant de toucher au gestionnaire, et l'heure de session ne le permet pas.
+- W reste **strict et exécutable** (`--only=W`) ; il est **intermittent** (vert une fois, rouge une fois),
+  donc il ne sert pas de critère de clôture. M3 reste clos sur son critère §6 (deux clients, E).
