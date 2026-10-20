@@ -3194,7 +3194,7 @@ pas. Confiance globale : **moyenne**. Rapport et transcript : `docs/council/`.
 ### 43.2 Ce qui ne va pas
 
 > **Photo datée du 2026-10-19**, conservée telle quelle. Les correctifs depuis sont au §44 (P0/P1/P1bis),
-> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**269** tests),
+> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**271** tests),
 > `PlayerPlausibility` garde la position, la sauvegarde est un contrat, et `verify.sh` compte désormais
 > 18 étapes (A–R, dont R pour le refus P0, §49).
 
@@ -3829,7 +3829,7 @@ Extrait dans `src/Coop.Model/PickupClaimLedger.cs` (classe pure : `Claim`, `TryG
 `KeysOf`, `Count`), consommé par `ServerNetwork`. Le serveur garde la résolution du monde, la portée, les
 journaux et la clé `0` ; le registre ne porte que la **décision**.
 
-`tests/Coop.Model.Tests/PickupClaimLedgerTests.cs` — sept cas, dont ceux qui auraient attrapé le défaut :
+`tests/Coop.Model.Tests/PickupClaimLedgerTests.cs` — neuf cas, dont ceux qui auraient attrapé le défaut :
 
 | Cas | Ce qu'il fixe |
 |---|---|
@@ -3867,7 +3867,7 @@ Corrigé (`…P,Q,R`) et vérifié par `bash -n` ; `README.md` dit désormais qu
 `MessageFuzzTests` avait une liste de 22 lecteurs et un test qui affirmait « 22 ». Un vingt-troisième
 message ajouté au protocole serait donc passé sans jamais être lu par le harnais. Le nouveau test compare
 les **noms** de `MessageType` aux noms de la liste : toute addition, tout renommage ou toute entrée
-orpheline casse la suite (`dotnet test` **269/269**).
+orpheline casse la suite (`dotnet test` **271/271**).
 
 ### 51.6 Le défaut sauté est désormais un échec de script
 

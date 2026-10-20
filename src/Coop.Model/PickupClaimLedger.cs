@@ -26,6 +26,10 @@ namespace Coop.Model
     ///
     /// La clé `0` n'est pas un objet : c'est au serveur de la refuser avant d'arriver ici, parce que
     /// le motif (« aucune identité d'objet ») lui appartient.
+    ///
+    /// **Thread** : les appels viennent de la boucle réseau du serveur, qui les sérialise ; la classe ne
+    /// prend aucun verrou. La partager entre threads demanderait une synchronisation, pas un nouveau
+    /// dictionnaire — la contrainte est nommée ici pour être vue avant d'être violée.
     /// </summary>
     public sealed class PickupClaimLedger
     {

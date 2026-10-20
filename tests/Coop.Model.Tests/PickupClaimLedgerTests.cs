@@ -88,6 +88,26 @@ namespace Coop.Model.Tests
         }
 
         [Fact]
+        public void Liberer_deux_fois_le_meme_joueur_est_idempotent()
+        {
+            var ledger = new PickupClaimLedger();
+            ledger.Claim(Key, 2);
+
+            Assert.Equal(1, ledger.Release(2));
+            Assert.Equal(0, ledger.Release(2));
+            Assert.Equal(0, ledger.Count);
+        }
+
+        [Fact]
+        public void Une_cle_jamais_reclamee_n_a_pas_de_detenteur()
+        {
+            var ledger = new PickupClaimLedger();
+
+            Assert.False(ledger.TryGetHolder(Key, out var holder));
+            Assert.Equal(0, holder);
+        }
+
+        [Fact]
         public void Les_cles_rendues_sont_celles_du_joueur_demande()
         {
             var ledger = new PickupClaimLedger();
