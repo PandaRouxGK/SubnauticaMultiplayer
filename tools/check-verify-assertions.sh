@@ -1,6 +1,6 @@
 #!/bin/bash
-# tools/check-verify-assertions.sh — vérifie, **sans lancer le jeu**, que les assertions des étapes P, Q, N
-# et B de `tools/verify.sh` ne sont ni trop laxistes ni impossibles à satisfaire.
+# tools/check-verify-assertions.sh — vérifie, **sans lancer le jeu**, que les assertions des étapes P, Q, N,
+# B et R de `tools/verify.sh` ne sont ni trop laxistes ni impossibles à satisfaire.
 #
 # Pourquoi ce script existe : les étapes P (position) et Q (rejeu d'un retrait) n'ont pas encore tourné.
 # Leurs assertions sont des expressions régulières recopiées à la main depuis les formats de journal du
@@ -23,9 +23,9 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 FAILURES=()
-source <(sed -n '/^expect()/,/^}/p;/^expect_missing()/,/^}/p;/^expect_any()/,/^}/p;/^assert_p()/,/^}/p;/^assert_q()/,/^}/p;/^assert_n()/,/^}/p;/^assert_b()/,/^}/p' "$VERIFY")
+source <(sed -n '/^expect()/,/^}/p;/^expect_missing()/,/^}/p;/^expect_any()/,/^}/p;/^assert_p()/,/^}/p;/^assert_q()/,/^}/p;/^assert_n()/,/^}/p;/^assert_b()/,/^}/p;/^assert_r()/,/^}/p' "$VERIFY")
 
-for function in expect expect_missing expect_any assert_p assert_q assert_n assert_b; do
+for function in expect expect_missing expect_any assert_p assert_q assert_n assert_b assert_r; do
     if ! declare -F "$function" >/dev/null; then
         echo "ECHEC : la fonction $function n'a pas pu être extraite de $VERIFY" >&2
         echo "        (le découpage sed dépend des lignes « function » et « } » en colonne 0)" >&2
@@ -33,7 +33,7 @@ for function in expect expect_missing expect_any assert_p assert_q assert_n asse
     fi
 done
 
-mkdir -p "$WORK_DIR/P" "$WORK_DIR/Q" "$WORK_DIR/N" "$WORK_DIR/B"
+mkdir -p "$WORK_DIR/P" "$WORK_DIR/Q" "$WORK_DIR/N" "$WORK_DIR/B" "$WORK_DIR/R"
 
 # 0. Toutes les étapes déclarées doivent être **atteignables**. Le 2026-10-19, la validation de `--only`
 #    s'arrêtait à `O` alors que P et Q existaient : les deux étapes répondaient « étape inconnue », donc
@@ -107,6 +107,25 @@ LOG
 [spawn] entité créée : clé=0x0518aa8f25e17d2f 'SeaMoth(Clone)' (Seamoth) pos=(-118.4, -13.4, -52.9) — identifiant du serveur '0a472465-f9e8-4780-8b3e-a308429250ce' écrit (oui), clé locale 0x0518aa8f25e17d2f, créées=1
 [sonde] apparition : verdict=True — entités créées=1, écartées (déjà présentes)=0, échecs=0, clés divergentes=0 ; dernière clé=0x0518aa8f25e17d2f 'SeaMoth(Clone)' — objet local retrouvé par sa clé=True ; définition vérifiée=True (hash=0x3da1f4bf782becdf), définition falsifiée refusée=True, définitions refusées=0
 LOG
+    # Étape R : refus P0 en jeu. Le client 1 est admis (contrôle), le client 2 a chargé `slot0001` et
+    # reçoit le refus nommé. Les deux motifs sont recopiés **du code** (`SaveCompatibility.Explain`).
+    cat > "$WORK_DIR/R/coop-client.log" <<'LOG'
+[monde] sauvegarde demandée : 'slot0000'
+[net] connexion à 127.0.0.1:7777...
+[net] handshake envoyé (protocole v13, jeu=2019.4.36f1, save=slot='slot0000' session='aae68629' changeSet=3 mode=Survival hash=0x1234)
+[net] handshake ACCEPTÉ (id=1, tick serveur=123456) — début des pings et positions
+LOG
+    cat > "$WORK_DIR/R/coop-client-2.log" <<'LOG'
+[monde] sauvegarde demandée : 'slot0001'
+[monde]   slot='slot0001' session='aae68629' changeSet=3 mode=Survival
+[monde] sauvegarde demandée 'slot0001' trouvée
+[net] handshake envoyé (protocole v13, jeu=2019.4.36f1, save=slot='slot0001' session='aae68629' changeSet=3 mode=Survival hash=0x1234)
+[net] handshake REFUSÉ par le serveur : sauvegarde différente (client='slot0001', serveur='slot0000')
+LOG
+    cat > "$WORK_DIR/R/coop-server.log" <<'LOG'
+[net] empreinte de sauvegarde acceptée : client=slot='slot0000' session='aae68629' changeSet=3 mode=Survival hash=0x1234 · serveur=slot='slot0000' session='aae68629' changeSet=3 mode=Survival hash=0x1234
+[net] handshake REFUSÉ pour 'killi' : sauvegarde différente (client='slot0001', serveur='slot0000')
+LOG
     cat > "$WORK_DIR/Q/coop-client-2.log" <<'LOG'
 [net] disparition reçue : clé=0x7ce3b6a1e8e7e312 (véhicule) — motif « véhicule détruit chez le serveur »
 [disparition] retrait de 0x7ce3b6a1e8e7e312 mis en attente — le monde n'est pas encore chargé (appliqué dès qu'il le sera, sinon la sauvegarde ferait revenir l'objet).
@@ -122,12 +141,13 @@ assert_p
 assert_q
 assert_n
 assert_b
+assert_r
 if [ "${#FAILURES[@]}" -ne 0 ]; then
     echo "ECHEC : une assertion ne peut pas accepter le format documenté :" >&2
     printf '  - %s\n' "${FAILURES[@]}" >&2
     exit 1
 fi
-echo "OK   les assertions P, Q, N et B acceptent les journaux au format du code"
+echo "OK   les assertions P, Q, N, B et R acceptent les journaux au format du code"
 
 # 2. Discrimination : retirer des lignes exigées doit produire des échecs **nommés**. Une assertion qui
 #    resterait verte ici ne prouverait rien en jeu.
@@ -138,14 +158,17 @@ grep -v 'absent localement' "$WORK_DIR/Q/coop-client-2.log" > "$WORK_DIR/tmp" &&
 grep -v 'définition vérifiée=True' "$WORK_DIR/N/coop-client.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/N/coop-client.log"
 grep -v 'autre(s) client(s) connu(s)' "$WORK_DIR/B/coop-client.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/B/coop-client.log"
 grep -v 'couleur rejouée' "$WORK_DIR/B/coop-client-2.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/B/coop-client-2.log"
+grep -v 'handshake REFUSÉ pour' "$WORK_DIR/R/coop-server.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/R/coop-server.log"
+grep -v 'handshake REFUSÉ par le serveur' "$WORK_DIR/R/coop-client-2.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/R/coop-client-2.log"
 
 FAILURES=()
 assert_p
 assert_q
 assert_n
 assert_b
-if [ "${#FAILURES[@]}" -lt 7 ]; then
-    echo "ECHEC : seulement ${#FAILURES[@]} échec(s) après retrait de sept lignes exigées —" >&2
+assert_r
+if [ "${#FAILURES[@]}" -lt 9 ]; then
+    echo "ECHEC : seulement ${#FAILURES[@]} échec(s) après retrait de neuf lignes exigées —" >&2
     echo "        au moins une assertion ne dépend pas de la ligne qu'elle prétend vérifier." >&2
     exit 1
 fi
@@ -158,6 +181,8 @@ expected=(
     'contrat de contenu vérifie la définition'
     "a attendu un autre client, pas l'avatar de l'hôte"
     'la couleur est appliquée à un avatar qui existait déjà'
+    'le serveur refuse la seconde sauvegarde en nommant les deux slots'
+    'client 2 : le refus lui est rendu avec le même motif'
 )
 for what in "${expected[@]}"; do
     found=0
@@ -173,5 +198,5 @@ for what in "${expected[@]}"; do
     fi
 done
 
-echo "OK   ${#FAILURES[@]} échec(s) nommés après retrait de sept lignes — les assertions discriminent"
-echo "VERDICT : les assertions P, Q, N et B sont satisfiables et discriminantes (mesure en jeu non incluse)"
+echo "OK   ${#FAILURES[@]} échec(s) nommés après retrait de neuf lignes — les assertions discriminent"
+echo "VERDICT : les assertions P, Q, N, B et R sont satisfiables et discriminantes (mesure en jeu non incluse)"

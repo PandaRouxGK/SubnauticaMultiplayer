@@ -76,7 +76,21 @@ namespace Coop.Shared
             var buttons = Object.FindObjectsOfType<MainMenuLoadButton>();
             Log.LogInfo($"[monde] MainMenuLoadButton trouvés: {buttons.Length}");
 
-            MainMenuLoadButton target = null;
+            // Sauvegarde imposée (`-coopsave=slot0001` ou `COOP_SAVE_SLOT`) : c'est ce qui permet au
+            // harnais de faire parler un client d'une **autre** partie que l'hôte, et donc d'éprouver
+            // le refus P0 « deux sauvegardes différentes » en jeu. Sans préférence, on garde le
+            // comportement historique : la première sauvegarde chargeable.
+            var requestedSlot = Coop.Model.SaveSlotPreference.Current;
+            if (requestedSlot != null)
+            {
+                Log.LogInfo($"[monde] sauvegarde demandée : '{requestedSlot}'");
+            }
+
+            // `FindObjectsOfType` ne garantit aucun ordre : avec deux sauvegardes, « la première venue »
+            // changeait d'un lancement à l'autre. Mesuré le 2026-10-20 : le serveur et le client ont chargé
+            // `slot0001` alors que la fixture était `slot0000`, et le refus P0 n'a pas eu lieu. On trie donc
+            // explicitement par nom de slot quand aucune préférence n'est donnée.
+            var candidates = new System.Collections.Generic.List<MainMenuLoadButton>();
             foreach (var button in buttons)
             {
                 if (button == null || button.IsEmpty())
@@ -87,11 +101,46 @@ namespace Coop.Shared
                 Log.LogInfo(
                     $"[monde]   slot='{button.saveGame}' session='{button.sessionId}' " +
                     $"changeSet={button.changeSet} mode={button.gameMode}");
+                candidates.Add(button);
+            }
 
-                if (target == null)
+            candidates.Sort((left, right) => string.CompareOrdinal(left.saveGame, right.saveGame));
+
+            MainMenuLoadButton target = null;
+            var requestedFound = false;
+            if (requestedSlot != null)
+            {
+                foreach (var candidate in candidates)
                 {
-                    target = button;
+                    if (!string.Equals(candidate.saveGame, requestedSlot, System.StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    target = candidate;
+                    requestedFound = true;
+                    Log.LogInfo($"[monde] sauvegarde demandée '{requestedSlot}' trouvée");
+                    break;
                 }
+            }
+            else if (candidates.Count > 0)
+            {
+                target = candidates[0];
+                Log.LogInfo(
+                    $"[monde] sauvegarde par défaut : '{target.saveGame}' " +
+                    $"(aucune préférence ; ordre déterministe par nom parmi {candidates.Count} slot(s))");
+            }
+
+            // Demander une sauvegarde absente ne doit **jamais** charger une autre partie : le harnais
+            // croirait mesurer une divergence de sauvegarde alors que les deux instances auraient ouvert
+            // la même. Le contrôle vient **avant** le cas général, sinon le message dirait « aucune
+            // sauvegarde chargeable » alors que des sauvegardes existent — mais pas celle demandée.
+            if (requestedSlot != null && !requestedFound)
+            {
+                Log.LogError(
+                    $"[monde] sauvegarde demandée '{requestedSlot}' introuvable parmi les {buttons.Length} " +
+                    "bouton(s) de chargement -> l'instance reste au menu (aucune autre partie n'est ouverte).");
+                yield break;
             }
 
             if (target == null)

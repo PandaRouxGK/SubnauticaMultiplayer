@@ -46,6 +46,10 @@ GAME_DIR_BASH="${SUBNAUTICA_GAME_DIR:-/c/Program Files (x86)/Steam/steamapps/com
 
 HOST_ARGS="-coopmode=server"
 CLIENT_ARGS="-coopmode=client -coopdebug=avatar"
+# Arguments des clients **suivants** : le premier garde `--client-args`, les autres prennent ceux-ci
+# quand ils sont fournis. C'est ce qui permet de lancer un client sur une autre sauvegarde que l'hôte
+# (`-coopsave=slot0001`) sans changer le premier, qui doit rester identique pour servir de contrôle.
+CLIENT_ARGS_2=""
 HOST_MARKER="MONDE CHARGÉ"
 CLIENT_MARKER=""
 
@@ -79,6 +83,8 @@ usage() {
 Options :
   --host-args="…"       arguments de l'hôte        (défaut : -coopmode=server)
   --client-args="…"     arguments du client        (défaut : -coopmode=client -coopdebug=avatar)
+  --client-2-args="…"   arguments du client n° 2+  (défaut : ceux du client 1 ; sert à imposer une
+                        autre sauvegarde avec -coopsave=slot0001)
   --host-marker=REGEX   ce qui prouve que l'hôte a chargé son monde (défaut : MONDE CHARGÉ)
   --wait-server-marker=REGEX  ligne du journal **serveur** attendue après les clients (autotest de l'hôte)
   --client-marker=REGEX ce qu'on attend du client  (défaut : fin de sonde si -coopdebug, sinon connexion)
@@ -98,6 +104,7 @@ for argument in "$@"; do
     case "$argument" in
         --host-args=*) HOST_ARGS="${argument#*=}" ;;
         --client-args=*) CLIENT_ARGS="${argument#*=}" ;;
+        --client-2-args=*) CLIENT_ARGS_2="${argument#*=}" ;;
         --host-marker=*) HOST_MARKER="${argument#*=}" ;;
         --wait-server-marker=*) WAIT_SERVER_MARKER="${argument#*=}" ;;
         --client-marker=*) CLIENT_MARKER="${argument#*=}" ;;
@@ -312,7 +319,7 @@ launch_instance "$HOST_ENV" "$HOST_ARGS" "hôte" || true
 wait_for_marker "$SERVER_LOG" "$HOST_MARKER" "hôte" || { kill_instances; exit 1; }
 echo "      hôte prêt en $(elapsed_since "$host_start")"
 
-echo "[3/3] $CLIENTS client(s) : $CLIENT_ARGS — attente de « $CLIENT_MARKER »"
+echo "[3/3] $CLIENTS client(s) : $CLIENT_ARGS${CLIENT_ARGS_2:+ (clients 2+ : $CLIENT_ARGS_2)} — attente de « $CLIENT_MARKER »"
 
 # Par défaut les clients sont lancés **l'un après l'autre**, chacun attendu sur son propre marqueur : les
 # mondes arrivent ainsi séparément et on sait lequel est prêt.
@@ -352,10 +359,17 @@ launch_client() { # $1 = index
     local index="$1" suffix="${client_suffixes[$((index - 1))]}"
     client_starts[$((index - 1))]=$(date +%s)
 
+    # Le client 1 garde ses arguments : c'est le contrôle « même sauvegarde, donc admis ». Les suivants
+    # peuvent recevoir une autre sauvegarde, ce qui est la seule façon d'éprouver le refus P0 en jeu.
+    local client_args="$CLIENT_ARGS"
+    if [ "$index" -gt 1 ] && [ -n "$CLIENT_ARGS_2" ]; then
+        client_args="$CLIENT_ARGS_2"
+    fi
+
     if [ -n "$suffix" ]; then
-        launch_instance "COOP_LOG_SUFFIX=$suffix" "$CLIENT_ARGS" "client $index" || true
+        launch_instance "COOP_LOG_SUFFIX=$suffix" "$client_args" "client $index" || true
     else
-        launch_instance "" "$CLIENT_ARGS" "client $index" || true
+        launch_instance "" "$client_args" "client $index" || true
     fi
 }
 

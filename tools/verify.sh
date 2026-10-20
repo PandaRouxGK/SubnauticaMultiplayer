@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les dix-sept étapes, et ce que chacune prouve :
+# Les dix-huit étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -69,10 +69,16 @@
 #      avec **un seul** client présent (délai 20 s) ; le second n'entre qu'après. Il reçoit le retrait rejoué, constate
 #      que l'entité est absente, et la sonde affirme qu'il ne la recrée pas : c'est la preuve de P2 (rejeu
 #      des retraits), qui n'existait pas avant.
+#   R  deux clients, sauvegardes **différentes** -> l'hôte et le client 1 chargent `slot0000` ; le client 2
+#      charge une copie de cette sauvegarde sous `slot0001` (`-coopsave=slot0001`). Le serveur doit
+#      **refuser** ce client avec le motif nommé `sauvegarde différente`, et le client 2 doit journaliser
+#      `handshake REFUSÉ` — pendant que le client 1, lui, est admis. C'est le refus P0 mesuré en jeu : sans
+#      cette étape il n'était prouvé que hors jeu. La copie `slot0001` est supprimée à la fin de l'étape
+#      si elle n'existait pas avant.
 #
 # Usage :
-#   tools/verify.sh                    # les dix-sept étapes
-#   tools/verify.sh --only=B           # une seule étape (A..Q, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les dix-huit étapes
+#   tools/verify.sh --only=B           # une seule étape (A..R, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -119,7 +125,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q  étapes à lancer (défaut : les dix-sept)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R  étapes à lancer (défaut : les dix-huit)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -139,9 +145,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKLMNOPQ,]*)
+    *[!ABCDEFGHIJKLMNOPQR,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -719,6 +725,33 @@ assert_p() {
         "le taux de refus de position est publié"
 }
 
+assert_r() {
+    local c1="$WORK_DIR/R/coop-client.log"
+    local c2="$WORK_DIR/R/coop-client-2.log"
+    local server="$WORK_DIR/R/coop-server.log"
+
+    # Ce que le client 2 a réellement annoncé : sans ces deux lignes, un refus pourrait venir d'un tout
+    # autre motif (pseudo, version, liste de mods) et l'étape passerait pour la mauvaise raison.
+    expect R "$c2" "sauvegarde demandée : 'slot0001'" "client 2 : la sauvegarde imposée a été demandée"
+    expect R "$c2" "sauvegarde demandée 'slot0001' trouvée" \
+        "client 2 : la sauvegarde imposée existe parmi les boutons de chargement"
+    expect R "$c2" "save=slot='slot0001'" "client 2 : le handshake annonce bien l'empreinte de slot0001"
+
+    # Le refus, nommé, des deux côtés. Le motif est celui de `SaveCompatibility.Explain` : il nomme les
+    # deux slots, donc il ne peut pas être confondu avec un refus de version ou de pseudo.
+    expect R "$server" "handshake REFUSÉ pour .*: sauvegarde différente \\(client='slot0001', serveur='slot0000'\\)" \
+        "le serveur refuse la seconde sauvegarde en nommant les deux slots"
+    expect R "$c2" "handshake REFUSÉ par le serveur : sauvegarde différente \\(client='slot0001', serveur='slot0000'\\)" \
+        "client 2 : le refus lui est rendu avec le même motif"
+
+    # Contrôle dans le **même run** : la même sauvegarde que l'hôte est admise. Sans cette assertion, une
+    # panne générale du handshake ferait « réussir » le refus.
+    expect R "$c1" "sauvegarde demandée : 'slot0000'" "client 1 : il a bien chargé la sauvegarde de l'hôte"
+    expect R "$c1" "save=slot='slot0000'" "client 1 : son handshake annonce slot0000"
+    expect R "$c1" "handshake ACCEPTÉ" "client 1 : la sauvegarde identique est admise dans le même run"
+    expect_missing R "$c2" "handshake ACCEPTÉ" "le client 2 n'est jamais admis"
+}
+
 assert_h() {
     local server="$WORK_DIR/H/coop-server.log"
     local client="$WORK_DIR/H/coop-client.log"
@@ -1040,6 +1073,58 @@ if wanted P "$ONLY"; then
         args+=(--no-build)
     fi
     step P "position autoritaire : la nage normale n'est pas corrigée, le téléport est refusé et corrigé" assert_p "${args[@]}"
+fi
+
+if wanted R "$ONLY"; then
+    # Refus P0 **en jeu** : deux sauvegardes différentes. La seconde est une copie de la fixture
+    # `slot0000` sous `slot0001` — la seule différence est le nom du slot, donc l'empreinte canonique.
+    # `slot0000` n'est jamais modifié, et la copie est supprimée à la fin si c'est nous qui l'avons créée.
+    SAVE_ROOT="$GAME_DIR_BASH/SNAppData/SavedGames"
+    PRIMARY_SAVE="$SAVE_ROOT/slot0000"
+    SECONDARY_SAVE="$SAVE_ROOT/slot0001"
+    SECONDARY_CREATED=0
+
+    if [ ! -d "$PRIMARY_SAVE" ]; then
+        FAILURES+=("R : $PRIMARY_SAVE introuvable — la seconde sauvegarde ne peut pas être préparée")
+        STEP_REPORTS+=("étape R : ÉCHEC (fixture slot0000 absente)")
+        echo "[échec] sauvegarde de référence absente : $PRIMARY_SAVE" >&2
+    else
+        if [ -d "$SECONDARY_SAVE" ]; then
+            echo "  sauvegarde : slot0001 existait déjà — utilisée telle quelle (jamais modifiée)"
+        elif cp -a "$PRIMARY_SAVE" "$SECONDARY_SAVE" 2>/dev/null; then
+            SECONDARY_CREATED=1
+            echo "  sauvegarde : copie de slot0000 vers slot0001 (supprimée à la fin de l'étape)"
+        else
+            FAILURES+=("R : la copie de slot0000 vers slot0001 a échoué — la preuve ne peut pas être faite")
+            echo "[échec] copie impossible vers $SECONDARY_SAVE" >&2
+        fi
+
+        if [ -d "$SECONDARY_SAVE" ]; then
+            # Deux clients, monde chargé en séquence : le client 1 reste sur la sauvegarde de l'hôte et
+            # sert de contrôle ; le client 2 reçoit `-coopsave=slot0001`. Un seul marqueur couvre les deux
+            # fins possibles — admis pour le premier, refusé pour le second.
+            # Les trois rôles reçoivent leur slot **explicitement** : avec deux sauvegardes présentes, le
+            # choix par défaut dépendait de l'ordre de `FindObjectsOfType` (mesuré : serveur et client 1
+            # avaient chargé slot0001, donc le refus n'avait pas lieu). L'étape ne doit pas dépendre d'un
+            # défaut : elle nomme la sauvegarde de l'hôte et celle du client divergent.
+            args=(--clients=2 --together --timeout=300
+                "--host-args=-coopmode=server -batchmode -nographics -coopsave=slot0000"
+                "--client-args=-coopmode=client -coopsave=slot0000"
+                "--client-2-args=-coopmode=client -coopsave=slot0001"
+                "--client-marker=connecté au serveur|handshake REFUSÉ")
+            if [ "$NO_BUILD" = 1 ]; then
+                args+=(--no-build)
+            fi
+            step R "refus P0 : deux sauvegardes différentes sont refusées, la même est admise" assert_r "${args[@]}"
+        fi
+
+        # Nettoyage **après** l'arrêt des instances : le jeu ne doit pas réécrire la copie pendant qu'on
+        # la supprime, et un `slot0001` qui existait avant nous n'est jamais touché.
+        if [ "$SECONDARY_CREATED" = 1 ] && [ -d "$SECONDARY_SAVE" ]; then
+            rm -rf "$SECONDARY_SAVE"
+            echo "  sauvegarde : slot0001 (copie de test) supprimée"
+        fi
+    fi
 fi
 
 if wanted D "$ONLY"; then
