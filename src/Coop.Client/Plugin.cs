@@ -77,6 +77,10 @@ namespace Coop.Client
             // ne crée pas une entité annoncée la voit dans le flux de positions sans objet à déplacer.
             go.AddComponent<EntitySpawner>();
 
+            // Modules de véhicule (v15) : applique à la copie locale ce que le serveur annonce comme
+            // installé. Composant, pas classe statique : le prefab d'un module se charge par coroutine.
+            go.AddComponent<VehicleModuleApplier>();
+
             // Retrait d'entité (v11) : composant et non classe statique, parce qu'un retrait reçu avant le
             // chargement du monde doit être **gardé** puis appliqué — sans quoi la sauvegarde le fait revenir.
             go.AddComponent<EntityDespawner>();
@@ -1271,6 +1275,13 @@ namespace Coop.Client
                     _vehicleSnapshotsReceived++;
                     _vehicleStatesReceived += vehicles.Vehicles != null ? vehicles.Vehicles.Length : 0;
                     _vehicles?.OnSnapshot(vehicles);
+                    break;
+                }
+
+                case MessageType.VehicleUpgrades:
+                {
+                    var upgrades = VehicleUpgradesMessage.Read(reader);
+                    _vehicles?.OnUpgrades(upgrades);
                     break;
                 }
 

@@ -370,6 +370,17 @@ namespace Coop.Server
         /// <summary>Faux tant que le premier balayage n'a pas eu lieu : il **enregistre** sans annoncer.</summary>
         private bool _vehicleBaselineDone;
 
+        // — Modules de véhicule (v15, M4) ————————————————————————————————————————
+        //
+        // Dernier ensemble **annoncé** par véhicule, en forme canonique. Il sert à deux choses : ne
+        // rediffuser que ce qui a changé (un module ne change pas dix fois par seconde), et rejouer
+        // l'état installé à un client qui se connecte après l'installation.
+        private readonly Dictionary<long, VehicleUpgradesMessage> _vehicleUpgrades =
+            new Dictionary<long, VehicleUpgradesMessage>();
+
+        private int _vehicleUpgradesBroadcast;
+        private int _vehicleUpgradesReplayed;
+
         /// <summary>
         /// Entités **fabriquées depuis le dernier démarrage**, par clé. Sert à rejouer l'annonce auprès d'un
         /// client qui se connecte après coup : sans ça, une entité créée pendant que personne n'était là (ou
@@ -404,6 +415,9 @@ namespace Coop.Server
         public int EntitySpawnsSent => _entitySpawnsSent;
 
         public int EntityDespawnsSent => _entityDespawnsSent;
+
+        /// <summary>Annonces de modules émises (v15) : un module installé ou retiré, pas un état périodique.</summary>
+        public int VehicleUpgradesBroadcast => _vehicleUpgradesBroadcast;
 
         /// <summary>Retraits rejoués à des clients arrivés après coup (P2).</summary>
         public int EntityDespawnsReplayed => _entityDespawnsReplayed;
@@ -2850,6 +2864,11 @@ namespace Coop.Server
                 _log.LogInfo($"[net] apparition : {announced} entité(s) annoncée(s) ce balayage.");
             }
 
+            // Les modules sont diffusés **avant** la détection de disparition : un module posé sur un
+            // véhicule qui vient d'apparaître ce balayage doit être annoncé, et l'ensemble périmé d'un
+            // véhicule détruit est oublié dans la boucle ci-dessous.
+            BroadcastVehicleUpgrades();
+
             // Les clés connues qui ne sont plus dans le monde ont **disparu** : on les annonce (v11).
             // Sans ce balayage, un véhicule détruit chez l'hôte restait chez tous les clients, immobile.
             // Le premier passage ne peut rien annoncer : `_knownVehicles` vient d'être rempli.
@@ -2870,6 +2889,7 @@ namespace Coop.Server
             foreach (var key in vanished)
             {
                 _knownVehicles.Remove(key);
+                _vehicleUpgrades.Remove(key);
                 BroadcastDespawn(key, EntityKind.Vehicle, "véhicule détruit chez le serveur");
             }
         }
@@ -3014,6 +3034,24 @@ namespace Coop.Server
                     $"'{session.Username}'#{session.PlayerId} (arrivé après leur création).");
             }
 
+            // Modules installés depuis le démarrage du serveur : le client qui arrive charge la même
+            // sauvegarde, donc il voit les modules **écrits dans la partie**, mais pas ceux installés en
+            // jeu après la dernière sauvegarde. Ils sont rejoués avant les retraits, comme le carnet
+            // d'apparitions avant celui des retraits : le client qui reçoit une entité doit déjà savoir
+            // dans quel état elle est (v15).
+            if (_vehicleUpgrades.Count > 0)
+            {
+                foreach (var message in _vehicleUpgrades.Values)
+                {
+                    Send(peer, message.Write, DeliveryMethod.ReliableOrdered);
+                    _vehicleUpgradesReplayed++;
+                }
+
+                _log.LogInfo(
+                    $"[net] modules : {_vehicleUpgrades.Count} ensemble(s) rejoué(s) pour " +
+                    $"'{session.Username}'#{session.PlayerId} (installés avant son arrivée).");
+            }
+
             // P2 : le pendant des retraits. Il est indépendant du carnet d'apparitions — une session
             // peut n'avoir que des retraits à rejouer (objet ramassé avant qu'elle n'arrive).
             if (_despawnedEntities.Count == 0)
@@ -3039,28 +3077,87 @@ namespace Coop.Server
         /// </summary>
         private static float ReadVehicleEnergy(Vehicle vehicle)
         {
-            if (vehicle == null)
+            // La conversion absolu -> normalisé vit dans `VehicleModules` (Shared), pour que le client
+            // applique exactement la même échelle. La v14 la faisait ici, avec `EnergyMixin.charge` brut :
+            // mesuré au run du 2026-10-20, un Seamoth y vaut `200`, donc la borne `> 1` transformait
+            // toute batterie pleine en `1` et toute batterie à moitié en `1` aussi.
+            return VehicleModules.ReadNormalized(vehicle);
+        }
+
+        /// <summary>
+        /// Diffuse les modules **installés** sur chaque véhicule connu (v15, M4), et seulement quand
+        /// l'ensemble a changé.
+        ///
+        /// Pourquoi sur changement et pas dix fois par seconde : un module s'installe en quelques secondes
+        /// de jeu, et le rediffuser à chaque balayage ferait un message fiable par seconde et par véhicule
+        /// pour un état immobile. La comparaison porte sur la forme **canonique** (triée, dédupliquée) :
+        /// l'ordre d'itération de l'équipement du jeu n'est pas garanti, et deux ensembles identiques doivent
+        /// produire le même message.
+        /// </summary>
+        private void BroadcastVehicleUpgrades()
+        {
+            if (_vehicleCache == null || _vehicleCache.Length == 0)
             {
-                return -1f;
+                return;
             }
 
-            try
+            foreach (var vehicle in _vehicleCache)
             {
-                var mixin = vehicle.GetComponent<EnergyMixin>();
-                if (mixin == null)
+                if (vehicle == null || vehicle.gameObject == null)
                 {
-                    return -1f;
+                    continue;
                 }
 
-                var charge = mixin.charge;
-                return charge < 0f ? 0f : (charge > 1f ? 1f : charge);
-            }
-            catch (System.Exception exception)
-            {
-                // Un véhicule en cours de destruction peut lever : l'absence d'énergie est une
-                // information valide (-1), pas une raison de perdre tout le snapshot.
-                UnityEngine.Debug.LogWarning($"[net] énergie de véhicule illisible : {exception.Message}");
-                return -1f;
+                var key = VehicleIdentity.KeyOf(vehicle, out _);
+                if (key == 0L)
+                {
+                    // Même règle que pour la position : un véhicule sans identité partagée ne peut pas
+                    // recevoir de modules, puisque le client ne saurait pas lesquels.
+                    continue;
+                }
+
+                var types = VehicleModules.Read(vehicle);
+                _vehicleUpgrades.TryGetValue(key, out var previous);
+                if (previous != null && VehicleUpgradesMessage.SameSet(previous.TechTypes, types))
+                {
+                    continue;
+                }
+
+                var message = new VehicleUpgradesMessage
+                {
+                    VehicleKey = key,
+                    TechTypes = types,
+                };
+
+                // Mémorisé **avant** l'envoi : un client qui se connecte pendant la diffusion doit
+                // trouver l'ensemble dans le carnet, sinon il ne le recevrait jamais.
+                _vehicleUpgrades[key] = message;
+
+                if (previous == null && types.Length == 0)
+                {
+                    // Premier balayage d'un véhicule sans module : rien à annoncer, et l'annoncer à
+                    // chaque démarrage userait le canal fiable pour un état vide qui est déjà le défaut.
+                    continue;
+                }
+
+                var sent = 0;
+                foreach (var pair in _sessions)
+                {
+                    if (!pair.Value.Accepted)
+                    {
+                        continue;
+                    }
+
+                    Send(pair.Key, message.Write, DeliveryMethod.ReliableOrdered);
+                    sent++;
+                }
+
+                _vehicleUpgradesBroadcast++;
+
+                var names = VehicleModules.Describe(types, out var count);
+                _log.LogInfo(
+                    $"[net] modules : clé=0x{key:x16} '{vehicle.gameObject.name}' — {count} module(s) " +
+                    $"[{names}] {(previous == null ? "annoncés" : "mis à jour")} à {sent} client(s).");
             }
         }
 

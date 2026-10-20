@@ -55,7 +55,7 @@ et encodé en UTF-8.
 | 11 | `PlayerHeldItem` | client → serveur, puis serveur → autres | ReliableOrdered | `PlayerId` ushort, `TechTypeName` string, compte octet, puis les paramètres d'animation actifs |
 | 12 | `PlayerColor` | serveur → client | ReliableOrdered | `PlayerId` ushort, `ColorIndex` octet |
 | 13 | `CreatureSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte ushort, puis par créature : `Key` long, position (3), quaternion (4) |
-| 14 | `VehicleSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet, puis par véhicule : `Key` long, position (3), quaternion (4), `Energy` float (0..1, **-1 = pas de batterie**) |
+| 14 | `VehicleSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet, puis par véhicule : `Key` long, position (3), quaternion (4), `Energy` float (0..1, normalisé par `EnergyInterface.GetValues`, **-1 = pas de batterie**) |
 | 15 | `PickupClaim` | client → serveur | ReliableOrdered | `PlayerId` ushort (revendiqué, falsifiable), `ItemKey` long, `TechTypeName` string |
 | 16 | `PickupResult` | serveur → demandeur | ReliableOrdered | `ItemKey` long, `TechTypeName` string (**≤ 64**, refusé au-delà à l'écriture comme à la lecture), `Granted` bool, `HolderId` ushort, `ClaimedBy` ushort |
 | 17 | `VehicleControl` | client → serveur | Unreliable (10 Hz) | `PlayerId` ushort (revendiqué, falsifiable), `VehicleKey` long, `Sequence` int, position et rotation (7 floats), vitesse (3 floats) |
@@ -64,6 +64,7 @@ et encodé en UTF-8.
 | 20 | `EntityDespawn` | serveur → client | ReliableOrdered | `Key` long (**jamais 0**, refusé à l'écriture comme à la lecture), `Kind` octet (`1` véhicule, `2` objet), `Reason` string (≤ 96) |
 | 21 | `VehicleRelease` | client → serveur | ReliableOrdered | `VehicleKey` long |
 | 22 | `PlayerCorrection` | serveur → client | ReliableOrdered | `ServerTick` long, position acceptée (3 floats, **finie** : `NaN`/∞ refusée à l'écriture comme à la lecture), `Reason` string (≤ 96) |
+| 23 | `VehicleUpgrades` | serveur → client | ReliableOrdered | `VehicleKey` long (**jamais 0**, refusé à l'écriture comme à la lecture), compte octet (**≤ `MaxVehicleUpgrades` = 8**, refusé au-delà), puis les entiers `TechType` (ushort), **triés et dédupliqués** à la lecture comme à l'écriture |
 
 Cinq points de contrat que ces messages portent :
 

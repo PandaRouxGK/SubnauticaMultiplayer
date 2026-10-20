@@ -30,9 +30,20 @@ dans la colonne de droite et n'invalident pas le critère.
 | **M1** squelette réseau | handshake + ping/pong entre 2 process | **clos** | étapes A/B, `[ping]` des deux côtés |
 | **M2** présence joueurs | 2 clients se voient bouger, distant interpolé | **clos** (2026-10-20) | B (verdict True + nage vue), `RemoteAvatar` 0,05 s, V (3 clients : `joueursDistants=2 avatarsActifs=2`) ; limite : mouvement vu seulement à deux, 4–10 joueurs non exercés |
 | **M3** créature synchro, IA serveur | position identique chez 2 clients, IA serveur | **clos** (2026-10-20) | E (76/76 clés, verdict True), `IA arrêtée=65`, **W** (3 clients) est une extension hors critère, **verte une fois puis rouge** sur une mesure limite (`2,01 m` pour un seuil de `2 m`, §54.5) ; limite : clignotement à la coupure partiellement mesuré |
-| **M4** véhicule | position 10 Hz interpolée, conduite arbitrée | **ouvert** (avancé le 2026-10-20) | J et M verts ; **charge transportée depuis la v14** (`Energy`, `VehicleEnergyTests`, 4 cas) mais **pas encore mesurée en jeu** ; modules/upgrades et dégâts non transportés ; pas de `spawn` client (`PLAN.md` §55) |
+| **M4** véhicule | position 10 Hz interpolée, énergie, upgrades, conduite arbitrée | **clos** (2026-10-20) | J vert (152 s) : `énergie 200.00 -> 100.00 (0.50 de la capacité)`, `module 'VehicleHullModule1' installé=True`, puis côté client `messages=1 … charges appliquées=1 — transport=True application=True` ; M vert pour la conduite. Limites : dégâts et `spawn` client non transportés (hors critère §6), pas de preuve d'effet de jeu (profondeur) — `PLAN.md` §56 |
 | **M5** première action autoritaire | pickup refusé si déjà réclamé | **clos** (2026-10-20) | L (accordé/refusé, geste bloqué), O/Q (objet retiré, retrait rejoué), 9 tests `PickupClaimLedger` ; limites : objets mobiles, collisions de clé, retour arrière |
 | **M6** pipeline de contenu | création + retrait, clé serveur | **ouvert** | N/O/Q verts ; l'item custom (AssetBundle) est **gelé** par décision (§43.5) |
+
+### M4 : énergie et modules, mesurés en jeu (2026-10-20)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| Le serveur **vide** la batterie du véhicule qu'il annonce, et dit les deux valeurs | `[sonde] véhicule : énergie 200.00 -> 100.00 (0.50 de la capacité)` | `src/Coop.Server/VehicleProbeBehaviour.cs` ; `src/Shared/VehicleModules.cs` (`WriteNormalized` → `IBattery.charge`) | prouvé (2026-10-20, étape J) |
+| Le client **écrit** une charge reçue au lieu de garder la sienne | `charges appliquées=1` dans `[sonde] véhicule modules` | `Coop.Client/RemoteVehicleManager.ApplyEnergy` → `VehicleModules.WriteNormalized` | prouvé (2026-10-20, étape J) |
+| Un module installé côté serveur **voyage** | `[net] modules : clé=0x… — 1 module(s) [VehicleHullModule1] annoncés à 1 client(s)` | `ServerNetwork.BroadcastVehicleUpgrades` ; `Coop.Model/Messages.cs` (`VehicleUpgradesMessage`, v15) | prouvé (2026-10-20, étape J) |
+| Le client **applique** le module sur sa copie | `local avant=[aucun] local maintenant=[VehicleHullModule1] … transport=True application=True` | `Coop.Client/VehicleModuleApplier.cs` | prouvé (2026-10-20, étape J) |
+| La v14 ne transportait **pas** réellement l'énergie | `200.00 -> 200.00 (1.00 de la capacité)` et `énergies appliquées=125` sur un run où aucune charge ne change | journal du 2026-10-20 17:35, `PLAN.md` §56.1 | corrigé (2026-10-20) |
+
 
 ## 1. Fondations : le mod démarre, le réseau parle, les journaux sont séparés
 

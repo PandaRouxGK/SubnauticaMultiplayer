@@ -38,13 +38,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 14;
+        public const int Version = 15;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v14";
+        public const string ConnectionKey = "coop-subnautica-v15";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -270,6 +270,13 @@ namespace Coop.Model
         public const int MaxVehicleStates = 16;
 
         /// <summary>
+        /// Nombre maximal de modules annoncés pour un véhicule. Un Seamoth en porte 4, un Prawn 4, un
+        /// Cyclops 6 : la borne est au-dessus du plus gros véhicule du jeu, et un message qui la dépasse
+        /// est refusé plutôt que tronqué en silence.
+        /// </summary>
+        public const int MaxVehicleUpgrades = 8;
+
+        /// <summary>
         /// Rayon (m) autour d'un joueur dans lequel un véhicule est jugé pertinent.
         ///
         /// Plus large que celui des créatures (120 m) : un Seamoth se voit de loin, et surtout il se
@@ -372,6 +379,13 @@ namespace Coop.Model
 
         /// <summary>Position autoritaire renvoyée à un client dont la position a été refusée (v13, P1).</summary>
         PlayerCorrection = 22,
+
+        /// <summary>
+        /// Modules installés sur un véhicule (ReliableOrdered, v15, M4). Fiabilité **obligatoire** :
+        /// un module manquant change la profondeur et la charge utile du véhicule, donc il ne peut pas
+        /// être perdu comme un état de position (le prochain le remplacerait).
+        /// </summary>
+        VehicleUpgrades = 23,
     }
 
     /// <summary>

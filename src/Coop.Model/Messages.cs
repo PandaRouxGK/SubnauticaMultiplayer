@@ -847,6 +847,140 @@ namespace Coop.Model
         }
     }
 
+    /// <summary>
+    /// Modules installés sur un véhicule (ReliableOrdered, v15, M4) : « ce véhicule-là porte ces modules ».
+    ///
+    /// Pourquoi un message à part, et fiable : le snapshot de véhicule est **non fiable** et arrive dix fois
+    /// par seconde ; y glisser un tableau variable de modules ferait perdre un module à la première perte de
+    /// paquet, et l'écart ne se verrait qu'à la prochaine annonce. Un module change la flottabilité, la
+    /// profondeur admissible et la charge utile : il doit arriver **une fois**, et être rejoué à un client qui
+    /// se connecte après l'installation.
+    ///
+    /// Les modules sont identifiés par l'entier de `TechType`, pas par un nom : les deux côtés compilent le
+    /// même jeu, donc la même énumération — un nom aurait ajouté une chaîne variable par module à un message
+    /// déjà rejoué.
+    /// </summary>
+    public sealed class VehicleUpgradesMessage
+    {
+        /// <summary>Clé stable du véhicule, la même que dans le snapshot et la conduite.</summary>
+        public long VehicleKey;
+
+        /// <summary>Entiers de `TechType` des modules, **triés** par <see cref="Canonicalize"/>.</summary>
+        public ushort[] TechTypes;
+
+        /// <summary>
+        /// Trie et déduplique les entiers reçus : l'ordre d'itération de l'équipement du jeu n'est pas
+        /// garanti, et deux ensembles identiques doivent produire **le même** message — sinon le serveur
+        /// croirait à un changement à chaque balayage et rediffuserait sans fin.
+        /// </summary>
+        public static ushort[] Canonicalize(ushort[] raw)
+        {
+            if (raw == null || raw.Length == 0)
+            {
+                return Array.Empty<ushort>();
+            }
+
+            var copy = (ushort[])raw.Clone();
+            Array.Sort(copy);
+
+            var unique = 0;
+            for (var i = 0; i < copy.Length; i++)
+            {
+                if (i == 0 || copy[i] != copy[unique - 1])
+                {
+                    copy[unique++] = copy[i];
+                }
+            }
+
+            if (unique > Protocol.MaxVehicleUpgrades)
+            {
+                throw new ProtocolException(
+                    $"trop de modules pour un véhicule ({unique} > {Protocol.MaxVehicleUpgrades})");
+            }
+
+            if (unique == copy.Length)
+            {
+                return copy;
+            }
+
+            var trimmed = new ushort[unique];
+            Array.Copy(copy, trimmed, unique);
+            return trimmed;
+        }
+
+        /// <summary>Vrai si les deux ensembles sont identiques (les deux sont supposés canoniques).</summary>
+        public static bool SameSet(ushort[] left, ushort[] right)
+        {
+            var a = left ?? Array.Empty<ushort>();
+            var b = right ?? Array.Empty<ushort>();
+            if (a.Length != b.Length)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < a.Length; i++)
+            {
+                if (a[i] != b[i])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public void Write(PacketWriter writer)
+        {
+            if (VehicleKey == 0L)
+            {
+                throw new ProtocolException("modules de véhicule sous la clé 0");
+            }
+
+            var list = TechTypes ?? Array.Empty<ushort>();
+            if (list.Length > Protocol.MaxVehicleUpgrades)
+            {
+                throw new ProtocolException(
+                    $"trop de modules à écrire ({list.Length} > {Protocol.MaxVehicleUpgrades})");
+            }
+
+            writer.WriteByte((byte)MessageType.VehicleUpgrades);
+            writer.WriteLong(VehicleKey);
+            writer.WriteByte((byte)list.Length);
+            for (var i = 0; i < list.Length; i++)
+            {
+                writer.WriteUInt16(list[i]);
+            }
+        }
+
+        public static VehicleUpgradesMessage Read(PacketReader reader)
+        {
+            var key = reader.ReadLong();
+            if (key == 0L)
+            {
+                throw new ProtocolException("modules de véhicule reçus sous la clé 0");
+            }
+
+            var count = reader.ReadByte();
+            if (count > Protocol.MaxVehicleUpgrades)
+            {
+                throw new ProtocolException(
+                    $"trop de modules reçus ({count} > {Protocol.MaxVehicleUpgrades})");
+            }
+
+            var types = count == 0 ? Array.Empty<ushort>() : new ushort[count];
+            for (var i = 0; i < count; i++)
+            {
+                types[i] = reader.ReadUInt16();
+            }
+
+            return new VehicleUpgradesMessage
+            {
+                VehicleKey = key,
+                TechTypes = Canonicalize(types),
+            };
+        }
+    }
+
     /// <summary>Regroupe l'écriture d'un message dans un tampon réutilisable.</summary>
     /// <summary>
     /// Réclamation d'un objet du monde (ReliableOrdered, protocole v8, M5) : « ce ramassage est à moi ».

@@ -1,6 +1,8 @@
+using System;
 using System.Collections;
 using System.Globalization;
 using BepInEx.Logging;
+using Coop.Shared;
 using UnityEngine;
 
 namespace Coop.Client
@@ -279,6 +281,32 @@ namespace Coop.Client
             var noJump = max <= MaxFrameStepMeters || maxStepSpeed <= MaxCatchUpSpeedMetersPerSecond;
             var smoothMean = mean <= MaxMeanStepMeters && mean > 0.01f;
             var verdict = enoughSamples && moved && noJump && smoothMean;
+
+            // — Énergie et modules (v15, M4) ————————————————————————————————————————
+            //
+            // Deux faits distincts, et c'est pour ça qu'il y a deux verdicts : le message a-t-il été
+            // **reçu** (transport), et la copie locale porte-t-elle le **même** ensemble (application) ?
+            // Les confondre ferait passer un message reçu pour un module appliqué.
+            var serverSet = vehicles.LastUpgradesServer;
+            var localSet = vehicles.LastUpgradesLocal;
+            var modulesReceived = vehicles.UpgradesMessages > 0;
+            var serverHasModules = !string.Equals(serverSet, "aucun", StringComparison.Ordinal);
+            var transportVerdict = modulesReceived && serverHasModules;
+
+            // L'ensemble **actuel** de la copie, relu ici : `localSet` est celui lu *avant* la demande
+            // d'application, et le comparer au serveur dirait toujours « divergent » juste après un ajout —
+            // c'est le défaut mesuré au run du 2026-10-20 à 17:42, où `appliqués=1` coexistait avec un
+            // verdict d'application faux.
+            var localNow = VehicleModules.Describe(VehicleModules.Read(vehicle), out _);
+            var applicationVerdict = transportVerdict &&
+                string.Equals(serverSet, localNow, StringComparison.Ordinal);
+
+            Log.LogInfo(
+                $"[sonde] véhicule modules : messages={vehicles.UpgradesMessages} serveur=[{serverSet}] " +
+                $"local avant=[{localSet}] local maintenant=[{localNow}] " +
+                $"divergences={vehicles.UpgradesDivergences} " +
+                $"charges appliquées={vehicles.EnergiesApplied} — transport={transportVerdict} " +
+                $"application={applicationVerdict} (le premier est la réception, le second l'état de la copie).");
 
             Log.LogInfo(
                 $"[sonde] véhicule client : verdict={verdict} — '{vehicle.name}' suivi sur {samples} image(s) en " +

@@ -216,6 +216,84 @@ namespace Coop.Server
             // change rien — elle ne coûte que deux secondes.
             yield return new WaitForSecondsRealtime(2.5f);
 
+            // — Énergie et modules (v15, M4) ————————————————————————————————————————
+            //
+            // La sonde **change** l'état du véhicule : une valeur constante ne prouverait rien, puisque le
+            // client la lirait déjà dans la sauvegarde. Elle vide la moitié de la batterie et installe un
+            // module, puis restaure à la fin — la mesure doit laisser le monde tel qu'elle l'a trouvé.
+            // L'énergie d'un véhicule se lit sur son `EnergyInterface`, pas sur `EnergyMixin.charge` :
+            // mesuré au run du 2026-10-20, `charge` y vaut `200` et `capacity` aussi, si bien que
+            // `ModifyCharge(-0.5 * capacity)` ne changeait rien (la source d'énergie est la cellule, pas
+            // le mixin). C'est la même porte que celle utilisée par le serveur et le client.
+            var hasEnergy = VehicleModules.TryRead(vehicle, out var chargeBefore, out var capacity);
+            var normalizedBefore = capacity > 0.001f ? chargeBefore / capacity : -1f;
+            var drained = hasEnergy &&
+                VehicleModules.WriteNormalized(vehicle, normalizedBefore - 0.5f);
+
+            VehicleModules.TryRead(vehicle, out var chargeAfter, out _);
+            var normalizedAfter = capacity > 0.001f ? chargeAfter / capacity : -1f;
+            Log.LogInfo(
+                $"[sonde] véhicule : énergie {chargeBefore.ToString("F2", CultureInfo.InvariantCulture)} -> " +
+                $"{chargeAfter.ToString("F2", CultureInfo.InvariantCulture)} (drain 50 %, écriture " +
+                $"effectuée={drained}) — le client doit afficher la même charge, pas celle de sa sauvegarde.");
+
+            var moduleTech = TechType.VehicleHullModule1;
+            var moduleInstalled = false;
+            string moduleSlot = null;
+
+            // Le prefab est demandé **hors** du `try` : C# interdit un `yield` dans un bloc protégé par
+            // un `catch`, et c'est l'attente elle-même qui doit être protégée.
+            CoroutineTask<GameObject> prefabRequest = null;
+            try
+            {
+                if (vehicle.modules != null &&
+                    vehicle.modules.GetFreeSlot(EquipmentType.VehicleModule, out moduleSlot))
+                {
+                    prefabRequest = CraftData.GetPrefabForTechTypeAsync(moduleTech, false);
+                }
+            }
+            catch (Exception exception)
+            {
+                Log.LogWarning(
+                    $"[sonde] véhicule : slot ou prefab de module indisponible : " +
+                    $"{exception.GetType().Name} — {exception.Message}");
+                moduleSlot = null;
+            }
+
+            if (prefabRequest != null)
+            {
+                yield return prefabRequest;
+
+                try
+                {
+                    var modulePrefab = prefabRequest.GetResult();
+                    if (modulePrefab != null)
+                    {
+                        var created = CraftData.InstantiateFromPrefab(modulePrefab, moduleTech, false);
+                        var pickupable = created != null ? created.GetComponent<Pickupable>() : null;
+                        if (pickupable != null)
+                        {
+                            moduleInstalled = vehicle.modules.AddItem(
+                                moduleSlot, new InventoryItem(pickupable), false);
+                            if (moduleInstalled)
+                            {
+                                created.SetActive(false);
+                            }
+                        }
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Log.LogWarning(
+                        $"[sonde] véhicule : installation du module '{moduleTech}' échouée : " +
+                        $"{exception.GetType().Name} — {exception.Message}");
+                }
+            }
+
+            Log.LogInfo(
+                $"[sonde] véhicule : module '{moduleTech}' installé={moduleInstalled} " +
+                $"(slot '{moduleSlot}') — le client doit voir cet ensemble, et lui seul.");
+
             var creatureSteps = new Steps();
             var playerSteps = new Steps();
 
@@ -297,6 +375,25 @@ namespace Coop.Server
                 $"· à 20 Hz (joueurs) : {playerSteps.Describe()} (mesurés sur un déplacement réel, avant tout message : " +
                 "le protocole ne transporte encore aucun véhicule).");
 
+            // Restauration : le véhicule du monde retrouve sa charge et ses modules, sinon la mesure
+            // suivante partirait d'un état que c'est *elle* qui a créé.
+            if (moduleInstalled && !spawned)
+            {
+                try
+                {
+                    vehicle.modules.RemoveItem(moduleSlot, true, false);
+                }
+                catch (Exception exception)
+                {
+                    Log.LogWarning($"[sonde] véhicule : retrait du module levé : {exception.Message}");
+                }
+            }
+
+            if (hasEnergy && !spawned)
+            {
+                VehicleModules.WriteNormalized(vehicle, normalizedBefore);
+            }
+
             var enoughMoved = travelled >= 0.9f * SpeedMetersPerSecond * MotionSeconds;
             var speedPlausible = speed >= 0.9f * SpeedMetersPerSecond && speed <= 1.1f * SpeedMetersPerSecond;
             var fastBandPopulated = creatureSteps.AtLeastTwoMeters > 0;
@@ -310,7 +407,11 @@ namespace Coop.Server
                 $"(vitesse mesurée {speed.ToString("F1", CultureInfo.InvariantCulture)} m/s), pas max à 10 Hz=" +
                 $"{creatureSteps.Max.ToString("F2", CultureInfo.InvariantCulture)} m / à 20 Hz=" +
                 $"{playerSteps.Max.ToString("F2", CultureInfo.InvariantCulture)} m, bande ≥2 m à 10 Hz=" +
-                $"{creatureSteps.AtLeastTwoMeters} annonce(s) — seuils : parcouru≥{0.9f * SpeedMetersPerSecond * MotionSeconds:F0} m, " +
+                $"{creatureSteps.AtLeastTwoMeters} annonce(s), énergie " +
+                $"{chargeBefore.ToString("F2", CultureInfo.InvariantCulture)} -> " +
+                $"{chargeAfter.ToString("F2", CultureInfo.InvariantCulture)} " +
+                $"({normalizedAfter.ToString("F2", CultureInfo.InvariantCulture)} de la capacité), module '{moduleTech}' " +
+                $"installé={moduleInstalled} — seuils : parcouru≥{0.9f * SpeedMetersPerSecond * MotionSeconds:F0} m, " +
                 $"vitesse≈{SpeedMetersPerSecond:F0} m/s, bande ≥2 m non vide");
         }
 

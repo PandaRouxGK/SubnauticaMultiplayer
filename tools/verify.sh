@@ -769,6 +769,14 @@ assert_j() {
     expect J "$server" 'par identifiant|par position d.apparition' "la clé de diffusion est calculée, et son mécanisme est dit"
     expect J "$server" '\[sonde\] véhicule : verdict=True' "la sonde de l'hôte conclut True sur le déplacement"
 
+    # M4, v15 : la sonde **change** l'état du véhicule (moitié de la batterie, un module installé). Sans
+    # cette assertion, « l'énergie est transportée » ne serait qu'une lecture du codec : ici c'est le run
+    # qui dit si le serveur lit et annonce autre chose que ce que le client avait déjà dans sa partie.
+    expect J "$server" '\[sonde\] véhicule : énergie [0-9]+\.[0-9]+ -> [0-9]+\.[0-9]+ \(drain 50 %, écriture effectuée=True\)' \
+        "le serveur vide la moitié de la batterie, et l'écriture a réellement eu lieu"
+    expect J "$server" "\\[sonde\\] véhicule : module '[A-Za-z0-9_]+' installé=True" \
+        "le serveur installe un module réel sur le véhicule annoncé"
+
     # Côté client : le message arrive pour de vrai (compteurs de la boucle réseau), le véhicule est suivi,
     # et la mesure image par image conclut True — pas max sous 1 m, alors qu'une annonce en vaut 2,15.
     expect J "$client" 'snapshotsVehicules=[1-9][0-9]* etatsVehicules=[1-9][0-9]*' \
@@ -776,6 +784,20 @@ assert_j() {
     expect J "$client" '\[véhicule\] état : suivis=[1-9]' "le gestionnaire client suit au moins un véhicule"
     expect J "$client" '\[sonde\] véhicule client : verdict=True' "l'interpolation cliente conclut True"
     expect J "$client" 'pas par image max=[0-9]\.[0-9]+ m' "le pas par image mesuré est chiffré"
+
+    # Le pendant client de v15 : le message de modules est reçu (transport), et la copie locale finit par
+    # porter le même ensemble (application). Deux affirmations distinctes, dans une seule ligne de sonde.
+    expect J "$client" '\[sonde\] véhicule modules : messages=[1-9][0-9]*' \
+        "le client reçoit au moins un message de modules"
+    # `transport=True` implique déjà que l'ensemble annoncé n'est pas vide : la sonde le calcule ainsi.
+    # L'**application** (`application=`) est mesurée et publiée mais pas assertée ici : elle dépend du
+    # prefab du jeu et de l'état de la copie locale, et un échec doit être lu dans le journal avant
+    # d'être transformé en critère — sinon une mesure d'interpolation verte deviendrait rouge à cause
+    # d'une autre grandeur.
+    expect J "$client" 'transport=True' "le transport des modules est vrai côté client"
+    expect J "$client" 'application=True' "la copie locale du client porte le même ensemble de modules"
+    expect J "$client" 'charges appliquées=[1-9][0-9]*' \
+        "le client a réellement écrit une charge reçue, et pas seulement lu la sienne"
 }
 
 assert_i() {

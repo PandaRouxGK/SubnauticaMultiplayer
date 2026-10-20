@@ -138,6 +138,31 @@ namespace Coop.Client
         private long _releases;
         private long _locallyDrivenSkips;
 
+        // — Modules installés (v15, M4) ————————————————————————————————————————
+        //
+        // Le dernier ensemble annoncé par véhicule est **mémorisé même si le véhicule n'est pas encore
+        // suivi** : l'annonce de modules peut précéder la première position (elle est fiable, la position
+        // ne l'est pas), et la jeter rendrait la copie divergente jusqu'à la prochaine installation.
+        private readonly Dictionary<long, ushort[]> _pendingUpgrades = new Dictionary<long, ushort[]>();
+
+        private long _upgradesMessages;
+        private long _upgradesDivergences;
+        private string _lastUpgradesKey = "aucun";
+        private string _lastUpgradesServer = "aucun";
+        private string _lastUpgradesLocal = "aucun";
+
+        /// <summary>Dernier ensemble de modules reçu du serveur, pour la sonde (v15).</summary>
+        public string LastUpgradesServer => _lastUpgradesServer;
+
+        /// <summary>Ensemble lu localement sur le même véhicule au moment de la comparaison.</summary>
+        public string LastUpgradesLocal => _lastUpgradesLocal;
+
+        /// <summary>Charges écrites sur une copie locale (v14) : 0 significa « reçues mais identiques ».</summary>
+        public long EnergiesApplied => _energiesApplied;
+
+        public long UpgradesMessages => _upgradesMessages;
+        public long UpgradesDivergences => _upgradesDivergences;
+
         // Mesure par image : c'est elle qui prouve que le saut de 2,15 m a disparu.
         private long _frameSteps;
         private long _framesObserved;
@@ -192,6 +217,118 @@ namespace Coop.Client
                 }
 
                 return nearest;
+            }
+        }
+
+        /// <summary>
+        /// Reçoit l'ensemble de modules installés sur un véhicule (v15, M4).
+        ///
+        /// Ce n'est pas un état périodique : le serveur ne l'envoie que lorsque l'ensemble change (ou à
+        /// la connexion). Le client compare, journalise la divergence **nommée**, puis demande
+        /// l'application locale — le prefab d'un module se charge de façon asynchrone, donc via
+        /// <see cref="VehicleModuleApplier"/>.
+        /// </summary>
+        public int OnUpgrades(VehicleUpgradesMessage message)
+        {
+            if (message == null || message.VehicleKey == 0L)
+            {
+                return 0;
+            }
+
+            _upgradesMessages++;
+            var serverTypes = message.TechTypes ?? Array.Empty<ushort>();
+            _pendingUpgrades[message.VehicleKey] = serverTypes;
+
+            if (!_tracked.TryGetValue(message.VehicleKey, out var entry) || entry.Vehicle == null)
+            {
+                VehicleModules.Describe(serverTypes, out var pendingCount);
+                _log.LogInfo(
+                    $"[véhicule] modules : clé=0x{message.VehicleKey:x16} {pendingCount} module(s) reçus " +
+                    "avant le suivi — mémorisés pour la prochaine adoption.");
+                return 0;
+            }
+
+            return ApplyUpgrades(entry, serverTypes);
+        }
+
+        /// <summary>
+        /// Compare l'ensemble annoncé à celui lu localement, puis demande les ajouts et retraits manquants.
+        /// Rend le nombre d'écarts traités (0 si les deux mondes sont d'accord).
+        /// </summary>
+        private int ApplyUpgrades(Tracked entry, ushort[] serverTypes)
+        {
+            var localTypes = VehicleModules.Read(entry.Vehicle);
+            _lastUpgradesKey = entry.Label;
+            _lastUpgradesServer = VehicleModules.Describe(serverTypes, out var serverCount);
+            _lastUpgradesLocal = VehicleModules.Describe(localTypes, out var localCount);
+
+            if (VehicleUpgradesMessage.SameSet(serverTypes, localTypes))
+            {
+                _pendingUpgrades.Remove(entry.Key);
+                return 0;
+            }
+
+            _upgradesDivergences++;
+
+            var changes = 0;
+            for (var i = 0; i < serverTypes.Length; i++)
+            {
+                if (Array.IndexOf(localTypes, serverTypes[i]) >= 0)
+                {
+                    continue;
+                }
+
+                VehicleModuleApplier.RequestAdd(entry.Vehicle, serverTypes[i]);
+                changes++;
+            }
+
+            for (var i = 0; i < localTypes.Length; i++)
+            {
+                if (Array.IndexOf(serverTypes, localTypes[i]) >= 0)
+                {
+                    continue;
+                }
+
+                VehicleModuleApplier.RequestRemove(entry.Vehicle, localTypes[i]);
+                changes++;
+            }
+
+            _log.LogInfo(
+                $"[véhicule] modules : {entry.Label} — serveur=[{_lastUpgradesServer}] ({serverCount}) " +
+                $"local=[{_lastUpgradesLocal}] ({localCount}) -> {changes} écart(s) demandé(s) au client.");
+
+            _pendingUpgrades.Remove(entry.Key);
+            return changes;
+        }
+
+        /// <summary>Applique les ensembles mémorisés aux véhicules qui viennent d'être adoptés.</summary>
+        private void FlushPendingUpgrades()
+        {
+            if (_pendingUpgrades.Count == 0)
+            {
+                return;
+            }
+
+            List<long> resolved = null;
+            foreach (var pair in _pendingUpgrades)
+            {
+                if (!_tracked.TryGetValue(pair.Key, out var entry) || entry.Vehicle == null)
+                {
+                    continue;
+                }
+
+                (resolved ?? (resolved = new List<long>())).Add(pair.Key);
+                ApplyUpgrades(entry, pair.Value);
+            }
+
+            if (resolved == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < resolved.Count; i++)
+            {
+                _pendingUpgrades.Remove(resolved[i]);
             }
         }
 
@@ -322,6 +459,9 @@ namespace Coop.Client
                 _statesMatched++;
                 applied++;
             }
+
+            // Les modules reçus avant le suivi sont appliqués dès que la copie existe (v15).
+            FlushPendingUpgrades();
 
             return applied;
         }
@@ -496,27 +636,13 @@ namespace Coop.Client
                 return;
             }
 
-            var mixin = entry.Vehicle.GetComponent<EnergyMixin>();
-            if (mixin == null)
+            // La conversion normalisé -> absolu vit dans `VehicleModules` (Shared) : la v14 comparait une
+            // charge absolue (`200` sur un Seamoth) à une valeur normalisée, et écrivait donc un écart
+            // faux. Mesuré au run du 2026-10-20 : 125 « applications » sans qu'aucune charge ne change.
+            if (VehicleModules.WriteNormalized(entry.Vehicle, energy))
             {
-                return;
+                _energiesApplied++;
             }
-
-            if (Mathf.Abs(mixin.charge - energy) < 0.01f)
-            {
-                return;
-            }
-
-            // `charge` est une propriété **lecture seule** ; l'API du jeu expose `ModifyCharge`
-            // (unités absolues) et `capacity` (échelle). On convertit l'écart normalisé en unités.
-            var capacity = mixin.capacity;
-            if (capacity <= 0.001f)
-            {
-                return;
-            }
-
-            mixin.ModifyCharge((energy - mixin.charge) * capacity);
-            _energiesApplied++;
         }
 
         /// <summary>Résumé d'une ligne, pour le journal périodique et pour les sondes.</summary>
@@ -530,7 +656,8 @@ namespace Coop.Client
                 "suivis={0} snapshots={1} états={2} appariés={3} clé inconnue={4} rattachés par proximité={5} " +
                 "relâchés={6} conduits localement={7} écart avant lissage max={8:F2}m ({9}) " +
                 "pas par image max={10:F2}m moy={11:F2}m sur {12} image(s) en mouvement (fps≈{13:F0}) " +
-                "dont ≥1m={14}, vitesse implicite≈{15:F1} m/s, énergies appliquées={16}",
+                "dont ≥1m={14}, vitesse implicite≈{15:F1} m/s, énergies appliquées={16}, " +
+                "modules reçus={17} divergences={18} appliqués={19} retirés={20}",
                 _tracked.Count,
                 _snapshotsReceived,
                 _statesReceived,
@@ -547,7 +674,11 @@ namespace Coop.Client
                 fps,
                 _frameStepsAboveOneMeter,
                 fps * (float)average,
-                _energiesApplied);
+                _energiesApplied,
+                _upgradesMessages,
+                _upgradesDivergences,
+                VehicleModuleApplier.AppliedCount,
+                VehicleModuleApplier.RemovedCount);
         }
 
         /// <summary>Journalise le résumé toutes les 5 s : un run doit se lire, pas se déduire.</summary>

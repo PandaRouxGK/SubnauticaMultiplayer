@@ -141,7 +141,7 @@ serveur qu'une valeur falsifiée est rejetée.
 | **M1** | Squelette réseau | handshake + ping/pong entre 2 process | faible |
 | **M2** | Présence joueurs | 2 clients se voient bouger ; self prédictif, distant interpolé — **clos le 2026-10-20 (§54.1)** : B (mouvement vu), interpolation `RemoteAvatar` 0,05 s, V (trois clients) | moyen |
 | **M3** | **Une créature synchro, IA client coupée** | position identique chez les 2 clients, IA uniquement serveur — **clos le 2026-10-20 (§54.2)** : E (deux clients), IA relue coupée, W (trois clients) | **élevé — valide le modèle** |
-| **M4** | Un véhicule (Seamoth) | **position diffusée à 10 Hz et interpolée côté client (fait, §33)** ; énergie/upgrades et conduite autoritaire restent ouverts | moyen |
+| **M4** | Un véhicule (Seamoth) | **clos le 2026-10-20 (§56)** : position diffusée à 10 Hz et interpolée (§33), conduite autoritaire (§40), **énergie mesurée en jeu** (`200,00 -> 100,00`, appliquée chez le client) et **modules transportés puis appliqués** (`transport=True application=True`) | moyen |
 | **M5** | Première action autoritaire | pickup : refus serveur si déjà réclamé — **clos le 2026-10-20 (§54.3)** : L (accordé/refusé, geste bloqué), O/Q (objet retiré, retrait rejoué), 9 tests du registre | moyen |
 | **M6** | Pipeline de contenu | **création et retrait d'entité faits (§41, §42)** : l'hôte fabrique, les clients instancient avec la clé du serveur ; un retrait et un ramassage se répercutent ; reste l'item **custom** et son AssetBundle livré au client | moyen |
 
@@ -152,8 +152,8 @@ correctement chez 2 clients, l'architecture est bonne pour tout le reste.
 > qui fait foi pour la suite est celle du §43.5, et **M6-contenu (AssetBundles) y est gelé** jusqu'à ce
 > qu'une session réelle de 30 minutes tienne.
 >
-> **État au 2026-10-20** : M0, M1, M2, M3 et M5 sont **clos** (critères du §6 prouvés, §54) ; M4 reste
-> ouvert (énergie/modules/dégâts non transportés, pas de `spawn` client) et M6 aussi (AssetBundle gelé).
+> **État au 2026-10-20** : M0, M1, M2, M3, **M4** et M5 sont **clos** (critères du §6 prouvés, §54 et §56) ;
+> M6 reste ouvert (AssetBundle gelé, en attente d'une session réelle de 30 min).
 
 ---
 
@@ -4028,10 +4028,10 @@ sans clé non arbitrés ; **collisions de clé** comptées, pas arbitrées ; **r
 
 ### 54.4 Les jalons qui restent ouverts, et ce qu'il faudrait
 
-- **M4 (véhicule)** : position 10 Hz et conduite arbitrée sont prouvées (J, M), mais l'**énergie**, les
-  **modules/upgrades** et les **dégâts** ne voyagent pas, et aucun `spawn` initié par un client n'existe.
-  Clore M4 demande un changement de protocole (`VehicleSnapshot` ou message dédié) **et** une sonde qui
-  draine une batterie / casse un module, donc plus qu'une session.
+- **M4 (véhicule)** : **clos le 2026-10-20 (§56)** — l'énergie est drainée par la sonde et appliquée chez
+  le client, et un module installé côté serveur arrive puis s'applique côté client (`transport=True
+  application=True`). Restent hors du critère §6, et nommés : les **dégâts** (`LiveMixin`) et le `spawn`
+  initié par un client ne voyagent toujours pas.
 - **M6 (contenu)** : création/retrait/livraison d'une définition sont prouvés (N, O, Q), mais l'item
   **custom** (AssetBundle livré au client) est **gelé par décision** (§43.5) jusqu'à une session réelle
   de 30 min. Le critère §6 le nomme explicitement : M6 reste ouvert par choix, pas par oubli.
@@ -4086,3 +4086,76 @@ builds client et serveur rc=0 ; `tools/mod.manifest.json` et `Protocol.Connectio
 **Ce qui n'est pas fait** : aucune mesure en jeu de l'énergie (le run J ne l'assertait pas), et les
 **modules/upgrades** et les **dégâts** ne voyagent toujours pas. M4 reste donc **ouvert** : le critère §6
 demande l'énergie *et* les upgrades, pas l'un des deux.
+
+## 56. M4 clos : l'énergie est mesurée, les modules voyagent (v15, 2026-10-20)
+
+Le §55 annonçait deux choses : la charge « transportée » et M4 « encore ouvert sur l'énergie et les
+upgrades ». Le premier run de mesure a montré que la première affirmation était **fausse**, et la
+correction a permis de fermer la seconde.
+
+### 56.1 Le défaut de la v14, trouvé par la mesure et non par la lecture
+
+`EnergyMixin.charge` d'un Seamoth vaut **`200`**, pas `1`. La v14 normalisait par une borne
+(`charge > 1 ? 1 : charge`) : toute batterie pleine devenait `1`, et une batterie à moitié aussi. Côté
+client, `ApplyEnergy` comparait cette valeur normalisée à une charge absolue — le run du 2026-10-20 17:35
+a relevé **125 « énergies appliquées »** avec la charge du serveur affichée `200,00 -> 200,00` : les
+compteurs montaient, aucune charge ne changeait.
+
+Deux causes distinctes, mesurées :
+
+1. **l'unité** — c'est `EnergyInterface.GetValues(charge, capacity)` qui donne l'échelle, pas
+   `EnergyMixin.charge` seule ;
+2. **l'écriture** — `EnergyInterface.ModifyCharge` commence par `GameModeUtils.RequiresPower()` (IL lu avec
+   `tools/ApiDump il`), donc dans un mode de jeu qui ne consomme pas d'énergie l'appel **ne fait rien**. La
+   batterie s'écrit par `IBattery.charge = valeur` (`IBattery.charge { get; set; }`), que la sonde et le
+   client utilisent désormais.
+
+La conversion vit dans `src/Shared/VehicleModules.cs` (`ReadNormalized`, `WriteNormalized`, `TryRead`,
+`TryFindBattery`), compilée des deux côtés : une seule échelle, donc un écart client/serveur qui mesure
+les mondes et pas deux morceaux de code.
+
+### 56.2 Les modules : un message fiable, et il s'applique
+
+`VehicleUpgradesMessage` (opcode `23`, **v15**, ReliableOrdered) porte la clé du véhicule et les entiers
+`TechType` de ses modules, en forme canonique (triés, dédupliqués). Le serveur le diffuse **au changement**
+seulement, et le **rejoue** à un client qui se connecte après l'installation — comme le carnet
+d'apparitions. Le client compare à sa copie, nomme la divergence, puis applique par
+`VehicleModuleApplier` (prefab asynchrone, `GetFreeSlot(EquipmentType.VehicleModule)`, `AddItem`, retrait
+par slot).
+
+Une erreur de méthode a été corrigée en chemin : `(IEnumerable<InventoryItem>)vehicle.modules` lève
+`InvalidCastException` — `Equipment` n'expose que `IItemsContainer`. La lecture passe par
+`GetSlots(EquipmentType.VehicleModule)` + `GetTechTypeInSlot`, et le journal du run précédent
+(`modules illisibles : InvalidCastException`, répété toutes les 2 s) est ce qui l'a montré.
+
+### 56.3 La mesure (étape J, `tools/verify.sh --only=J`, 2026-10-20 17:53)
+
+`étape J : OK (152s)`, `VERDICT GLOBAL : tout est vert`, code de sortie 0.
+
+```
+serveur  [sonde] véhicule : module 'VehicleHullModule1' installé=True (slot 'SeamothModule4')
+serveur  [sonde] véhicule : verdict=True — … énergie 200.00 -> 100.00 (0.50 de la capacité),
+                 module 'VehicleHullModule1' installé=True
+serveur  [net] modules : clé=0xe16d82d1f441441c 'SeaMoth(Clone)' — 1 module(s) [VehicleHullModule1]
+                 annoncés à 1 client(s).
+client   [sonde] véhicule modules : messages=1 serveur=[VehicleHullModule1] local avant=[aucun]
+                 local maintenant=[VehicleHullModule1] divergences=1 charges appliquées=1
+                 — transport=True application=True
+```
+
+Ce que ces lignes établissent, et ce qu'elles n'établissent pas :
+
+- l'énergie **change** chez le serveur (moitié de la capacité) et le client écrit une charge reçue
+  (`charges appliquées=1`) : la v14 n'aurait rien écrit ;
+- le module est installé côté serveur, **reçu** (`messages=1`) et **appliqué** (la copie locale passe de
+  `aucun` à `[VehicleHullModule1]`) : `transport=True application=True` ;
+- ce n'est pas une preuve de **comportement de jeu** : la sonde ne vérifie pas que la profondeur admissible
+  change, seulement que l'équipement de la copie porte le module.
+
+### 56.4 Ce qui reste hors du critère, et qui est dit
+
+- **Dégâts** (`LiveMixin.health`) et **`spawn` initié par un client** ne voyagent pas. Le critère §6 de M4
+  nomme position, énergie, upgrades et conduite : ces deux-là sont des extras, pas des manques du critère.
+- La sonde d'énergie vide la batterie d'un véhicule **du monde** puis la restaure ; sur un véhicule
+  fabriqué (`spawn seamoth`), elle le détruit, donc rien ne reste.
+- W n'est pas concerné : il mesure des créatures, et son intermittence (§54.5) est indépendante.
