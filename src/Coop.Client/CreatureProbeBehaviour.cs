@@ -250,6 +250,7 @@ namespace Coop.Client
                 "désinscription, la créature simule encore chez le client), " +
                 $"dont mouvement local ≤{creatures.MaxLocalJitterMeters.ToString("F2", CultureInfo.InvariantCulture)}m " +
                 $"({creatures.MaxLocalJitterLabel}, le reste étant le déplacement du serveur entre les deux annonces), " +
+                $"paires écartées faute de glissement fini={creatures.StillGliding}, " +
                 $"interruption max={creatures.MaxGapSeconds.ToString("F1", CultureInfo.InvariantCulture)}s " +
                 $"({creatures.MaxGapLabel}) avec écart {creatures.MaxGapDriftMeters.ToString("F2", CultureInfo.InvariantCulture)}m, " +
                 $"1re distance max={creatures.MaxFirstDistanceMeters.ToString("F2", CultureInfo.InvariantCulture)}m, " +

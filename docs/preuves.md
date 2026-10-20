@@ -29,7 +29,7 @@ dans la colonne de droite et n'invalident pas le critère.
 | **M0** serveur headless | plugin chargé, tick 20 Hz, monde sans rendu | **clos** | tick mesuré 19,98–20,03/s ; étape H (serveur sans personnage) |
 | **M1** squelette réseau | handshake + ping/pong entre 2 process | **clos** | étapes A/B, `[ping]` des deux côtés |
 | **M2** présence joueurs | 2 clients se voient bouger, distant interpolé | **clos** (2026-10-20) | B (verdict True + nage vue), `RemoteAvatar` 0,05 s, V (3 clients : `joueursDistants=2 avatarsActifs=2`) ; limite : mouvement vu seulement à deux, 4–10 joueurs non exercés |
-| **M3** créature synchro, IA serveur | position identique chez 2 clients, IA serveur | **clos** (2026-10-20) | E (76/76 clés, verdict True), `IA arrêtée=65`, **W** (3 clients) est une extension hors critère, **verte une fois puis rouge** sur une mesure limite (`2,01 m` pour un seuil de `2 m`, §54.5) ; limite : clignotement à la coupure partiellement mesuré |
+| **M3** créature synchro, IA serveur | position identique chez 2 clients, IA serveur | **clos** (2026-10-20) | E (76/76 clés, verdict True), `IA arrêtée=65`, **W** (3 clients) est vert depuis le 2026-10-20 (`écart max=1,02 / 1,04 / 1,28 m`) après correction de la mesure, qui relevait la dérive pendant le glissement (§60) ; limite : clignotement à la coupure partiellement mesuré |
 | **M4** véhicule | position 10 Hz interpolée, énergie, upgrades, conduite arbitrée | **clos** (2026-10-20) | J vert (152 s) : `énergie 200.00 -> 100.00 (0.50 de la capacité)`, `module 'VehicleHullModule1' installé=True`, puis côté client `messages=1 … charges appliquées=1 — transport=True application=True` ; M vert pour la conduite. Limites : dégâts et `spawn` client non transportés (hors critère §6), pas de preuve d'effet de jeu (profondeur) — `PLAN.md` §56 |
 | **M5** première action autoritaire | pickup refusé si déjà réclamé | **clos** (2026-10-20) | L (accordé/refusé, geste bloqué), O/Q (objet retiré, retrait rejoué), 9 tests `PickupClaimLedger` ; limites : objets mobiles, collisions de clé, retour arrière |
 | **M6** pipeline de contenu | création + retrait, clé serveur | **ouvert** | N/O/Q verts ; l'item custom (AssetBundle) est **gelé** par décision (§43.5) |
@@ -72,6 +72,14 @@ dans la colonne de droite et n'invalident pas le critère.
 | La mesure est **discriminante** | rejeu : pas max 0,33 m ; même flux sans interpolation : **2,13 m** (seuil J = 1,0 m) | `VehicleReplayTests.Sans_interpolation_le_meme_flux_echoue_au_seuil` | prouvé (2026-10-20) |
 | L'extraction n'a pas changé le comportement en jeu | `étape J : OK (152s)`, tout vert | `tools/verify.sh --only=J` après extraction | prouvé (2026-10-20) |
 
+
+### W : créatures à trois clients, mesure corrigée (2026-10-20)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| La dérive n'est mesurée que si la copie a fini son segment | `paires écartées faute de glissement fini=381 / 521 / 461` dans le verdict de sonde | `RemoteCreatureManager.PreviousSegmentFinished`, `StillGliding` | prouvé (2026-10-20, étape W) |
+| Les trois clients suivent le même monde, sous le seuil | `écart max=1.02 / 1.04 / 1.28 m` (seuil 2 m), `verdict=True` sur les trois, `étape W : OK (132s)` | `tools/verify.sh --only=W` | prouvé (2026-10-20) |
+| Une annonce manquée reste mesurée et publiée | `interruption max=1.4 à 2.0 s` avec écarts `2.32 à 5.85 m` sur le même run | sonde de créatures, branche « interruption » | prouvé (2026-10-20, étape W) |
 
 ## 1. Fondations : le mod démarre, le réseau parle, les journaux sont séparés
 

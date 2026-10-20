@@ -252,6 +252,16 @@ namespace Coop.Client
         private long _burstPairs;
 
         /// <summary>
+        /// Paires écartées de la mesure de dérive parce que la copie glissait encore vers l'annonce
+        /// précédente. Comptées : un compteur qui monte dit que les segments sont plus longs que
+        /// l'intervalle d'annonce, ce qui est une information sur l'interpolation, pas un défaut.
+        /// </summary>
+        private long _stillGliding;
+
+        /// <summary>Paires écartées faute d'avoir fini le segment précédent (voir <see cref="PreviousSegmentFinished"/>).</summary>
+        public long StillGliding => _stillGliding;
+
+        /// <summary>
         /// Nombre de clés **partagées par deux créatures** dans le registre local, relevé au dernier
         /// passage, et son maximum depuis le début.
         ///
@@ -700,6 +710,15 @@ namespace Coop.Client
                         // annonces au lieu d'une. Compté, pas ignoré.
                         _burstPairs++;
                     }
+                    else if (gap <= ConsecutiveStateGapSeconds && !PreviousSegmentFinished(entry, gap))
+                    {
+                        // La copie est **encore en train de glisser** vers l'annonce précédente : l'écart
+                        // mesuré serait le retard d'interpolation, pas une annonce manquée. C'est le
+                        // défaut de mesure qui a rendu W intermittent le 2026-10-20 (`écart max=2,01 m`
+                        // pour un seuil de 2 m, avec `mouvement local ≤1,47 m` — un Peeper ne nage pas à
+                        // 14 m/s : ce "local" était le glissement restant, pas la créature).
+                        _stillGliding++;
+                    }
                     else if (gap <= ConsecutiveStateGapSeconds)
                     {
                         if (!entry.AiVerified)
@@ -1092,6 +1111,22 @@ namespace Coop.Client
         /// infiniment préférable à un téléport : le second passerait pour une synchronisation qui
         /// marche.
         /// </summary>
+        /// <summary>
+        /// Vrai si le segment d'interpolation en cours était **terminé** quand l'annonce est arrivée :
+        /// la copie était alors à la position serveur précédente, donc l'écart mesuré dit quelque chose
+        /// de la synchronisation. Une tolérance de 20 ms couvre une image longue sans rouvrir la porte
+        /// à un segment entier (les segments durent ~0,1 s).
+        /// </summary>
+        private static bool PreviousSegmentFinished(Adopted entry, float gap)
+        {
+            if (entry.SegmentDuration <= 0f)
+            {
+                return true;
+            }
+
+            return gap + 0.02f >= entry.SegmentDuration;
+        }
+
         private bool TryAdopt(CreatureStateEntry state, out Adopted entry)
         {
             entry = null;

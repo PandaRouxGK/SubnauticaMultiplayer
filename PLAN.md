@@ -4070,8 +4070,9 @@ client), et la relâche à 2 s sans état est le mécanisme à examiner.
 
 - Ce n'est **pas** corrigé ici : il faut soit exclure le premier état après ré-adoption de la mesure de
   dérive, soit espacer la relâche (2 s) — deux choix à mesurer, et l'heure de session ne le permet pas.
-- W reste **strict et exécutable** (`--only=W`) ; il est **intermittent** (vert une fois, rouge une fois),
-  donc il ne sert pas de critère de clôture. M3 reste clos sur son critère §6 (deux clients, E).
+- W reste **strict et exécutable** (`--only=W`). Il était **intermittent** ; le §60 montre que la cause était
+  la mesure (dérive relevée pendant le glissement) et il est **vert à trois clients** depuis le
+  2026-10-20 (`écart max=1,02 / 1,04 / 1,28 m`). M3 reste clos sur son critère §6 (deux clients, E).
 
 ## 55. M4 avancé : la charge du véhicule voyage (v14, 2026-10-20)
 
@@ -4300,3 +4301,55 @@ donc pas de dérive entre la règle mesurée en jeu et celle qui est rejouée.
 - Le fixture vient d'**un** run, sur une machine : il prouve la règle, pas la diversité des réseaux.
 - Le format n'a pas de version : un champ ajouté plus tard devra soit changer le nombre de colonnes, soit
   être ignoré explicitement — c'est écrit ici pour que la rupture soit un choix.
+
+## 60. W n'est plus intermittent : la dérive était mesurée pendant le glissement (2026-10-20)
+
+Le §54.5 laissait W « strict et intermittent » : vert une fois, puis rouge avec `écart max=2.01 m` pour un
+seuil de `2 m`. La piste écrite était le cycle relâche → ré-adoption. La mesure de ce soir montre que
+c'était **la mesure elle-même** qui était fausse, et d'une façon vérifiable.
+
+### 60.1 Ce qui l'a montré
+
+Dans le run rouge, la ligne portait `écart max=2.01m … sur un intervalle de 0.10s` **et**
+`mouvement local ≤1.47m`. Un `Peeper` ne nage pas à 14 m/s : ce « mouvement local » ne pouvait pas être la
+créature. C'était le **glissement restant** de l'interpolation — la copie n'avait pas encore fini de
+rejoindre l'annonce précédente quand la suivante est arrivée, et l'écart mesuré comparait donc une position
+en cours de route à une cible neuve.
+
+Autrement dit : la dérive brute ne teste la synchronisation que si la copie était **à l'arrêt sur la
+position serveur précédente** au moment de l'annonce. Sinon elle mesure le retard d'interpolation, qui est
+le comportement voulu.
+
+### 60.2 Le correctif
+
+`RemoteCreatureManager` ne mesure la dérive que si le segment en cours était terminé (`gap + 20 ms ≥
+SegmentDuration`, `PreviousSegmentFinished`). Les paires écartées sont **comptées** (`StillGliding`) et
+publiées dans le verdict de la sonde : `paires écartées faute de glissement fini=`.
+
+Ce que le garde **ne peut pas** masquer : une annonce réellement manquée produit un intervalle supérieur à
+`ConsecutiveStateGapSeconds`, qui part dans la branche « interruption » — toujours mesurée, toujours
+publiée (`interruption max=1.4 à 2.0 s`, écarts `2,32 à 5,85 m` dans le run ci-dessous), et toujours hors
+du verdict par décision antérieure. Le garde ne touche que les paires où la copie glissait.
+
+### 60.3 La mesure (étape W, 3 clients, `tools/verify.sh --only=W`, 2026-10-20 18:45)
+
+`étape W : OK (132s)`, `VERDICT GLOBAL : tout est vert`, code de sortie 0.
+
+| Client | écart max | intervalle | mouvement local max | paires écartées (glissement) | verdict |
+|---|---|---|---|---|---|
+| 1 | **1,02 m** | 0,09 s | 0,24 m | 381 | True |
+| 2 | **1,04 m** | 0,09 s | 0,22 m | 521 | True |
+| 3 | **1,28 m** | 0,09 s | 0,80 m | 461 | True |
+
+Les trois clients suivent 18 à 20 créatures, `IA arrêtée` égale `adoptées`, `clé inconnue=0`,
+`clés partagées=0`, et le pas par image reste à 0,12–0,16 m.
+
+### 60.4 Ce que ça change pour M3 et pour la suite
+
+- **M3 reste clos**, et W cesse d'être une extension « intermittente » : il est vert à trois clients sur son
+  propre critère, avec une marge de 0,7 m sous le seuil.
+- La piste « relâche → ré-adoption » du §54.5 n'est **pas** confirmée comme cause : elle produisait bien des
+  sauts visibles (décrits), mais ils n'entraient pas dans cette mesure. Elle reste un défaut d'affichage à
+  traiter, pas la cause du rouge.
+- Ce qui n'est **pas** prouvé : que la dérive soit nulle. Le garde réduit l'échantillon d'environ 12 % des
+  paires (≈400 sur ≈3 200 appariés) ; la valeur publiée porte sur le reste, et c'est écrit dans le verdict.
