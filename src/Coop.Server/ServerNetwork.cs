@@ -698,6 +698,39 @@ namespace Coop.Server
                         $"[net] conduite : {owned.Count} volant(s) libéré(s) par la déconnexion de " +
                         $"'{session.Username}'#{session.PlayerId}.");
                 }
+
+                // Ses réclamations aussi. Mesuré le 2026-10-20 (reconnexion P2) : un objet réclamé par
+                // le client tué restait refusé aux autres **avec l'id du mort** —
+                // `REFUSÉE (déjà tenue par id 2)` — donc perdu pour tout le monde après une simple
+                // déconnexion. L'objet accordé est déjà retiré du monde serveur ; la réclamation ne
+                // protège plus rien une fois son détenteur parti.
+                List<long> released = null;
+                foreach (var pair in _pickupClaims)
+                {
+                    if (pair.Value != session.PlayerId)
+                    {
+                        continue;
+                    }
+
+                    if (released == null)
+                    {
+                        released = new List<long>();
+                    }
+
+                    released.Add(pair.Key);
+                }
+
+                if (released != null)
+                {
+                    foreach (var key in released)
+                    {
+                        _pickupClaims.Remove(key);
+                    }
+
+                    _log.LogInfo(
+                        $"[net] pickup : {released.Count} réclamation(s) libérée(s) par la déconnexion de " +
+                        $"'{session.Username}'#{session.PlayerId} — les clés redeviennent réclamables.");
+                }
             }
         }
 

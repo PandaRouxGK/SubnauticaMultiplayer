@@ -3754,3 +3754,64 @@ tri par nom de slot et par des slots explicites dans l'étape.
   session/mode/`changeSet`.
 - Elle dépend de la présence de `slot0000` : sur une installation sans cette fixture, l'étape échoue avec
   `sauvegarde de référence absente` plutôt que de mesurer autre chose.
+
+## 50. Reconnexion mesurée : ce qui tient, et la réclamation du mort (2026-10-20)
+
+### 50.1 Protocole de la mesure
+
+Deux clients avec la sonde de ramassage, hôte dédié ; le client 2 est **tué** (`taskkill`) pendant la
+session, puis **relancé** avec les mêmes arguments. Journaux copiés avant/après chaque étape.
+
+```
+tools/run-session.sh --clients=2 --together --keep \
+  --client-args="-coopmode=client -coopdebug=pickup" \
+  --client-2-args="-coopmode=client -coopdebug=pickup"
+# kill du PID du client 2, attente de la déconnexion, relance, attente de la sonde, arrêt
+```
+
+### 50.2 Ce qui tient
+
+| Attendu (P2) | Relevé |
+|---|---|
+| `PlayerLeft` diffusé au survivant | `[net] 'killi#2' déconnecté (raison=Timeout, pings=32, positions=534)` puis `PlayerLeft diffusé pour 'killi' (id=2)` |
+| nouvelle session admise sans fantôme | `handshake ACCEPTÉ : 'killi' (id=3)` ; chez le survivant `joueursDistants=1 avatarsActifs=1` (pas d'avatar id=2 résiduel) |
+| retraits rejoués à l'arrivant | `[net] disparition : 2 entité(s) disparue(s) rejouée(s) pour 'killi'#3` |
+| avatar du nouveau complet | `[presence] équipement appliqué sur l'avatar de 'killi' (id=3)`, `objet tenu appliqué … (rien en main)` |
+
+### 50.3 Ce qui ne tenait pas : la réclamation du joueur mort
+
+Première mesure (avant correctif), après relance :
+
+```
+[net] pickup : clé=0xbd613fd07fc6fef1 'AcidMushroom' réclamée par 'killi'#3
+      -> REFUSÉE (déjà tenue par id 2)
+```
+
+L'objet avait pourtant été **retiré du monde serveur** quand `#2` l'avait ramassé. La carte
+`_pickupClaims` gardait l'id du joueur parti : la clé restait refusée **au nom d'un joueur qui n'existe
+plus**, avec un motif faux (`déjà tenue`), et la carte grossissait d'une entrée par objet ramassé, pour
+toujours. Un simple `Alt+F4` suffisait donc à rendre une clé définitivement inexplicable.
+
+**Correctif** (`src/Coop.Server/ServerNetwork.cs`, `OnPeerDisconnected`) : les réclamations du joueur qui
+part sont libérées, avec le compte journalisé :
+
+```
+[net] pickup : 1 réclamation(s) libérée(s) par la déconnexion de 'killi'#2 — les clés redeviennent réclamables.
+```
+
+Deuxième mesure, même scénario : la ligne ci-dessus apparaît, **zéro** occurrence de `déjà tenue par id 2`,
+et la réclamation de `#3` sur la clé retirée reçoit désormais le motif exact :
+`REFUSÉE (objet inconnu du serveur (436 objet(s) indexé(s)) — la clé ne désigne rien dans le monde simulé)`.
+
+### 50.4 Ce que la mesure ne prouve pas
+
+- La sonde de ramassage n'est pas une sonde de reconnexion : après relance elle rend `verdict=False` parce
+  qu'elle **attend un accord** sur un objet que la session précédente avait déjà pris. Le serveur, lui, dit
+  la vérité (`objet inconnu`). Il faudra une sonde dédiée pour un verdict vert de reconnexion.
+- Aucun volant n'était tenu pendant ce run : la libération des conducteurs à la déconnexion reste couverte
+  par le code et l'étape M, pas par cette mesure.
+- Ce n'est pas la session de 30 minutes (P4) : ~2 min par phase, deux clients, une seule reconnexion.
+
+**État P2 après cette mesure : la reconnexion n'est plus « non mesurée » ; elle est mesurée, un défaut
+réel a été trouvé et corrigé.** Restent ouverts : une sonde de reconnexion avec verdict, un run avec
+véhicule, et la session longue.
