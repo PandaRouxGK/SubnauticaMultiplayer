@@ -25,4 +25,10 @@
     <ProjectReference Include="..\..\src\Coop.Model\Coop.Model.csproj" />
   </ItemGroup>
 
+  <!-- Enregistrement réel d'une session (étape J du 2026-10-20) : le rejeu hors jeu relit ce fichier
+       tel qu'il a été écrit par le client, pas une suite inventée pour faire passer le test. -->
+  <ItemGroup>
+    <None Update="fixtures\*.csv" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

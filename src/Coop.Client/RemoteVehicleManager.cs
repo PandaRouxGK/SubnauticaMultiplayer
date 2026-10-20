@@ -70,7 +70,7 @@ namespace Coop.Client
         /// mesuré : au-delà de cette borne, mieux vaut un rattrapage court qu'un glissement de plusieurs
         /// secondes qui laisserait le véhicule en retard sur le serveur.
         /// </summary>
-        private const float MaxSegmentSeconds = 0.50f;
+        private const float MaxSegmentSeconds = VehicleInterpolation.MaxSegmentSeconds;
 
         /// <summary>
         /// Vitesse (m/s) au-delà de laquelle un segment est **allongé** pour éviter un saut d'image.
@@ -85,10 +85,10 @@ namespace Coop.Client
         /// 40 m/s est le double de la vitesse d'un Seamoth ; une borne plus basse ajouterait du retard sur
         /// un mouvement normal, une borne plus haute laisserait repasser un saut visible.
         /// </summary>
-        private const float MaxCatchUpSpeedMetersPerSecond = 40f;
+        private const float MaxCatchUpSpeedMetersPerSecond = VehicleInterpolation.MaxCatchUpSpeedMetersPerSecond;
 
         /// <summary>Durée minimale (s) d'un segment : évite une division par zéro sur deux états rapprochés.</summary>
-        private const float MinSegmentSeconds = 0.04f;
+        private const float MinSegmentSeconds = VehicleInterpolation.MinSegmentSeconds;
 
         /// <summary>
         /// Intervalle (s) au-delà duquel deux états ne se suivent plus : le véhicule a quitté le flux puis
@@ -422,12 +422,17 @@ namespace Coop.Client
                         // fier ferait passer `alpha` à 1 en une image — le saut reviendrait, entier, au
                         // lieu d'être lissé.
                         var distance = Vector3.Distance(entry.Vehicle.transform.position, position);
-                        var catchUp = distance / MaxCatchUpSpeedMetersPerSecond;
+
+                        // Enregistrement du flux **réel** (P3) : c'est cette suite d'états qui est rejouée
+                        // hors du jeu par les tests, avec la même règle de durée.
+                        RecordState(message.ServerTick, state.Key, gap, position);
+
                         entry.From = entry.Vehicle.transform.position;
                         entry.FromRotation = entry.Vehicle.transform.rotation;
                         entry.SegmentStart = now;
-                        entry.SegmentDuration = Mathf.Clamp(
-                            Mathf.Max(gap, catchUp), MinSegmentSeconds, MaxSegmentSeconds);
+                        // La règle de durée vit dans `Coop.Model` (P3) : elle se rejoue hors du jeu, avec
+                        // les mêmes bornes que celles qui protègent l'interpolation mesurée à l'étape J.
+                        entry.SegmentDuration = VehicleInterpolation.SegmentDuration(gap, distance);
                     }
                     else
                     {
@@ -642,6 +647,68 @@ namespace Coop.Client
             if (VehicleModules.WriteNormalized(entry.Vehicle, energy))
             {
                 _energiesApplied++;
+            }
+        }
+
+        // — Enregistrement du flux (P3) ————————————————————————————————————————————
+
+        private static bool _recordChecked;
+        private static bool _recordEnabled;
+        private static string _recordPath;
+        private long _recordedStates;
+
+        /// <summary>États écrits dans l'enregistrement (P3) : 0 signifie que `COOP_RECORD` n'était pas posé.</summary>
+        public long RecordedStates => _recordedStates;
+
+        /// <summary>
+        /// Écrit un état reçu dans un fichier, si `COOP_RECORD=1`. Une ligne par état, en culture
+        /// invariante : tick, intervalle mesuré, position. C'est le format que `VehicleReplay` relit.
+        ///
+        /// L'écriture est **tolérante** : un disque plein ou un fichier verrouillé ne doit pas interrompre
+        /// la synchronisation d'un véhicule. L'échec est donc silencieux côté jeu, mais il arrête le
+        /// compteur — un fichier absent se lit dans le journal, pas dans une exception.
+        /// </summary>
+        private void RecordState(long serverTick, long key, float gap, Vector3 position)
+        {
+            if (!_recordChecked)
+            {
+                _recordChecked = true;
+                _recordEnabled = System.Environment.GetEnvironmentVariable("COOP_RECORD") == "1";
+                if (_recordEnabled)
+                {
+                    try
+                    {
+                        var suffix = System.Environment.GetEnvironmentVariable("COOP_LOG_SUFFIX") ?? string.Empty;
+                        var directory = System.IO.Path.Combine(BepInEx.Paths.BepInExRootPath, "logs");
+                        System.IO.Directory.CreateDirectory(directory);
+                        _recordPath = System.IO.Path.Combine(directory, "vehicles" + suffix + ".csv");
+                        System.IO.File.WriteAllText(
+                            _recordPath,
+                            "# clé=" + key.ToString("x16") + " — tick;intervalle;x;y;z\n");
+                    }
+                    catch (Exception exception)
+                    {
+                        _recordEnabled = false;
+                        _log.LogWarning($"[véhicule] enregistrement impossible : {exception.Message}");
+                    }
+                }
+            }
+
+            if (!_recordEnabled || _recordPath == null)
+            {
+                return;
+            }
+
+            try
+            {
+                System.IO.File.AppendAllText(
+                    _recordPath,
+                    VehicleReplay.Format(serverTick, gap, position.x, position.y, position.z) + "\n");
+                _recordedStates++;
+            }
+            catch (Exception)
+            {
+                _recordEnabled = false;
             }
         }
 

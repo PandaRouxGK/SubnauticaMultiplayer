@@ -63,6 +63,16 @@ dans la colonne de droite et n'invalident pas le critère.
 | Aucun message ni champ n'a été ajouté par le découpage | `dotnet test` **296/296**, une seule classe `partial` | `src/Coop.Server/ServerNetwork*.cs` | vérifié (2026-10-20) |
 
 
+### P3 : rejeu hors jeu de l'interpolation (2026-10-20)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| Une régression d'interpolation se détecte **hors du jeu, en ~1 s** | `dotnet test --filter VehicleReplayTests` : **6/6**, `Duration: 13 ms`, **1,1 s** de commande | `Coop.Model/VehicleReplay.cs`, `VehicleInterpolation.cs` | prouvé (2026-10-20) |
+| Le rejeu porte sur un flux **réel**, pas inventé | `fixtures/vehicles-j.csv` : 129 états, premiers `tick;intervalle` = `658;0.240693092` | client avec `COOP_RECORD=1`, run du 2026-10-20 18:23 | prouvé (2026-10-20) |
+| La mesure est **discriminante** | rejeu : pas max 0,33 m ; même flux sans interpolation : **2,13 m** (seuil J = 1,0 m) | `VehicleReplayTests.Sans_interpolation_le_meme_flux_echoue_au_seuil` | prouvé (2026-10-20) |
+| L'extraction n'a pas changé le comportement en jeu | `étape J : OK (152s)`, tout vert | `tools/verify.sh --only=J` après extraction | prouvé (2026-10-20) |
+
+
 ## 1. Fondations : le mod démarre, le réseau parle, les journaux sont séparés
 
 | Affirmation | Instrument | Source | Statut |

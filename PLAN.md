@@ -3258,7 +3258,8 @@ parallèle ; **P5** après, parce que découper un fichier qu'on va encore corri
 > le refus P0 sur deux sauvegardes différentes reste hors jeu. **P2 est clos le 2026-10-20** : rejeu des
 > retraits (§45), réclamations libérées et aucun fantôme (§52), volant tenu par un client tué libéré
 > (§57, étape X). **P5 est fait au sens de son critère observable le 2026-10-20 (§58)** : découpage en
-> cinq domaines, texte inchangé, `verify.sh` identique. P3 et P4 restent à faire.
+> cinq domaines, texte inchangé, `verify.sh` identique. **P3 est fait au sens de son critère le 2026-10-20
+> (§59)** : rejeu hors jeu d'un flux réel, régression détectée en ~1 s. P4 reste à faire.
 
 ### 43.6 Critères d'arrêt
 
@@ -4261,3 +4262,41 @@ Les trois sont tenus et mesurés. Ce qui n'est **pas** fait, et qui reste le vra
 
 Autrement dit : la carte est lisible, mais les murs porteurs ne sont pas posés. Le noter ainsi vaut mieux
 que d'annoncer « cinq systèmes » et laisser croire à une isolation qui n'existe pas.
+
+## 59. P3 : l'interpolation se rejoue hors du jeu, en une seconde (2026-10-20)
+
+Le critère du §43.5 était : « une régression d'interpolation est détectée **hors du jeu**, en secondes ».
+Jusqu'ici elle ne se voyait qu'à l'étape J : 152 secondes de jeu, un client, un hôte, un monde chargé.
+
+### 59.1 Ce qui a été extrait
+
+| Élément | Rôle |
+|---|---|
+| `Coop.Model/VehicleInterpolation.cs` | la **règle** : durée d'un segment (plancher 0,04 s, plafond 0,50 s, rattrapage à 40 m/s), avancement borné `0..1`, deux états consécutifs ou non. Sans Unity. |
+| `Coop.Model/VehicleReplay.cs` | le **format** d'enregistrement (`tick;intervalle;x;y;z`, culture invariante) et le **rejeu** image par image, avec cette même règle. |
+| `RemoteVehicleManager` | utilise la règle extraite (`SegmentDuration`) et **enregistre** le flux reçu quand `COOP_RECORD=1`. |
+| `tests/.../fixtures/vehicles-j.csv` | **129 états réels**, écrits par le client pendant un run du 2026-10-20 18:23 (60 s de Seamoth à 20 m/s, `COOP_RECORD=1`). |
+
+Les constantes de durée du gestionnaire pointent désormais sur celles du modèle
+(`private const float MinSegmentSeconds = VehicleInterpolation.MinSegmentSeconds;`) : une seule source,
+donc pas de dérive entre la règle mesurée en jeu et celle qui est rejouée.
+
+### 59.2 La mesure
+
+| Contrôle | Résultat |
+|---|---|
+| `dotnet test --filter VehicleReplayTests` | **6/6**, durée des tests **13 ms**, **1,1 s** de commande complète (contre 152 s pour l'étape J) |
+| rejeu du flux réel, à 120 images/s | pas max **0,33 m**, pas moyen 0,16 m, 1 604 images — sous les seuils de J (1,0 m / 0,6 m) |
+| même flux **sans interpolation** (l'état d'avant le §33) | pas max **2,13 m** — le test est donc **discriminant** : il échoue si la règle disparaît |
+| rafale de 21 m en 2 ms (le cas mesuré au §33) | pas max ≤ 1,0 m sur 50 images |
+| `--only=J` après extraction | **OK (152 s)**, `VERDICT GLOBAL : tout est vert` |
+
+### 59.3 Ce que P3 ne couvre pas, et qui reste dit
+
+- **Seuls les véhicules** sont rejouables. Les créatures, la présence et le ramassage ont la même forme de
+  problème, mais leur flux n'est pas enregistré : leurs assertions restent en jeu.
+- L'enregistrement est une **trace**, pas un enregistreur de session : il ne contient pas les ticks serveur
+  des autres entités, ni les décisions (accords, refus), donc il ne rejoue pas une partie.
+- Le fixture vient d'**un** run, sur une machine : il prouve la règle, pas la diversité des réseaux.
+- Le format n'a pas de version : un champ ajouté plus tard devra soit changer le nombre de colonnes, soit
+  être ignoré explicitement — c'est écrit ici pour que la rupture soit un choix.
