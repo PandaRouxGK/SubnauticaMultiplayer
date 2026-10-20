@@ -3257,7 +3257,8 @@ parallèle ; **P5** après, parce que découper un fichier qu'on va encore corri
 > **État au 2026-10-19** : P0 (nominal), P1 et P1bis sont **mesurés en jeu** (étapes P et N, §45.6) ;
 > le refus P0 sur deux sauvegardes différentes reste hors jeu. **P2 est clos le 2026-10-20** : rejeu des
 > retraits (§45), réclamations libérées et aucun fantôme (§52), volant tenu par un client tué libéré
-> (§57, étape X). P3, P4 et P5 restent à faire.
+> (§57, étape X). **P5 est fait au sens de son critère observable le 2026-10-20 (§58)** : découpage en
+> cinq domaines, texte inchangé, `verify.sh` identique. P3 et P4 restent à faire.
 
 ### 43.6 Critères d'arrêt
 
@@ -4210,3 +4211,53 @@ fantôme ne subsiste, et le volant qu'il tenait est libéré (étape X). Restent
 - **aucune resynchronisation de baseline** — il n'en existe pas ; la reconnexion repose sur les snapshots
   continus et le rejeu des carnets ;
 - ce n'est pas la session de 30 minutes (P4) : ~90 s par étape, une seule reconnexion.
+
+## 58. P5 : `ServerNetwork` découpé en cinq domaines, texte inchangé (2026-10-20)
+
+Trois mille six cent vingt et une lignes dans un seul fichier : personne ne peut y vérifier qu'un
+traitement de véhicule ne touche pas au ramassage. Le découpage a été fait de la façon la moins
+ambitieuse possible, parce que c'est la seule qui ne change pas de comportement.
+
+### 58.1 Ce qui a été fait
+
+| Fichier | Lignes | Contenu |
+|---|---|---|
+| `ServerNetwork.cs` | 1 194 | champs partagés, `ClientSession`, constructeur, `Poll`, admission, boucle |
+| `ServerNetwork.Presence.cs` | 687 | `PlayerJoined`/`Left`, équipement, objet tenu, couleurs, positions, corrections |
+| `ServerNetwork.Vehicles.cs` | 727 | diffusion 10 Hz, conduite autoritaire, modules (v15), énergie, identités |
+| `ServerNetwork.Pickup.cs` | 401 | réclamation, décision, retrait de l'objet, garde du registre |
+| `ServerNetwork.Creatures.cs` | 401 | diffusion des créatures, plafond, répartition des pas |
+| `ServerNetwork.Entities.cs` | 224 | apparition, retrait, carnets de rejeu, définitions |
+
+La classe est devenue `partial` : **les membres privés restent partagés**, donc aucun appel n'a été
+réécrit, aucune signature changée, aucun champ rendu public. C'est un découpage **par fichiers**, pas
+encore cinq *systèmes* au sens d'interfaces séparées — la limite est dite au §58.4.
+
+### 58.2 Comment le découpage a été rendu vérifiable
+
+Deux outils ont échoué avant celui qui a servi, et c'est instructif :
+
+1. un compteur d'accolades naïf — cassé par les `{` d'une interpolation ;
+2. un scanner de chaînes — cassé par `$"[{(cond ? "a" : "b")}]"` (ligne 3347), une interpolation qui
+   contient elle-même une chaîne.
+
+Le découpage retenu se fait **par lignes de déclaration** (8 espaces + modificateur ou attribut), ce qui
+suit le formatage réel du fichier. Trois contrôles ont ensuite été exécutés avant de le considérer fait :
+
+- **comparaison textuelle** : les lignes non vides du corps d'origine et celles des six fichiers sont
+  comparées comme des multiplicités — **3 098 lignes de part et d'autre, 0 manquante, 0 en trop** ;
+- `dotnet build` rc=0, `dotnet test` **296/296** ;
+- **étapes en jeu** : `B` (présence, 110 s) et `J` (véhicules, 152 s) — `VERDICT GLOBAL : tout est vert`.
+
+### 58.3 Ce que P5 couvre, et ce qu'il ne couvre pas
+
+Le critère du §43.5 était : « `verify.sh` identique, comportement inchangé, aucun nouveau message ».
+Les trois sont tenus et mesurés. Ce qui n'est **pas** fait, et qui reste le vrai travail de P5 :
+
+- il n'y a **pas cinq systèmes autonomes** : les fichiers partagent encore les champs de la classe et
+  peuvent s'appeler librement. Un domaine peut donc encore écrire dans l'état d'un autre ;
+- aucun test unitaire n'exerce `ServerNetwork` directement (il dépend d'Unity et de LiteNetLib) : la
+  non-régression repose sur le build, les tests du modèle et les étapes en jeu, pas sur une couture.
+
+Autrement dit : la carte est lisible, mais les murs porteurs ne sont pas posés. Le noter ainsi vaut mieux
+que d'annoncer « cinq systèmes » et laisser croire à une isolation qui n'existe pas.

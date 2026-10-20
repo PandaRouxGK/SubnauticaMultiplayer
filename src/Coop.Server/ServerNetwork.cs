@@ -18,8 +18,15 @@ namespace Coop.Server
     ///
     /// Les callbacks sont invoqués depuis <see cref="Poll"/>, donc sur le thread principal :
     /// aucun état partagé n'a besoin d'être verrouillé tant que Poll n'est appelé que là.
+    ///
+    /// **Découpage (P5)** : la classe est `partial`, et ses membres sont répartis par domaine dans
+    /// `ServerNetwork.Presence.cs` (admission, joueurs, équipement, positions), `.Creatures.cs`,
+    /// `.Vehicles.cs` (diffusion, conduite, modules, énergie), `.Pickup.cs` et `.Entities.cs`
+    /// (apparition, retrait, carnets de rejeu). Les **champs** restent ici : ils sont partagés par tous
+    /// les domaines, et les déplacer aurait changé l'ordre de déclaration sans rien séparer de plus.
+    /// Ce découpage ne change ni les messages, ni l'ordre des traitements, ni `tools/verify.sh`.
     /// </summary>
-    public sealed class ServerNetwork : IDisposable
+    public sealed partial class ServerNetwork
     {
         private sealed class ClientSession
         {
@@ -122,7 +129,6 @@ namespace Coop.Server
             public float ResyncWindowStart = -1f;
             public int ResyncsInWindow;
         }
-
         private readonly NetManager _net;
         private readonly EventBasedNetListener _listener;
         private readonly ManualLogSource _log;
@@ -130,7 +136,6 @@ namespace Coop.Server
         private readonly string _modListHash;
         private readonly Dictionary<NetPeer, ClientSession> _sessions = new Dictionary<NetPeer, ClientSession>();
         private readonly PacketWriter _writer = new PacketWriter();
-
         /// <summary>
         /// Compteur réutilisé des clés de créatures, pour relever les clés **partagées par deux
         /// créatures** côté serveur.
@@ -141,7 +146,6 @@ namespace Coop.Server
         /// et c'est la seule hypothèse sur laquelle repose tout le suivi.
         /// </summary>
         private readonly Dictionary<long, int> _creatureKeyTally = new Dictionary<long, int>();
-
         /// <summary>
         /// Dernière position **envoyée** pour chaque clé de créature, pour mesurer le déplacement du serveur
         /// entre deux diffusions.
@@ -153,13 +157,11 @@ namespace Coop.Server
         /// 1,6 m, l'écart du client ne dit rien contre la synchronisation.
         /// </summary>
         private readonly Dictionary<long, SentPosition> _lastSentPositions = new Dictionary<long, SentPosition>();
-
         private struct SentPosition
         {
             public UnityEngine.Vector3 Position;
             public float Realtime;
         }
-
         /// <summary>
         /// Distance (m) en deçà de laquelle une créature sacrifiée au plafond n'est plus un compromis
         /// acceptable : elle est **sous les yeux du joueur**. La mesure de référence (2026-10-17) : 19 à 20
@@ -167,12 +169,9 @@ namespace Coop.Server
         /// le bout du rayon, ce qui est le comportement voulu.
         /// </summary>
         private const float CloseSacrificeMeters = 30f;
-
         /// <summary>Période du rapport de taux de refus de position (P1), par session.</summary>
         private const float PositionReportSeconds = 5f;
-
         private int _closeSacrificeWarnings;
-
         /// <summary>
         /// Paquets de créatures par tick et par client, tel que le protocole le fixe — **surchargeable par
         /// `COOP_CREATURE_CHUNKS`**.
@@ -184,11 +183,9 @@ namespace Coop.Server
         /// test qu'on ne peut pas déclencher ne prouve rien.
         /// </summary>
         private static readonly int CreatureChunksPerTick = ParseChunksOverride();
-
         /// <summary>Vrai si le plafond de diffusion vient de la variable d'environnement et non du protocole.</summary>
         private static readonly bool CreatureChunksOverridden =
             CreatureChunksPerTick != Protocol.MaxCreatureChunksPerTick;
-
         private static int ParseChunksOverride()
         {
             var raw = Environment.GetEnvironmentVariable("COOP_CREATURE_CHUNKS");
@@ -199,10 +196,8 @@ namespace Coop.Server
 
             return Protocol.MaxCreatureChunksPerTick;
         }
-
         private ushort _nextPlayerId;
         private long _snapshotsBroadcast;
-
         /// <summary>
         /// Nombre de messages dont le <c>PlayerId</c> annoncé ne correspondait pas à la session qui les a
         /// envoyés — tous réécrits avec l'id de la session. Ce compteur existe pour que la règle
@@ -210,7 +205,6 @@ namespace Coop.Server
         /// seulement lue dans le code.
         /// </summary>
         public int ForgedPlayerIds { get; private set; }
-
         /// <summary>
         /// Objet du monde → joueur qui l'a réclamé le premier (M5). C'est la **décision** du serveur :
         /// une clé déjà présente ne peut plus être accordée à quelqu'un d'autre. Le registre vit aussi
@@ -219,80 +213,58 @@ namespace Coop.Server
         /// tenues au nom d'un joueur qui n'existe plus.
         /// </summary>
         private readonly PickupClaimLedger _pickupClaims = new PickupClaimLedger();
-
         /// <summary>Clés d'objets **déjà retirées** du monde simulé après un ramassage accordé (v11).</summary>
         private readonly HashSet<long> _pickupRemoved = new HashSet<long>();
-
         public int PickupClaimsGranted { get; private set; }
-
         public int PickupClaimsRefused { get; private set; }
-
         /// <summary>Réclamations dont le <c>PlayerId</c> annoncé n'était pas celui de la session.</summary>
         public int ForgedPickupIds { get; private set; }
-
         /// <summary>Réclamations refusées parce que la clé ne correspond à aucun objet du monde serveur.</summary>
         public int PickupRefusedUnknown { get; private set; }
-
         /// <summary>Réclamations refusées parce que le joueur est trop loin de l'objet.</summary>
         public int PickupRefusedRange { get; private set; }
-
         /// <summary>Réclamations refusées faute de position connue pour le joueur.</summary>
         public int PickupRefusedNoPosition { get; private set; }
 
         // — Conduite autoritaire (v9, M4) ——————————————————————————————————————
-
         /// <summary>Véhicule → joueur qui le conduit. Le premier qui prend la main la garde jusqu'à libération.</summary>
         private readonly Dictionary<long, ushort> _vehicleDrivers = new Dictionary<long, ushort>();
-
         /// <summary>Dernier état reçu par véhicule conduit : sert à libérer un volant devenu silencieux (v12).</summary>
         private readonly Dictionary<long, float> _vehicleDriverLastState = new Dictionary<long, float>();
-
         /// <summary>Volants libérés par leur conducteur / par silence — comptés, pour le dire au journal.</summary>
         public int VehicleReleases { get; private set; }
-
         public int VehicleSilenceReleases { get; private set; }
-
         /// <summary>Index clé → véhicule du monde serveur, reconstruit au plus une fois par seconde.</summary>
         private Dictionary<long, Vehicle> _vehicleIndex;
-
         private float _vehicleIndexBuiltAt = -1f;
         private int _vehicleIndexCount;
-
         /// <summary>Refus déjà journalisés (une fois par clé) : à 10 Hz, un refus répété noierait le journal.</summary>
         private readonly HashSet<long> _controlRefusalsLogged = new HashSet<long>();
-
         private readonly Dictionary<long, float> _lastControlReplyAt = new Dictionary<long, float>();
-
         public int VehicleControlApplied { get; private set; }
         public int VehicleControlRefusedUnknown { get; private set; }
         public int VehicleControlRefusedRange { get; private set; }
         public int VehicleControlRefusedTaken { get; private set; }
-
         /// <summary>Conduites dont le <c>PlayerId</c> annoncé n'était pas celui de la session.</summary>
         public int ForgedVehicleIds { get; private set; }
-
         /// <summary>
         /// Index clé → position des objets ramassables du monde, reconstruit **au plus une fois par
         /// seconde** : un ramassage est rare, mais un index refait à chaque réclamation coûterait un
         /// parcours complet du monde par clic.
         /// </summary>
         private Dictionary<long, UnityEngine.Vector3> _itemIndex;
-
         private float _itemIndexBuiltAt = -1f;
         private int _itemIndexObjects;
         private int _itemIndexSharedKeys;
-
         private string[] _lastHostEquipment;
         private string _lastHostEquipmentSignature;
         private string _lastHostHeldItemSignature;
-
         /// <summary>
         /// Indice de couleur distribué au prochain client. Avance à chaque admission, donc deux
         /// joueurs connectés ne peuvent pas recevoir le même tant qu'ils sont au plus
         /// <see cref="Protocol.PlayerColorCount"/>. Au-delà, la palette tourne — c'est dit au §27.
         /// </summary>
         private byte _nextClientColorIndex;
-
         /// <summary>
         /// Couleur du personnage de l'instance serveur. Fixe : c'est le repère visuel stable quand
         /// un client rejoint, et il faut de toute façon lui réserver un indice pour ne pas le
@@ -301,7 +273,6 @@ namespace Coop.Server
         private const byte HostColorIndex = 0;
 
         // — Créatures (M3) ————————————————————————————————————————————————————
-
         /// <summary>
         /// Cache des créatures du monde. `FindObjectsOfType` parcourt toute la scène : à 10 Hz ce
         /// serait absurde, alors qu'une créature apparaît ou disparaît rarement. Le cache est
@@ -311,10 +282,8 @@ namespace Coop.Server
         private Creature[] _creatureCache;
         private float _creatureCacheRealtime = float.NegativeInfinity;
         private const float CreatureCacheSeconds = 2f;
-
         private long _creatureSnapshotsBroadcast;
         private long _creatureStatesBroadcast;
-
         /// <summary>
         /// Paquets de créatures refusés parce qu'ils dépassaient la taille acceptée par LiteNetLib.
         ///
@@ -324,7 +293,6 @@ namespace Coop.Server
         /// </summary>
         private long _oversizedCreaturePackets;
         private string _lastCreatureIdentityReport;
-
         /// <summary>Prochain instant (s) où un résumé des créatures doit être journalisé.</summary>
         /// <summary>
         /// Intervalle (s) du rapport de créatures, **par client** : c'est la fenêtre sur laquelle le débit
@@ -332,13 +300,11 @@ namespace Coop.Server
         /// rester la durée réellement écoulée — d'où une constante et non un littéral recopié.
         /// </summary>
         private const float CreatureReportSeconds = 5f;
-
         /// <summary>
         /// Prochain instant (s) du relevé de distance. Séparé du résumé d'envoi : sinon le premier
         /// à écrire consommerait le créneau de l'autre, et l'un des deux disparaîtrait du journal.
         /// </summary>
         private float _nextCreatureDiagnostic;
-
         /// <summary>
         /// Intervalle (s) du relevé des véhicules, et prochain instant.
         ///
@@ -348,11 +314,9 @@ namespace Coop.Server
         /// d'un monde à l'autre entre deux relevés.
         /// </summary>
         private const float VehicleReportSeconds = 30f;
-
         private float _nextVehicleDiagnostic;
 
         // — Véhicules (M4) ————————————————————————————————————————————————————————
-
         /// <summary>
         /// Cache des véhicules du monde, rafraîchi toutes les <see cref="VehicleCacheSeconds"/>.
         /// `FindObjectsOfType<Vehicle>` parcourt la scène : à 10 Hz ce serait absurde, et un véhicule
@@ -363,10 +327,8 @@ namespace Coop.Server
         private const float VehicleCacheSeconds = 2f;
 
         // — Création d'entité (v10, M6) ————————————————————————————————————————
-
         /// <summary>Clés de véhicules déjà annoncées (ou déjà présentes au premier balayage).</summary>
         private readonly HashSet<long> _knownVehicles = new HashSet<long>();
-
         /// <summary>Faux tant que le premier balayage n'a pas eu lieu : il **enregistre** sans annoncer.</summary>
         private bool _vehicleBaselineDone;
 
@@ -377,10 +339,8 @@ namespace Coop.Server
         // l'état installé à un client qui se connecte après l'installation.
         private readonly Dictionary<long, VehicleUpgradesMessage> _vehicleUpgrades =
             new Dictionary<long, VehicleUpgradesMessage>();
-
         private int _vehicleUpgradesBroadcast;
         private int _vehicleUpgradesReplayed;
-
         /// <summary>
         /// Entités **fabriquées depuis le dernier démarrage**, par clé. Sert à rejouer l'annonce auprès d'un
         /// client qui se connecte après coup : sans ça, une entité créée pendant que personne n'était là (ou
@@ -396,52 +356,35 @@ namespace Coop.Server
         // que la v11 avait corrigé pour les clients **déjà connectés** seulement.
         private readonly Dictionary<long, EntityDespawnMessage> _despawnedEntities =
             new Dictionary<long, EntityDespawnMessage>();
-
         private readonly Queue<long> _despawnOrder = new Queue<long>();
-
         private const int MaxRememberedDespawns = 256;
         private int _entityDespawnsReplayed;
-
         /// <summary>Ordre d'ajout dans le carnet, pour que l'éviction retire bien la **plus ancienne**.</summary>
         private readonly Queue<long> _spawnOrder = new Queue<long>();
-
         /// <summary>Borne du carnet d'entités fabriquées : une partie longue ne doit pas le faire grossir sans fin.</summary>
         private const int MaxRememberedSpawns = 256;
-
         private int _entitySpawnsSent;
         private int _entitySpawnsReplayed;
         private int _entityDespawnsSent;
-
         public int EntitySpawnsSent => _entitySpawnsSent;
-
         public int EntityDespawnsSent => _entityDespawnsSent;
-
         /// <summary>Annonces de modules émises (v15) : un module installé ou retiré, pas un état périodique.</summary>
         public int VehicleUpgradesBroadcast => _vehicleUpgradesBroadcast;
-
         /// <summary>Retraits rejoués à des clients arrivés après coup (P2).</summary>
         public int EntityDespawnsReplayed => _entityDespawnsReplayed;
-
         /// <summary>Intervalle (s) du rapport de flux de véhicules, par client.</summary>
         private const float VehicleStreamReportSeconds = 5f;
-
         private long _vehicleSnapshotsBroadcast;
         private long _vehicleStatesBroadcast;
-
         /// <summary>Véhicules écartés faute de clé : une identité inventée vaudrait moins qu'un véhicule non diffusé.</summary>
         private long _vehiclesWithoutKey;
-
         /// <summary>Paquets de véhicules refusés pour dépassement de la limite non fiable (invisibles autrement).</summary>
         private long _oversizedVehiclePackets;
-
         private string _lastVehicleIdentityReport;
-
         private readonly List<VehicleStateEntry> _vehicleBuffer = new List<VehicleStateEntry>();
         private readonly List<KeyValuePair<float, int>> _vehicleCandidates = new List<KeyValuePair<float, int>>();
-
         private readonly List<CreatureStateEntry> _creatureBuffer = new List<CreatureStateEntry>();
         private readonly List<KeyValuePair<float, int>> _creatureCandidates = new List<KeyValuePair<float, int>>();
-
         public ServerNetwork(string gameVersion, string modListHash, ManualLogSource log)
         {
             _log = log;
@@ -464,9 +407,7 @@ namespace Coop.Server
             _listener.NetworkReceiveEvent += OnNetworkReceive;
             _listener.NetworkErrorEvent += OnNetworkError;
         }
-
         public int Port { get; private set; }
-
         public int AcceptedClients
         {
             get
@@ -483,7 +424,6 @@ namespace Coop.Server
                 return count;
             }
         }
-
         public bool Start(int port)
         {
             if (!_net.Start(port))
@@ -498,7 +438,6 @@ namespace Coop.Server
             _log.LogInfo($"[net] serveur à l'écoute sur UDP {port} (port lié={_net.LocalPort}, actif={_net.IsRunning}) — protocole v{Protocol.Version}, modHash={_modListHash}");
             return true;
         }
-
         /// <summary>À appeler à chaque frame : c'est ici que LiteNetLib traite les paquets reçus.</summary>
         public void Poll()
         {
@@ -506,7 +445,6 @@ namespace Coop.Server
             ExpireStalledHandshakes();
             ValidatePendingSaveIdentities();
         }
-
         /// <summary>
         /// Vérifie les empreintes des sessions admises **avant** que le serveur n'ait résolu sa propre
         /// partie (P0).
@@ -517,102 +455,11 @@ namespace Coop.Server
         /// Le client est donc admis sous réserve, et la vérification tombe dès que l'empreinte serveur
         /// existe — avant qu'il n'ait pu jouer (le monde n'est pas encore chargé de son côté).
         /// </summary>
-        private void ValidatePendingSaveIdentities()
-        {
-            var server = SaveIdentitySource.Current;
-            if (server == null || server.IsUnknown || _sessions.Count == 0)
-            {
-                return;
-            }
-
-            List<KeyValuePair<NetPeer, string>> refused = null;
-
-            foreach (var pair in _sessions)
-            {
-                var session = pair.Value;
-                if (!session.Accepted || !session.SavePending)
-                {
-                    continue;
-                }
-
-                var reason = SaveCompatibility.Explain(server, session.Save);
-                if (reason == null)
-                {
-                    session.SavePending = false;
-                    _log.LogInfo(
-                        $"[net] empreinte de sauvegarde acceptée (vérifiée après coup) : " +
-                        $"client={session.Save?.Describe()} · serveur={server.Describe()}");
-                    continue;
-                }
-
-                refused = refused ?? new List<KeyValuePair<NetPeer, string>>();
-                refused.Add(new KeyValuePair<NetPeer, string>(pair.Key, reason));
-            }
-
-            if (refused == null)
-            {
-                return;
-            }
-
-            foreach (var item in refused)
-            {
-                if (!_sessions.TryGetValue(item.Key, out var session))
-                {
-                    continue;
-                }
-
-                _log.LogWarning(
-                    $"[net] handshake REFUSÉ (empreinte) : '{session.Username}'#{session.PlayerId} : {item.Value}");
-
-                // Même leçon qu'au §12 : envoyer le motif en fiable, **puis laisser le client fermer**.
-                // Couper juste après l'envoi ferait perdre le message, et le client ne verrait qu'une
-                // coupure sans explication. `ExpireStalledHandshakes` ferme le peer 2 s plus tard.
-                Send(item.Key, w => new DisconnectMessage { Reason = item.Value }.Write(w), DeliveryMethod.ReliableOrdered);
-
-                session.Accepted = false;
-                session.SaveMismatch = true;
-                session.HandshakeDeadline = ServerClock.Milliseconds + 2000L;
-            }
-        }
-
         /// <summary>
         /// Éjecte les peers qui n'ont jamais terminé leur handshake. Indispensable : puisque le
         /// serveur ne coupe plus la connexion juste après un refus (sinon le motif envoyé en
         /// fiable serait perdu), il faut une borne pour qu'une connexion muette ne reste pas ouverte.
         /// </summary>
-        private void ExpireStalledHandshakes()
-        {
-            if (_sessions.Count == 0)
-            {
-                return;
-            }
-
-            var now = ServerClock.Milliseconds;
-            List<NetPeer> stalled = null;
-
-            foreach (var pair in _sessions)
-            {
-                if (pair.Value.Accepted || now < pair.Value.HandshakeDeadline)
-                {
-                    continue;
-                }
-
-                stalled = stalled ?? new List<NetPeer>();
-                stalled.Add(pair.Key);
-            }
-
-            if (stalled == null)
-            {
-                return;
-            }
-
-            foreach (var peer in stalled)
-            {
-                _log.LogWarning($"[net] handshake non terminé après {Protocol.HandshakeTimeoutSeconds}s : {peer} éjecté");
-                peer.Disconnect();
-            }
-        }
-
         public void Dispose()
         {
             try
@@ -629,7 +476,6 @@ namespace Coop.Server
         }
 
         // ---- Callbacks de connexion -------------------------------------------------------
-
         private void OnConnectionRequest(ConnectionRequest request)
         {
             // La clé filtre les paquets parasites avant même d'allouer une session.
@@ -642,7 +488,6 @@ namespace Coop.Server
 
             _log.LogInfo($"[net] demande de connexion acceptée depuis {request.RemoteEndPoint}");
         }
-
         private void OnPeerConnected(NetPeer peer)
         {
             _sessions[peer] = new ClientSession
@@ -652,88 +497,8 @@ namespace Coop.Server
 
             _log.LogInfo($"[net] peer id={peer.Id} connecté ({peer}) — attente du handshake");
         }
-
-        private void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
-        {
-            var known = _sessions.TryGetValue(peer, out var session);
-            _sessions.Remove(peer);
-
-            var who = known && session.Username != null ? $"{session.Username}#{session.PlayerId}" : peer.ToString();
-            _log.LogInfo(
-                $"[net] '{who}' déconnecté (raison={info.Reason}, pings={session?.PingsReceived ?? 0}, " +
-                $"positions={session?.PositionsReceived ?? 0}, objetsTenus={session?.HeldItemsReceived ?? 0})");
-
-            if (known && session.Accepted)
-            {
-                var leftMsg = new PlayerLeftMessage
-                {
-                    PlayerId = session.PlayerId,
-                    Username = session.Username,
-                    Reason = info.Reason.ToString(),
-                };
-
-                foreach (var pair in _sessions)
-                {
-                    if (!pair.Value.Accepted)
-                    {
-                        continue;
-                    }
-
-                    Send(pair.Key, leftMsg.Write, DeliveryMethod.ReliableOrdered);
-                }
-
-                _log.LogInfo($"[net] PlayerLeft diffusé pour '{session.Username}' (id={session.PlayerId})");
-
-                // Ses volants aussi : un client parti ne les rendra jamais lui-même (v12).
-                List<long> owned = null;
-                foreach (var pair in _vehicleDrivers)
-                {
-                    if (pair.Value != session.PlayerId)
-                    {
-                        continue;
-                    }
-
-                    if (owned == null)
-                    {
-                        owned = new List<long>();
-                    }
-
-                    owned.Add(pair.Key);
-                }
-
-                if (owned != null)
-                {
-                    foreach (var key in owned)
-                    {
-                        _vehicleDrivers.Remove(key);
-                        _vehicleDriverLastState.Remove(key);
-                        VehicleReleases++;
-                    }
-
-                    _log.LogInfo(
-                        $"[net] conduite : {owned.Count} volant(s) libéré(s) par la déconnexion de " +
-                        $"'{session.Username}'#{session.PlayerId}.");
-                }
-
-                // Ses réclamations aussi. Mesuré le 2026-10-20 (reconnexion P2) : un objet réclamé par
-                // le client tué restait refusé aux autres **avec l'id du mort** —
-                // `REFUSÉE (déjà tenue par id 2)` — donc perdu pour tout le monde après une simple
-                // déconnexion. L'objet accordé est déjà retiré du monde serveur ; la réclamation ne
-                // protège plus rien une fois son détenteur parti.
-                var releasedClaims = _pickupClaims.Release(session.PlayerId);
-
-                if (releasedClaims > 0)
-                {
-                    _log.LogInfo(
-                        $"[net] pickup : {releasedClaims} réclamation(s) libérée(s) par la déconnexion de " +
-                        $"'{session.Username}'#{session.PlayerId} — les clés redeviennent réclamables.");
-                }
-            }
-        }
-
         private void OnNetworkError(System.Net.IPEndPoint endPoint, System.Net.Sockets.SocketError error)
             => _log.LogWarning($"[net] erreur socket depuis {endPoint} : {error}");
-
         private void OnNetworkReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod method)
         {
             try
@@ -760,7 +525,6 @@ namespace Coop.Server
         }
 
         // ---- Logique de protocole ---------------------------------------------------------
-
         private void Handle(NetPeer peer, PacketReader reader)
         {
             if (!_sessions.TryGetValue(peer, out var session))
@@ -810,238 +574,6 @@ namespace Coop.Server
                     break;
             }
         }
-
-        private void HandleHandshake(NetPeer peer, ClientSession session, HandshakeRequest request)
-        {
-            if (session.Accepted)
-            {
-                _log.LogWarning($"[net] handshake en double ignoré de {peer}");
-                return;
-            }
-
-            var reason = Validate(request);
-            if (reason != null)
-            {
-                _log.LogWarning($"[net] handshake REFUSÉ pour '{request.Username}' : {reason}");
-                // On envoie le motif en fiable et on LAISSE le client fermer. Couper juste après
-                // l'envoi faisait perdre le motif (la coupure dépassait le message) : le client
-                // ne voyait plus qu'un « RemoteConnectionClose » sans explication.
-                Send(peer, w => new HandshakeResponse
-                {
-                    Accepted = false,
-                    Reason = reason,
-                    ServerTick = ServerTickBehaviour.Ticks,
-                    AssignedPlayerId = 0,
-                }.Write(w), DeliveryMethod.ReliableOrdered);
-                session.HandshakeDeadline = ServerClock.Milliseconds + Protocol.HandshakeTimeoutSeconds * 1000L;
-                return;
-            }
-
-            _nextPlayerId++;
-            if (_nextPlayerId == 0)
-            {
-                _nextPlayerId = 1;
-            }
-
-            session.PlayerId = _nextPlayerId;
-            // Le pseudo d'un pair n'est pas une identité : il est affiché, journalisé et recopié dans
-            // le nom du clone d'avatar. On le normalise ici pour qu'un client tiers ne puisse pas
-            // injecter un saut de ligne dans une ligne de journal ni un caractère de contrôle dans un
-            // nom d'objet. Le refus « pseudo trop long » de `Validate` reste pour l'annonce faite.
-            session.Username = Usernames.Sanitize(request.Username);
-            session.Accepted = true;
-            session.RotW = 1f;
-
-            // Empreinte admise (P0). Si le serveur n'a pas encore résolu la sienne, la vérification
-            // est différée au tick suivant plutôt que de refuser un client correct sur une course de
-            // démarrage — mais elle aura lieu **avant** que le client n'ait chargé son monde.
-            session.Save = request.Save;
-            session.SavePending = SaveIdentitySource.Current == null || SaveIdentitySource.Current.IsUnknown;
-
-            if (session.SavePending)
-            {
-                _log.LogInfo(
-                    $"[net] empreinte de sauvegarde en attente (serveur pas encore résolu) : " +
-                    $"client={request.Save?.Describe()} — vérifiée au prochain tick.");
-            }
-            else
-            {
-                _log.LogInfo(
-                    $"[net] empreinte de sauvegarde acceptée : client={request.Save.Describe()} · " +
-                    $"serveur={SaveIdentitySource.Current.Describe()}");
-            }
-
-            // La couleur est décidée **ici**, une fois, et annoncée ensuite à tout le monde. L'hôte
-            // occupe l'indice 0 quand son personnage est dans le monde : on cherche donc sa
-            // présence avant de distribuer quoi que ce soit, et on réutilise la même référence plus
-            // bas plutôt que de refaire la recherche.
-            // **Sauf en serveur dédié** : l'admission est l'autre chemin qui fabriquait un avatar id=9999 —
-            // celui que le client reçoit juste après son handshake, avant tout snapshot. Le mesurer a montré
-            // que bloquer seulement la diffusion périodique laissait un « HoteServeur » apparaître 10 s plus
-            // tard : il venait d'ici.
-            var hostPlayer = CoopServerPlugin.Dedicated ? null : UnityEngine.Object.FindObjectOfType<Player>();
-            var hostInWorld = hostPlayer != null && hostPlayer.gameObject != null;
-            session.ColorIndex = AllocateColorIndex(hostInWorld);
-
-            Protocol.PlayerColorAt(session.ColorIndex, out var assignedR, out var assignedG, out var assignedB);
-
-            _log.LogInfo(
-                $"[net] handshake ACCEPTÉ : '{request.Username}' (id={session.PlayerId}, jeu={request.GameVersion}, modHash={request.ModListHash}) " +
-                $"depuis {peer} — {AcceptedClients}/{Protocol.MaxClients} client(s)");
-
-            Send(peer, w => new HandshakeResponse
-            {
-                Accepted = true,
-                Reason = string.Empty,
-                ServerTick = ServerTickBehaviour.Ticks,
-                AssignedPlayerId = session.PlayerId,
-            }.Write(w), DeliveryMethod.ReliableOrdered);
-
-            _log.LogInfo(
-                $"[net] couleur assignée à '{session.Username}'#{session.PlayerId} : indice {session.ColorIndex} " +
-                $"= rgb({assignedR},{assignedG},{assignedB})");
-
-            // Sa propre couleur d'abord : un client qui ignore la sienne ne peut ni l'afficher, ni la
-            // signaler en cas de doute.
-            Send(peer, w => new PlayerColorMessage
-            {
-                PlayerId = session.PlayerId,
-                ColorIndex = session.ColorIndex,
-            }.Write(w), DeliveryMethod.ReliableOrdered);
-
-            // 1. Informer le nouvel arrivant de tous les joueurs déjà présents (ainsi que l'hôte id=9999 s'il est dans le monde).
-            if (hostInWorld)
-            {
-                var htr = hostPlayer.transform;
-                var hpos = htr.position;
-                // Même source que le client : le lacet du regard, pas la racine du joueur (sinon
-                // l'avatar de l'hôte ne tourne jamais, et le receveur lui prêtait son propre lacet).
-                var hrot = ViewDirection.Yaw(htr);
-                Send(peer, w => new PlayerJoinedMessage
-                {
-                    PlayerId = 9999,
-                    Username = "HoteServeur",
-                    X = hpos.x,
-                    Y = hpos.y,
-                    Z = hpos.z,
-                    RotX = hrot.x,
-                    RotY = hrot.y,
-                    RotZ = hrot.z,
-                    RotW = hrot.w,
-                }.Write(w), DeliveryMethod.ReliableOrdered);
-
-                var hostEquip = ReadHostEquipment();
-                if (hostEquip != null)
-                {
-                    Send(peer, w => new PlayerEquipmentMessage
-                    {
-                        PlayerId = 9999,
-                        TechTypeNames = hostEquip,
-                    }.Write(w), DeliveryMethod.ReliableOrdered);
-                }
-
-                var hostHeldItem = ReadHostHeldItemName();
-                var hostHeldItemParams = ReadHostHoldingParams();
-                if (hostHeldItem != null && hostHeldItemParams != null)
-                {
-                    Send(peer, w => new PlayerHeldItemMessage
-                    {
-                        PlayerId = 9999,
-                        TechTypeName = hostHeldItem,
-                        HoldingParams = hostHeldItemParams,
-                    }.Write(w), DeliveryMethod.ReliableOrdered);
-                }
-
-                // La couleur de l'hôte : c'est elle qui rend le personnage de l'instance serveur
-                // reconnaissable parmi les joueurs, au même titre que sa tenue.
-                Send(peer, w => new PlayerColorMessage
-                {
-                    PlayerId = 9999,
-                    ColorIndex = HostColorIndex,
-                }.Write(w), DeliveryMethod.ReliableOrdered);
-            }
-
-            foreach (var pair in _sessions)
-            {
-                if (!pair.Value.Accepted || pair.Key == peer)
-                {
-                    continue;
-                }
-
-                var other = pair.Value;
-                Send(peer, w => new PlayerJoinedMessage
-                {
-                    PlayerId = other.PlayerId,
-                    Username = other.Username,
-                    X = other.X,
-                    Y = other.Y,
-                    Z = other.Z,
-                    RotX = other.RotX,
-                    RotY = other.RotY,
-                    RotZ = other.RotZ,
-                    RotW = other.RotW,
-                }.Write(w), DeliveryMethod.ReliableOrdered);
-
-                if (other.Equipment != null)
-                {
-                    Send(peer, w => new PlayerEquipmentMessage
-                    {
-                        PlayerId = other.PlayerId,
-                        TechTypeNames = other.Equipment,
-                    }.Write(w), DeliveryMethod.ReliableOrdered);
-                }
-
-                if (other.HeldItemName != null)
-                {
-                    Send(peer, w => new PlayerHeldItemMessage
-                    {
-                        PlayerId = other.PlayerId,
-                        TechTypeName = other.HeldItemName,
-                        HoldingParams = other.HoldingParams ?? Array.Empty<string>(),
-                    }.Write(w), DeliveryMethod.ReliableOrdered);
-                }
-
-                Send(peer, w => new PlayerColorMessage
-                {
-                    PlayerId = other.PlayerId,
-                    ColorIndex = other.ColorIndex,
-                }.Write(w), DeliveryMethod.ReliableOrdered);
-            }
-
-            // 2. Informer tous les joueurs déjà présents de l'arrivée de ce joueur.
-            var joinedMsg = new PlayerJoinedMessage
-            {
-                PlayerId = session.PlayerId,
-                Username = session.Username,
-                X = session.X,
-                Y = session.Y,
-                Z = session.Z,
-                RotX = session.RotX,
-                RotY = session.RotY,
-                RotZ = session.RotZ,
-                RotW = session.RotW,
-            };
-
-            foreach (var pair in _sessions)
-            {
-                if (!pair.Value.Accepted || pair.Key == peer)
-                {
-                    continue;
-                }
-
-                Send(pair.Key, joinedMsg.Write, DeliveryMethod.ReliableOrdered);
-                Send(pair.Key, w => new PlayerColorMessage
-                {
-                    PlayerId = session.PlayerId,
-                    ColorIndex = session.ColorIndex,
-                }.Write(w), DeliveryMethod.ReliableOrdered);
-            }
-
-            // 3. Ce qui a été fabriqué avant son arrivée. Après les joueurs : un client qui reçoit l'annonce
-            //    d'une entité doit déjà connaître l'état du monde auquel elle se rattache.
-            SendSpawnedEntities(peer, session);
-        }
-
         /// <summary>
         /// Indice de couleur du prochain client admis.
         ///
@@ -1050,15 +582,6 @@ namespace Coop.Server
         /// reçoivent pas la même couleur, sans arbitrage à la connexion et sans que le client ait
         /// quelque chose à décider.
         /// </summary>
-        private byte AllocateColorIndex(bool hostInWorld)
-        {
-            // Sans hôte dans le monde, l'indice 0 est libre : les clients le prennent à leur tour.
-            var start = hostInWorld ? HostColorIndex + 1 : 0;
-            var index = (byte)((_nextClientColorIndex + start) % Protocol.PlayerColorCount);
-            _nextClientColorIndex = (byte)((_nextClientColorIndex + 1) % Protocol.PlayerColorCount);
-            return index;
-        }
-
         /// <summary>Retourne la raison du refus, ou <c>null</c> si la connexion est valide.</summary>
         private string Validate(HandshakeRequest request)
         {
@@ -1113,188 +636,9 @@ namespace Coop.Server
 
             return null;
         }
-
-        private void HandlePing(NetPeer peer, ClientSession session, PingMessage ping)
-        {
-            if (!session.Accepted)
-            {
-                _log.LogWarning($"[net] ping avant handshake ignoré de {peer}");
-                return;
-            }
-
-            session.PingsReceived++;
-
-            Send(peer, w => new PongMessage
-            {
-                Sequence = ping.Sequence,
-                ClientTimeMs = ping.ClientTimeMs,
-                ServerTick = ServerTickBehaviour.Ticks,
-                ServerTimeMs = ServerClock.Milliseconds,
-            }.Write(w), DeliveryMethod.Unreliable);
-        }
-
-        private void HandlePlayerPosition(NetPeer peer, ClientSession session, PlayerPositionMessage pos)
-        {
-            if (!session.Accepted)
-            {
-                _log.LogWarning($"[net] position avant handshake ignorée de {peer}");
-                return;
-            }
-
-            // Rejeter les paquets UDP arrivés dans le désordre.
-            if (session.PositionsReceived > 0 && pos.Sequence <= session.LastPositionSequence)
-            {
-                return;
-            }
-
-            // Garde-fou contre les flottants dégénérés (NaN / Inf).
-            if (float.IsNaN(pos.X) || float.IsInfinity(pos.X) ||
-                float.IsNaN(pos.Y) || float.IsInfinity(pos.Y) ||
-                float.IsNaN(pos.Z) || float.IsInfinity(pos.Z) ||
-                float.IsNaN(pos.RotX) || float.IsInfinity(pos.RotX) ||
-                float.IsNaN(pos.RotY) || float.IsInfinity(pos.RotY) ||
-                float.IsNaN(pos.RotZ) || float.IsInfinity(pos.RotZ) ||
-                float.IsNaN(pos.RotW) || float.IsInfinity(pos.RotW))
-            {
-                _log.LogWarning($"[net] position NaN/Infinity ignorée de '{session.Username}'#{session.PlayerId}");
-                return;
-            }
-
-            // La séquence et le compteur avancent **même si la position est refusée** : un message
-            // rejeté ne doit pas être rejoué, et le taux de refus se calcule sur les messages reçus.
-            session.LastPositionSequence = pos.Sequence;
-            session.PositionsReceived++;
-
-            var wallNow = UnityEngine.Time.realtimeSinceStartup;
-
-            if (!session.HasAcceptedPosition)
-            {
-                StoreAcceptedPosition(session, pos, wallNow);
-                session.NextPositionReportAt = wallNow + PositionReportSeconds;
-
-                _log.LogInfo(
-                    $"[net] première position reçue de '{session.Username}'#{session.PlayerId} : " +
-                    $"({pos.X:F2}, {pos.Y:F2}, {pos.Z:F2}) v=({pos.MoveSpeedX:F1},{pos.MoveSpeedY:F1},{pos.MoveSpeedZ:F1}) " +
-                    $"pitch={pos.ViewPitch:F1} sousEau={pos.IsUnderwater} actions={pos.ActionFlags}");
-                ReportPositionRate(session, wallNow);
-                return;
-            }
-
-            // P1 : la position est jugée contre la dernière position **acceptée**, pas contre la
-            // précédente reçue. Un refus ne déplace donc pas la référence, sinon un client pourrait
-            // avancer par petits sauts refusés sans jamais être corrigé.
-            var deltaSeconds = wallNow - session.LastAcceptedAt;
-            var verdict = PlayerPlausibility.Evaluate(
-                session.LastAcceptedX,
-                session.LastAcceptedY,
-                session.LastAcceptedZ,
-                pos.X,
-                pos.Y,
-                pos.Z,
-                deltaSeconds,
-                session.LastAcceptedFlags,
-                pos.ActionFlags);
-
-            if (verdict.Accepted)
-            {
-                session.RejectedStreak = 0;
-                StoreAcceptedPosition(session, pos, wallNow);
-            }
-            else if (session.RejectedStreak + 1 >= PlayerPlausibility.MaxConsecutiveRejections)
-            {
-                // Une téléportation légitime (console, téléporteur, réapparition) ne doit pas
-                // condamner la session : après trois refus consécutifs, la position reçue est
-                // adoptée comme resynchronisation, et c'est **écrit** comme tel. Le troisième refus
-                // est compté comme les deux premiers : le taux publié doit refléter tous les refus,
-                // sinon une session qui resynchronise sans arrêt paraîtrait propre.
-                session.PositionsRejected++;
-                session.PositionResyncs++;
-                session.RejectedStreak = 0;
-                StoreAcceptedPosition(session, pos, wallNow);
-
-                _log.LogWarning(
-                    $"[net] position RESYNCHRONISÉE de '{session.Username}'#{session.PlayerId} après " +
-                    $"{PlayerPlausibility.MaxConsecutiveRejections} refus consécutifs : {verdict.Reason} — la position reçue est adoptée.");
-
-                // Budget : au-delà de cinq resynchronisations en une minute, ce n'est plus un
-                // téléporteur du jeu, c'est un client qui saute. La session est éjectée avec un motif.
-                if (session.ResyncWindowStart < 0f || wallNow - session.ResyncWindowStart > 60f)
-                {
-                    session.ResyncWindowStart = wallNow;
-                    session.ResyncsInWindow = 0;
-                }
-
-                session.ResyncsInWindow++;
-                if (session.ResyncsInWindow > 5)
-                {
-                    var budgetReason =
-                        $"trop de resynchronisations de position ({session.ResyncsInWindow} en moins de 60 s) — " +
-                        "une téléportation légitime est rare, une téléportation répétée n'en est pas une";
-
-                    _log.LogWarning(
-                        $"[net] position : '{session.Username}'#{session.PlayerId} éjecté — {budgetReason}");
-
-                    Send(peer, w => new DisconnectMessage { Reason = budgetReason }.Write(w), DeliveryMethod.ReliableOrdered);
-                    session.Accepted = false;
-                    session.HandshakeDeadline = ServerClock.Milliseconds + 2000L;
-                    return;
-                }
-            }
-            else
-            {
-                session.RejectedStreak++;
-                session.PositionsRejected++;
-
-                // Le serveur garde la dernière position acceptée : les autres joueurs ne voient
-                // jamais le saut, et le client reçoit de quoi revenir.
-                if (session.PositionsRejected <= 3 || session.PositionsRejected % 100 == 0)
-                {
-                    _log.LogWarning(
-                        $"[net] position REFUSÉE de '{session.Username}'#{session.PlayerId} : {verdict.Reason} — " +
-                        $"correction renvoyée (refus={session.PositionsRejected})");
-                }
-
-                Send(peer, w => new PlayerCorrectionMessage
-                {
-                    ServerTick = ServerTickBehaviour.Ticks,
-                    X = session.LastAcceptedX,
-                    Y = session.LastAcceptedY,
-                    Z = session.LastAcceptedZ,
-                    Reason = WireReason(verdict.Reason),
-                }.Write(w), DeliveryMethod.ReliableOrdered);
-            }
-
-            ReportPositionRate(session, wallNow);
-        }
-
         /// <summary>
         /// Mémorise une position comme **acceptée** : c'est le seul état que les autres joueurs voient.
         /// </summary>
-        private static void StoreAcceptedPosition(ClientSession session, PlayerPositionMessage pos, float now)
-        {
-            session.HasAcceptedPosition = true;
-            session.LastAcceptedX = pos.X;
-            session.LastAcceptedY = pos.Y;
-            session.LastAcceptedZ = pos.Z;
-            session.LastAcceptedFlags = pos.ActionFlags;
-            session.LastAcceptedAt = now;
-
-            session.X = pos.X;
-            session.Y = pos.Y;
-            session.Z = pos.Z;
-            session.RotX = pos.RotX;
-            session.RotY = pos.RotY;
-            session.RotZ = pos.RotZ;
-            session.RotW = pos.RotW;
-            session.MoveSpeedX = pos.MoveSpeedX;
-            session.MoveSpeedY = pos.MoveSpeedY;
-            session.MoveSpeedZ = pos.MoveSpeedZ;
-            session.ViewPitch = pos.ViewPitch;
-            session.IsUnderwater = pos.IsUnderwater;
-            session.OnSurface = pos.OnSurface;
-            session.ActionFlags = pos.ActionFlags;
-        }
-
         /// <summary>
         /// Tronque un motif pour le fil : `Protocol.MaxCorrectionReasonLength` est une borne de
         /// message, et un motif de plausibilité complet la dépasse. Le journal garde la version
@@ -1311,32 +655,11 @@ namespace Coop.Server
                 ? reason
                 : reason.Substring(0, Protocol.MaxCorrectionReasonLength);
         }
-
         /// <summary>
         /// Rapport périodique du taux de refus (P1). C'est ce chiffre — et non le nombre brut — qui
         /// sert de critère d'arrêt : plus de 5 % de corrections sur une nage normale signifie que la
         /// validation a posteriori n'est pas viable.
         /// </summary>
-        private void ReportPositionRate(ClientSession session, float now)
-        {
-            if (now < session.NextPositionReportAt)
-            {
-                return;
-            }
-
-            session.NextPositionReportAt = now + PositionReportSeconds;
-
-            if (session.PositionsReceived <= 0)
-            {
-                return;
-            }
-
-            var rate = 100.0 * session.PositionsRejected / session.PositionsReceived;
-            _log.LogInfo(
-                $"[net] position : '{session.Username}'#{session.PlayerId} {session.PositionsReceived} reçue(s), " +
-                $"{session.PositionsRejected} refusée(s) ({rate:F1}%), {session.PositionResyncs} resynchronisée(s)");
-        }
-
         /// <summary>
         /// Objet tenu annoncé par un client (outil en main, ou rien).
         ///
@@ -1344,64 +667,6 @@ namespace Coop.Server
         /// qu'il ne détient pas pour les joueurs distants, et il **force** l'identité de l'émetteur —
         /// un client ne peut donc pas prétendre tenir un objet à la place d'un autre.
         /// </summary>
-        private void HandleHeldItem(NetPeer peer, ClientSession session, PlayerHeldItemMessage msg)
-        {
-            if (!session.Accepted)
-            {
-                _log.LogWarning($"[net] objet tenu avant handshake ignoré de {peer}");
-                return;
-            }
-
-            // Le client peut prétendre tenir l'objet d'un autre : l'identité qui compte est celle de la
-            // session, jamais celle du message. Un écart est une falsification, et elle se dit — une
-            // réécriture silencieuse laisserait croire à une confiance accordée au champ.
-            var forgedHeld = msg.PlayerId != 0 && msg.PlayerId != session.PlayerId;
-            if (forgedHeld)
-            {
-                ForgedPlayerIds++;
-                _log.LogWarning(
-                    $"[net] PlayerId falsifié sur l'objet tenu : '{session.Username}' a annoncé sous l'id " +
-                    $"{msg.PlayerId} (le sien est {session.PlayerId}) — le relais réécrit avec l'id de la session.");
-                _log.LogInfo(
-                    $"[net] vérification PlayerId (objet tenu) : '{session.Username}' a annoncé l'id " +
-                    $"{msg.PlayerId}, effectif={session.PlayerId} -> verdict=True");
-            }
-
-            session.HeldItemName = msg.TechTypeName ?? string.Empty;
-            session.HoldingParams = msg.HoldingParams ?? Array.Empty<string>();
-            session.HeldItemsReceived++;
-
-            var held = session.HeldItemName.Length == 0 ? "(rien en main)" : session.HeldItemName;
-            var parameters = session.HoldingParams.Length == 0
-                ? "(aucun paramètre)"
-                : string.Join(", ", session.HoldingParams);
-            _log.LogInfo(
-                $"[net] objet tenu reçu de '{session.Username}'#{session.PlayerId} : {held} " +
-                $"— paramètres : {parameters}");
-
-            var outgoing = new PlayerHeldItemMessage
-            {
-                PlayerId = session.PlayerId,
-                TechTypeName = session.HeldItemName,
-                HoldingParams = session.HoldingParams,
-            };
-
-            var forwarded = 0;
-            foreach (var pair in _sessions)
-            {
-                if (!pair.Value.Accepted || pair.Key == peer)
-                {
-                    continue;
-                }
-
-                Send(pair.Key, outgoing.Write, DeliveryMethod.ReliableOrdered);
-                forwarded++;
-            }
-
-            _log.LogInfo(
-                $"[net] PlayerHeldItem de '{session.Username}'#{session.PlayerId} diffusé à {forwarded} autre(s) client(s).");
-        }
-
         /// <summary>
         /// Première action **autoritaire** (M5) : le serveur décide qui a le droit de ramasser un objet.
         ///
@@ -1414,169 +679,6 @@ namespace Coop.Server
         /// portée. C'est la moitié « branchement sur le ramassage réel » de M5 (PLAN.md §38) ; ici, la clé
         /// est fournie par la sonde et la décision est réelle.
         /// </summary>
-        private void HandlePickupClaim(NetPeer peer, ClientSession session, PickupClaimMessage msg)
-        {
-            if (!session.Accepted)
-            {
-                _log.LogWarning($"[net] réclamation de ramassage avant handshake ignorée de {peer}");
-                return;
-            }
-
-            var tech = string.IsNullOrEmpty(msg.TechTypeName) ? "(sans nom)" : msg.TechTypeName;
-
-            if (msg.PlayerId != 0 && msg.PlayerId != session.PlayerId)
-            {
-                ForgedPickupIds++;
-                _log.LogWarning(
-                    $"[net] PlayerId falsifié sur une réclamation : '{session.Username}' a annoncé sous l'id " +
-                    $"{msg.PlayerId} (le sien est {session.PlayerId}) — la réclamation est attribuée à la session.");
-                _log.LogInfo(
-                    $"[net] vérification PlayerId (pickup) : '{session.Username}' a annoncé l'id " +
-                    $"{msg.PlayerId}, effectif={session.PlayerId} -> verdict=True");
-            }
-
-            // — L'objet doit exister **chez le serveur**, et le joueur doit être à portée.
-            //
-            // Ce sont les deux gardes qui manquaient à la décision seule : une clé inconnue était
-            // accordée, et un joueur pouvait réclamer un objet à l'autre bout de la carte. La portée se
-            // mesure avec la **dernière position reçue** de la session (20 Hz), sans nouveau champ dans
-            // le message : le format de la v8 suffit.
-            // — Une clé **déjà attribuée** est refusée immédiatement, avant toute résolution du monde.
-            //
-            // L'ordre compte depuis la v11 : un objet accordé est retiré du monde simulé, donc la résolution
-            // échouerait et le motif deviendrait « objet inconnu » — vrai, mais muet sur le fait qu'un
-            // joueur le détient. La carte des réclamations est le registre durable ; elle passe en premier.
-            if (msg.ItemKey != 0L &&
-                _pickupClaims.TryGetHolder(msg.ItemKey, out var alreadyHeld) &&
-                alreadyHeld != session.PlayerId)
-            {
-                PickupClaimsRefused++;
-                _log.LogInfo(
-                    $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
-                    $"'{session.Username}'#{session.PlayerId} -> REFUSÉE (déjà tenue par {DescribeHolder(alreadyHeld)})");
-
-                Send(peer, new PickupResultMessage
-                {
-                    ItemKey = msg.ItemKey,
-                    TechTypeName = tech,
-                    Granted = false,
-                    HolderId = alreadyHeld,
-                    ClaimedBy = msg.PlayerId,
-                }.Write, DeliveryMethod.ReliableOrdered);
-
-                return;
-            }
-
-            UnityEngine.Vector3 itemPosition = UnityEngine.Vector3.zero;
-            var distance = 0f;
-            string refusal = null;
-
-            if (!TryResolveWorldItem(msg.ItemKey, out itemPosition, out var indexedKeys))
-            {
-                PickupRefusedUnknown++;
-                refusal = $"objet inconnu du serveur ({indexedKeys} objet(s) indexé(s)) — la clé ne désigne " +
-                          "rien dans le monde simulé";
-            }
-            else if (session.PositionsReceived == 0)
-            {
-                PickupRefusedNoPosition++;
-                refusal = "position du joueur inconnue (aucune position reçue) — la portée n'est pas vérifiable";
-            }
-            else
-            {
-                distance = UnityEngine.Vector3.Distance(
-                    new UnityEngine.Vector3(session.X, session.Y, session.Z), itemPosition);
-
-                if (distance > Protocol.MaxPickupRangeMeters)
-                {
-                    PickupRefusedRange++;
-                    refusal = $"hors portée : {distance:F1} m > {Protocol.MaxPickupRangeMeters:F1} m";
-                }
-            }
-
-            if (refusal != null)
-            {
-                PickupClaimsRefused++;
-                _log.LogInfo(
-                    $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
-                    $"'{session.Username}'#{session.PlayerId} -> REFUSÉE ({refusal})");
-
-                Send(peer, new PickupResultMessage
-                {
-                    ItemKey = msg.ItemKey,
-                    TechTypeName = tech,
-                    Granted = false,
-                    HolderId = 0,
-                    ClaimedBy = msg.PlayerId,
-                }.Write, DeliveryMethod.ReliableOrdered);
-
-                return;
-            }
-
-            var granted = false;
-            var holder = session.PlayerId;
-
-            if (msg.ItemKey == 0L)
-            {
-                PickupClaimsRefused++;
-                _log.LogWarning(
-                    $"[net] pickup : clé nulle réclamée par '{session.Username}'#{session.PlayerId} " +
-                    $"('{tech}') -> REFUSÉE (aucune identité d'objet)");
-            }
-            else if (_pickupClaims.TryGetHolder(msg.ItemKey, out var existing))
-            {
-                holder = existing;
-                granted = existing == session.PlayerId;
-                if (granted)
-                {
-                    PickupClaimsGranted++;
-                    _log.LogInfo(
-                        $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
-                        $"'{session.Username}'#{session.PlayerId} -> ACCORDÉE (déjà tenue par le même joueur, " +
-                        $"objet à {distance:F1} m)");
-                }
-                else
-                {
-                    PickupClaimsRefused++;
-                    _log.LogInfo(
-                        $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
-                        $"'{session.Username}'#{session.PlayerId} -> REFUSÉE (déjà tenue par " +
-                        $"{DescribeHolder(existing)})");
-                }
-            }
-            else
-            {
-                _pickupClaims.Claim(msg.ItemKey, session.PlayerId);
-                granted = true;
-                PickupClaimsGranted++;
-                _log.LogInfo(
-                    $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
-                    $"'{session.Username}'#{session.PlayerId} -> ACCORDÉE (premier claim, objet à {distance:F1} m)");
-            }
-
-            Send(peer, new PickupResultMessage
-            {
-                ItemKey = msg.ItemKey,
-                TechTypeName = tech,
-                Granted = granted,
-                HolderId = holder,
-                ClaimedBy = msg.PlayerId,
-            }.Write, DeliveryMethod.ReliableOrdered);
-
-            // — La conséquence du geste (v11).
-            //
-            // Jusqu'ici, un accord ne changeait rien dans le monde du serveur : l'objet restait chez lui,
-            // et un troisième joueur qui le réclamait recevait un **accord** pour un objet qui n'existait
-            // plus pour personne. On retire donc l'objet du monde simulé et on l'annonce.
-            //
-            // Seulement sur un accord **nouveau** : une réclamation répétée du même joueur (idempotente)
-            // ne doit pas retirer deux fois, et un refus ne retire rien.
-            if (granted && msg.ItemKey != 0L && !_pickupRemoved.Contains(msg.ItemKey))
-            {
-                RemoveGrantedItem(msg.ItemKey, tech, session);
-            }
-        }
-
         /// <summary>
         /// Retire du monde du serveur l'objet dont la clé vient d'être accordée, puis annonce sa disparition.
         ///
@@ -1585,39 +687,6 @@ namespace Coop.Server
         /// n'est **pas** retiré de l'inventaire de celui qui l'a ramassé — il y est déjà depuis son geste
         /// local, et c'est son exemplaire à lui qui compte.
         /// </summary>
-        private void RemoveGrantedItem(long key, string tech, ClientSession session)
-        {
-            if (!TryResolveWorldItemObject(key, out var item))
-            {
-                _log.LogWarning(
-                    $"[net] pickup : clé=0x{key:x16} '{tech}' accordée à '{session.Username}'#{session.PlayerId} " +
-                    "mais l'objet n'est plus dans le monde serveur — rien à retirer (il a peut-être déjà été " +
-                    "consumé par le jeu).");
-                return;
-            }
-
-            var described = ItemIdentity.Describe(item);
-
-            _pickupRemoved.Add(key);
-            UnityEngine.Object.Destroy(item.gameObject);
-
-            // L'index est invalidé : sans ça, la clé resterait résoluble pendant une seconde, et une
-            // réclamation concurrente retomberait sur une position morte.
-            _itemIndex = null;
-
-            _log.LogInfo(
-                $"[net] pickup : clé=0x{key:x16} '{tech}' retirée du monde serveur ({described}) — " +
-                $"ramassée par '{session.Username}'#{session.PlayerId}.");
-
-            // Le détenteur est exclu : son exemplaire est déjà dans son inventaire, et c'est son geste à lui
-            // qui le fait disparaître de son monde.
-            BroadcastDespawn(
-                key,
-                EntityKind.Item,
-                $"ramassée par '{session.Username}'#{session.PlayerId}",
-                session.PlayerId);
-        }
-
         /// <summary>
         /// Conduite d'un véhicule (v9, M4). Le client pilote : il envoie la position et l'orientation de
         /// **son** véhicule à 10 Hz, et le serveur les applique à **son** exemplaire du même véhicule, puis
@@ -1628,81 +697,6 @@ namespace Coop.Server
         /// déjà conduit par un autre joueur n'est pas volé en silence — le refus est renvoyé au demandeur
         /// (`VehicleControlResult`) pour qu'il sache qu'il ne conduit pas.
         /// </summary>
-        private void HandleVehicleControl(NetPeer peer, ClientSession session, VehicleControlMessage msg)
-        {
-            if (!session.Accepted)
-            {
-                _log.LogWarning($"[net] conduite avant handshake ignorée de {peer}");
-                return;
-            }
-
-            if (msg.PlayerId != 0 && msg.PlayerId != session.PlayerId)
-            {
-                ForgedVehicleIds++;
-                if (ForgedVehicleIds <= 3)
-                {
-                    _log.LogWarning(
-                        $"[net] PlayerId falsifié sur une conduite : '{session.Username}' a annoncé l'id " +
-                        $"{msg.PlayerId} (le sien est {session.PlayerId}) — la conduite est attribuée à la session.");
-                }
-            }
-
-            if (!TryResolveVehicle(msg.VehicleKey, out var vehicle, out var indexed))
-            {
-                VehicleControlRefusedUnknown++;
-                LogControlRefusal(msg.VehicleKey, session, $"véhicule inconnu du serveur ({indexed} véhicule(s) indexé(s))");
-                ReplyControl(peer, msg.VehicleKey, false, 0);
-                return;
-            }
-
-            var vehiclePosition = vehicle.transform != null
-                ? vehicle.transform.position
-                : UnityEngine.Vector3.zero;
-
-            var distance = session.PositionsReceived == 0
-                ? float.MaxValue
-                : UnityEngine.Vector3.Distance(
-                    new UnityEngine.Vector3(session.X, session.Y, session.Z), vehiclePosition);
-
-            if (distance > Protocol.MaxVehicleControlRangeMeters)
-            {
-                VehicleControlRefusedRange++;
-                LogControlRefusal(
-                    msg.VehicleKey,
-                    session,
-                    $"hors portée : {distance:F1} m > {Protocol.MaxVehicleControlRangeMeters:F1} m");
-                ReplyControl(peer, msg.VehicleKey, false, 0);
-                return;
-            }
-
-            if (_vehicleDrivers.TryGetValue(msg.VehicleKey, out var driver) && driver != session.PlayerId)
-            {
-                VehicleControlRefusedTaken++;
-                LogControlRefusal(
-                    msg.VehicleKey,
-                    session,
-                    $"déjà conduite par {DescribeHolder(driver)}");
-                ReplyControl(peer, msg.VehicleKey, false, driver);
-                return;
-            }
-
-            var first = !_vehicleDrivers.ContainsKey(msg.VehicleKey);
-            _vehicleDrivers[msg.VehicleKey] = session.PlayerId;
-            _vehicleDriverLastState[msg.VehicleKey] = UnityEngine.Time.realtimeSinceStartup;
-
-            ApplyVehicleControl(vehicle, msg);
-            VehicleControlApplied++;
-
-            if (first)
-            {
-                _log.LogInfo(
-                    $"[net] conduite : clé=0x{msg.VehicleKey:x16} — prise par '{session.Username}'#{session.PlayerId} " +
-                    $"({VehicleIdentity.Describe(vehicle)}, joueur à {distance:F1} m), état appliqué et rediffusé.");
-
-                ReplyControl(peer, msg.VehicleKey, true, session.PlayerId);
-            }
-        }
-
         /// <summary>
         /// Libération du volant par son conducteur (v12, M4).
         ///
@@ -1714,27 +708,6 @@ namespace Coop.Server
         /// Seul le conducteur **effectif** peut libérer : une demande pour un véhicule conduit par un autre
         /// est ignorée (sans réponse : ce n'est pas une décision à rendre, c'est un fait sans effet).
         /// </summary>
-        private void HandleVehicleRelease(ClientSession session, VehicleReleaseMessage msg)
-        {
-            if (!session.Accepted || msg.VehicleKey == 0L)
-            {
-                return;
-            }
-
-            if (!_vehicleDrivers.TryGetValue(msg.VehicleKey, out var driver) || driver != session.PlayerId)
-            {
-                return;
-            }
-
-            _vehicleDrivers.Remove(msg.VehicleKey);
-            _vehicleDriverLastState.Remove(msg.VehicleKey);
-            VehicleReleases++;
-
-            _log.LogInfo(
-                $"[net] conduite : clé=0x{msg.VehicleKey:x16} libérée par '{session.Username}'#{session.PlayerId} " +
-                "— le volant est libre (libérations=1, total=" + VehicleReleases + ")");
-        }
-
         /// <summary>
         /// Libère les volants devenus **silencieux** (v12).
         ///
@@ -1743,53 +716,6 @@ namespace Coop.Server
         /// tant qu'il est au volant ; `VehicleSilenceReleaseSeconds` (3 s) vaut donc 30 états manqués — bien
         /// au-delà d'une rafale de latence.
         /// </summary>
-        private void ReleaseSilentDrivers()
-        {
-            if (_vehicleDrivers.Count == 0)
-            {
-                return;
-            }
-
-            var now = UnityEngine.Time.realtimeSinceStartup;
-            List<long> silent = null;
-
-            foreach (var pair in _vehicleDrivers)
-            {
-                if (!_vehicleDriverLastState.TryGetValue(pair.Key, out var last))
-                {
-                    last = now;
-                    _vehicleDriverLastState[pair.Key] = now;
-                }
-
-                if (now - last <= Protocol.VehicleSilenceReleaseSeconds)
-                {
-                    continue;
-                }
-
-                if (silent == null)
-                {
-                    silent = new List<long>();
-                }
-
-                silent.Add(pair.Key);
-            }
-
-            if (silent == null)
-            {
-                return;
-            }
-
-            foreach (var key in silent)
-            {
-                _vehicleDrivers.Remove(key);
-                _vehicleDriverLastState.Remove(key);
-                VehicleSilenceReleases++;
-                _log.LogInfo(
-                    $"[net] conduite : clé=0x{key:x16} libérée (silence de {Protocol.VehicleSilenceReleaseSeconds:F1} s) " +
-                    $"— le conducteur ne l'envoie plus (libérations par silence={VehicleSilenceReleases}).");
-            }
-        }
-
         /// <summary>Refus journalisé **une fois par clé** : à 10 Hz, un refus répété noierait le journal.</summary>
         private void LogControlRefusal(long key, ClientSession session, string reason)
         {
@@ -1802,7 +728,6 @@ namespace Coop.Server
                 $"[net] conduite : clé=0x{key:x16} réclamée par '{session.Username}'#{session.PlayerId} " +
                 $"-> REFUSÉE ({reason})");
         }
-
         /// <summary>
         /// Réponse au demandeur : sur un accord, toujours ; sur un refus, au plus une fois par seconde et
         /// par clé (le client envoie 10 états par seconde, il n'a pas besoin de 10 refus).
@@ -1824,67 +749,12 @@ namespace Coop.Server
                 DriverId = driverId,
             }.Write, DeliveryMethod.ReliableOrdered);
         }
-
         /// <summary>Applique l'état du conducteur au véhicule du serveur (c'est lui qui est rediffusé).</summary>
-        private static void ApplyVehicleControl(Vehicle vehicle, VehicleControlMessage msg)
-        {
-            var transform = vehicle.transform;
-            if (transform != null)
-            {
-                transform.position = new UnityEngine.Vector3(msg.X, msg.Y, msg.Z);
-                transform.rotation = new UnityEngine.Quaternion(msg.RotX, msg.RotY, msg.RotZ, msg.RotW);
-            }
-
-            // Le transform est posé à chaque état : laisser la physique accélérer le Rigidbody ferait
-            // osciller le véhicule entre deux corrections. On annule donc sa vitesse, comme pour les
-            // créatures suivies.
-            var body = vehicle.GetComponent<UnityEngine.Rigidbody>();
-            if (body != null && !body.isKinematic)
-            {
-                body.velocity = UnityEngine.Vector3.zero;
-                body.angularVelocity = UnityEngine.Vector3.zero;
-            }
-        }
-
         /// <summary>
         /// Vrai si la clé désigne un **véhicule du monde serveur**. Index reconstruit au plus une fois par
         /// seconde : un état de conduite arrive 10 fois par seconde, un parcours complet à chaque état
         /// coûterait cher pour rien.
         /// </summary>
-        private bool TryResolveVehicle(long key, out Vehicle vehicle, out int indexed)
-        {
-            var now = UnityEngine.Time.realtimeSinceStartup;
-
-            if (_vehicleIndex == null || now - _vehicleIndexBuiltAt > 1f)
-            {
-                var index = new Dictionary<long, Vehicle>();
-                var all = UnityEngine.Resources.FindObjectsOfTypeAll<Vehicle>();
-                var count = 0;
-
-                foreach (var candidate in all)
-                {
-                    if (candidate == null || candidate.gameObject == null || !candidate.gameObject.scene.IsValid())
-                    {
-                        continue;
-                    }
-
-                    count++;
-                    var candidateKey = VehicleIdentity.KeyOf(candidate, out _);
-                    if (candidateKey != 0L)
-                    {
-                        index[candidateKey] = candidate;
-                    }
-                }
-
-                _vehicleIndex = index;
-                _vehicleIndexBuiltAt = now;
-                _vehicleIndexCount = count;
-            }
-
-            indexed = _vehicleIndexCount;
-            return _vehicleIndex.TryGetValue(key, out vehicle);
-        }
-
         /// <summary>
         /// Vrai si la clé désigne un objet **du monde simulé**, et où il se trouve.
         ///
@@ -1894,52 +764,6 @@ namespace Coop.Server
         /// **même** fonction de clé que le client (<see cref="ItemIdentity"/>, compilé dans les deux
         /// plugins) ; les clés partagées sont comptées et signalées plutôt que silencieuses.
         /// </summary>
-        private bool TryResolveWorldItem(long key, out UnityEngine.Vector3 position, out int indexedKeys)
-        {
-            var now = UnityEngine.Time.realtimeSinceStartup;
-
-            if (_itemIndex == null || now - _itemIndexBuiltAt > 1f)
-            {
-                var index = new Dictionary<long, UnityEngine.Vector3>();
-                var items = ItemIdentity.CollectWorldItems();
-                var shared = 0;
-                var sharedKey = 0L;
-
-                foreach (var item in items)
-                {
-                    var itemKey = ItemIdentity.KeyOf(item, out _);
-                    if (itemKey == 0L)
-                    {
-                        continue;
-                    }
-
-                    if (index.ContainsKey(itemKey))
-                    {
-                        shared++;
-                        sharedKey = itemKey;
-                    }
-
-                    index[itemKey] = item.transform != null ? item.transform.position : UnityEngine.Vector3.zero;
-                }
-
-                _itemIndex = index;
-                _itemIndexBuiltAt = now;
-                _itemIndexObjects = items.Count;
-
-                if (shared != _itemIndexSharedKeys)
-                {
-                    _itemIndexSharedKeys = shared;
-                    _log.LogWarning(
-                        $"[net] pickup : {shared} clé(s) d'objet partagée(s) dans l'index (ex. 0x{sharedKey:x16}) " +
-                        "— deux objets du monde se confondent, la décision portera sur le dernier indexé. " +
-                        "C'est une limite du repli par position, pas un refus.");
-                }
-            }
-
-            indexedKeys = _itemIndex.Count;
-            return _itemIndex.TryGetValue(key, out position);
-        }
-
         /// <summary>Objet du monde portant cette clé, s'il existe encore.</summary>
         ///
         /// Distinct de <see cref="TryResolveWorldItem"/>, qui rend une position indexée : ici on veut
@@ -1947,28 +771,6 @@ namespace Coop.Server
         /// références, parce qu'une référence à un objet détruit par le jeu ne se distingue pas d'une
         /// référence nulle et ferait croire à un retrait réussi.
         /// </summary>
-        private bool TryResolveWorldItemObject(long key, out Pickupable item)
-        {
-            item = null;
-            if (key == 0L)
-            {
-                return false;
-            }
-
-            foreach (var candidate in ItemIdentity.CollectWorldItems())
-            {
-                if (candidate == null || ItemIdentity.KeyOf(candidate, out _) != key)
-                {
-                    continue;
-                }
-
-                item = candidate;
-                return true;
-            }
-
-            return false;
-        }
-
         /// <summary>Nom lisible du détenteur, pour que le refus dise **qui** détient l'objet.</summary>
         private string DescribeHolder(ushort playerId)
         {
@@ -1982,152 +784,10 @@ namespace Coop.Server
 
             return $"id {playerId}";
         }
-
-        private void HandlePlayerEquipment(NetPeer peer, ClientSession session, PlayerEquipmentMessage msg)
-        {
-            if (!session.Accepted)
-            {
-                _log.LogWarning($"[net] équipement avant handshake ignoré de {peer}");
-                return;
-            }
-
-            // Le serveur est autoritaire sur l'identité de l'émetteur : un client ne peut pas
-            // prétendre modifier la tenue d'un autre joueur. Le champ `PlayerId` reçu n'est donc
-            // **jamais** recopié — il sert seulement à constater la falsification, et c'est cette
-            // constatation qui rend la règle mesurable au lieu de lisible.
-            var forgedEquipment = msg.PlayerId != 0 && msg.PlayerId != session.PlayerId;
-            if (forgedEquipment)
-            {
-                ForgedPlayerIds++;
-                _log.LogWarning(
-                    $"[net] PlayerId falsifié sur l'équipement : '{session.Username}' a annoncé sous l'id " +
-                    $"{msg.PlayerId} (le sien est {session.PlayerId}) — le relais réécrit avec l'id de la session.");
-                _log.LogInfo(
-                    $"[net] vérification PlayerId (équipement) : '{session.Username}' a annoncé l'id " +
-                    $"{msg.PlayerId}, effectif={session.PlayerId} -> verdict=True");
-            }
-
-            session.Equipment = msg.TechTypeNames ?? Array.Empty<string>();
-            session.EquipmentsReceived++;
-
-            var summary = session.Equipment.Length == 0
-                ? "(sans équipement)"
-                : string.Join(", ", session.Equipment);
-            _log.LogInfo(
-                $"[net] équipement reçu de '{session.Username}'#{session.PlayerId} " +
-                $"({session.Equipment.Length} pièce(s)) : {summary}");
-
-            var outgoing = new PlayerEquipmentMessage
-            {
-                PlayerId = session.PlayerId,
-                TechTypeNames = session.Equipment,
-            };
-
-            var forwarded = 0;
-            foreach (var pair in _sessions)
-            {
-                if (!pair.Value.Accepted || pair.Key == peer)
-                {
-                    continue;
-                }
-
-                Send(pair.Key, outgoing.Write, DeliveryMethod.ReliableOrdered);
-                forwarded++;
-            }
-
-            _log.LogInfo(
-                $"[net] PlayerEquipment de '{session.Username}'#{session.PlayerId} diffusé à {forwarded} autre(s) client(s).");
-            if (forgedEquipment)
-            {
-                _log.LogInfo(
-                    $"[net] vérification PlayerId (équipement) : diffusé sous l'id {session.PlayerId} " +
-                    $"(revendiqué {msg.PlayerId}) pour {forwarded} client(s) -> verdict=True");
-            }
-        }
-
-        private static string[] ReadHostEquipment()
-        {
-            var inventory = Inventory.main;
-            var equipment = inventory != null ? inventory.equipment : null;
-            if (equipment == null)
-            {
-                return null;
-            }
-
-            var names = new List<string>();
-            var slots = equipment.GetEquipment();
-            while (slots.MoveNext())
-            {
-                var item = slots.Current.Value;
-                var pickupable = item != null ? item.item : null;
-                if (pickupable == null)
-                {
-                    continue;
-                }
-
-                names.Add(pickupable.GetTechType().ToString());
-            }
-
-            names.Sort(StringComparer.Ordinal);
-            return names.ToArray();
-        }
-
-        private void BroadcastHostEquipmentIfChanged()
-        {
-            var hostEquip = ReadHostEquipment();
-            if (hostEquip == null)
-            {
-                return;
-            }
-
-            var signature = string.Join("|", hostEquip);
-            if (string.Equals(signature, _lastHostEquipmentSignature, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            _lastHostEquipmentSignature = signature;
-            _lastHostEquipment = hostEquip;
-
-            var outgoing = new PlayerEquipmentMessage
-            {
-                PlayerId = 9999,
-                TechTypeNames = hostEquip,
-            };
-
-            foreach (var pair in _sessions)
-            {
-                if (!pair.Value.Accepted)
-                {
-                    continue;
-                }
-
-                Send(pair.Key, outgoing.Write, DeliveryMethod.ReliableOrdered);
-            }
-        }
-
         /// <summary>
         /// Nom de l'objet tenu par le personnage de l'instance serveur, ou chaîne vide s'il n'a rien
         /// en main. Renvoie <c>null</c> si l'inventaire local n'est pas lisible (monde non chargé).
         /// </summary>
-        private static string ReadHostHeldItemName()
-        {
-            var inventory = Inventory.main;
-            if (inventory == null)
-            {
-                return null;
-            }
-
-            var tool = inventory.GetHeldTool();
-            if (tool == null)
-            {
-                return string.Empty;
-            }
-
-            var pickupable = tool.GetComponent<Pickupable>();
-            return pickupable != null ? pickupable.GetTechType().ToString() : string.Empty;
-        }
-
         /// <summary>
         /// Paramètres `holding_*` du personnage hôte, **lus sur son propre `Animator`** — exactement
         /// comme un client le fait pour lui-même, et non plus re-dérivés du nom de l'objet tenu.
@@ -2175,49 +835,6 @@ namespace Coop.Server
             holding.Sort(StringComparer.Ordinal);
             return holding.ToArray();
         }
-
-        private void BroadcastHostHeldItemIfChanged()
-        {
-            var name = ReadHostHeldItemName();
-            var parameters = ReadHostHoldingParams();
-            if (name == null || parameters == null)
-            {
-                return;
-            }
-
-            var signature = name + "|" + string.Join("|", parameters);
-            if (string.Equals(signature, _lastHostHeldItemSignature, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            _lastHostHeldItemSignature = signature;
-
-            var outgoing = new PlayerHeldItemMessage
-            {
-                PlayerId = 9999,
-                TechTypeName = name,
-                HoldingParams = parameters,
-            };
-
-            var sent = 0;
-            foreach (var pair in _sessions)
-            {
-                if (!pair.Value.Accepted)
-                {
-                    continue;
-                }
-
-                Send(pair.Key, outgoing.Write, DeliveryMethod.ReliableOrdered);
-                sent++;
-            }
-
-            _log.LogInfo(
-                $"[net] objet tenu de l'hôte modifié : {(name.Length == 0 ? "(rien en main)" : name)} " +
-                $"-> diffusé à {sent} client(s) (paramètres lus sur son animator : " +
-                (parameters.Length == 0 ? "(aucun)" : string.Join(", ", parameters)) + ")");
-        }
-
         /// <summary>
         /// Diffuse à chaque tick (20 Hz) l'état de position de tous les autres joueurs connectés
         /// à chaque client accepté.
@@ -2389,7 +1006,6 @@ namespace Coop.Server
                 _snapshotsBroadcast++;
             }
         }
-
         /// <summary>
         /// Diffuse l'état des créatures que **le serveur** simule (M3).
         ///
@@ -2400,332 +1016,6 @@ namespace Coop.Server
         /// que si elle est à moins de <see cref="Protocol.CreatureRelevancyRadiusMeters"/> d'un joueur
         /// concerné. Envoyer tout le monde à tout le monde ne passerait pas le 20 Hz du §3.
         /// </summary>
-        private void BroadcastCreatureSnapshots(long serverTick, Player hostPlayer)
-        {
-            var now = UnityEngine.Time.realtimeSinceStartup;
-            if (_creatureCache == null || now - _creatureCacheRealtime >= CreatureCacheSeconds)
-            {
-                _creatureCache = UnityEngine.Object.FindObjectsOfType<Creature>();
-                _creatureCacheRealtime = now;
-                ReportCreatureIdentities();
-            }
-
-            if (_creatureCache == null || _creatureCache.Length == 0)
-            {
-                return;
-            }
-
-            var radiusSquared = Protocol.CreatureRelevancyRadiusMeters * Protocol.CreatureRelevancyRadiusMeters;
-
-            // Diagnostic : « 0 créature diffusée » a deux causes très différentes — le monde est vide
-            // autour du joueur, ou le rayon est trop petit. Sans cette mesure, les deux se
-            // ressemblent, et on réglerait un rayon au hasard.
-            ReportVehicles(hostPlayer, now);
-
-            if (now >= _nextCreatureDiagnostic)
-            {
-                _nextCreatureDiagnostic = now + 5f;
-                var nearest = NearestCreatures(hostPlayer, 3);
-                _log.LogInfo(
-                    nearest.Count == 0
-                        ? $"[net] créatures : {_creatureCache.Length} dans le monde, aucune position lisible"
-                        : $"[net] créatures : {_creatureCache.Length} dans le monde, les plus proches du point " +
-                          $"{nearest[0].Reference.ToString("F1")} : " +
-                          $"{string.Join(", ", nearest.Select(entry => $"'{entry.Name}' à {entry.Meters:F1} m"))} " +
-                          $"(rayon de diffusion {Protocol.CreatureRelevancyRadiusMeters:F0} m)");
-            }
-
-            foreach (var recipientPair in _sessions)
-            {
-                var recipientSession = recipientPair.Value;
-                if (!recipientSession.Accepted)
-                {
-                    continue;
-                }
-
-                _creatureBuffer.Clear();
-                _creatureCandidates.Clear();
-
-                // Le relevancy est celui du **destinataire**, pas celui de l'hôte : un client ne peut
-                // suivre que les créatures qui existent dans son propre monde, et son monde n'a de
-                // cellules chargées qu'autour de son joueur à lui.
-                //
-                // La première version prenait la plus petite distance à l'un ou l'autre (client ou
-                // hôte) : mesuré, cela ne diffusait que des créatures proches de l'hôte, dont le monde
-                // du client n'avait qu'une poignée — 128 appariements sur 36 452 états, et un avatar de
-                // créature adopté puis relâché aussitôt. Le repli sur la position de l'hôte ne sert
-                // donc plus qu'à un client qui n'a pas encore annoncé la sienne (juste après le
-                // handshake), pour qu'il reçoive quelque chose plutôt que rien.
-                var interestX = recipientSession.PositionsReceived > 0 ? recipientSession.X : 0f;
-                var interestY = recipientSession.PositionsReceived > 0 ? recipientSession.Y : 0f;
-                var interestZ = recipientSession.PositionsReceived > 0 ? recipientSession.Z : 0f;
-                var fromSession = recipientSession.PositionsReceived > 0;
-
-                if (!fromSession && hostPlayer != null && hostPlayer.gameObject != null)
-                {
-                    var hostPosition = hostPlayer.transform.position;
-                    interestX = hostPosition.x;
-                    interestY = hostPosition.y;
-                    interestZ = hostPosition.z;
-                }
-
-                for (var i = 0; i < _creatureCache.Length; i++)
-                {
-                    var creature = _creatureCache[i];
-                    if (creature == null || creature.transform == null)
-                    {
-                        continue;
-                    }
-
-                    var position = creature.transform.position;
-                    var dx = position.x - interestX;
-                    var dy = position.y - interestY;
-                    var dz = position.z - interestZ;
-                    var distanceSquared = dx * dx + dy * dy + dz * dz;
-
-                    if (distanceSquared > radiusSquared)
-                    {
-                        continue;
-                    }
-
-                    _creatureCandidates.Add(new KeyValuePair<float, int>(distanceSquared, i));
-                }
-
-                if (_creatureCandidates.Count == 0)
-                {
-                    continue;
-                }
-
-                // Les plus proches d'abord : quand le plafond mord, ce sont les créatures du bout du
-                // rayon qui sont sacrifiées, pas celles devant le joueur.
-                _creatureCandidates.Sort((left, right) => left.Key.CompareTo(right.Key));
-
-                var asKeyed = 0;
-                var asSpawn = 0;
-                var refused = 0;
-                var sentChunks = 0;
-                var serverMetres = 0f;
-                var serverSeconds = 0f;
-                var maxServerMovedMeters = 0f;
-                var maxServerMovedSeconds = 0f;
-                var maxServerMovedLabel = "aucune";
-
-                // Jusqu'où la diffusion est allée dans la liste (triée du plus proche au plus loin) : la
-                // différence avec le nombre de candidates est le nombre de créatures **sacrifiées au
-                // plafond**, c'est-à-dire jamais envoyées — leur IA continue de tourner chez le client.
-                var reached = 0;
-
-                // Un paquet ne peut pas porter plus de `MaxCreatureStates` créatures : la liste part
-                // donc en plusieurs paquets, sinon la queue du rayon n'est jamais diffusée et les
-                // créatures déjà suivies sortent de la liste puis y reviennent (IA coupée/rétablie en
-                // boucle, mesuré une fois par seconde avant ce découpage).
-                for (var chunk = 0; chunk < CreatureChunksPerTick; chunk++)
-                {
-                    var start = chunk * Protocol.MaxCreatureStates;
-                    if (start >= _creatureCandidates.Count)
-                    {
-                        break;
-                    }
-
-                    _creatureBuffer.Clear();
-                    var end = System.Math.Min(start + Protocol.MaxCreatureStates, _creatureCandidates.Count);
-
-                    for (var i = start; i < end; i++)
-                    {
-                        var creature = _creatureCache[_creatureCandidates[i].Value];
-                        var key = CreatureIdentity.KeyOf(creature, out var mechanism);
-                        if (key == 0L)
-                        {
-                            // Sans clé, le client ne pourrait pas la reconnaître : la diffuser ferait
-                            // correspondre n'importe quoi. Elle est comptée, jamais inventée.
-                            refused++;
-                            continue;
-                        }
-
-                        if (mechanism == CreatureIdentity.MechanismUniqueId)
-                        {
-                            asKeyed++;
-                        }
-                        else
-                        {
-                            asSpawn++;
-                        }
-
-                        var transform = creature.transform;
-                        var position = transform.position;
-                        var rotation = transform.rotation;
-
-                        // Déplacement du serveur depuis la dernière diffusion de **cette** créature. Le rythme
-                        // réel est mesuré, pas supposé : la diffusion passe tous les
-                        // `CreatureStreamIntervalTicks` ticks, mais un paquet non fiable peut manquer.
-                        if (_lastSentPositions.TryGetValue(key, out var previous))
-                        {
-                            var seconds = now - previous.Realtime;
-                            if (seconds > 0.001f)
-                            {
-                                var metres = UnityEngine.Vector3.Distance(previous.Position, position);
-                                serverMetres = metres;
-                                serverSeconds = seconds;
-                                if (metres > maxServerMovedMeters)
-                                {
-                                    maxServerMovedMeters = metres;
-                                    maxServerMovedSeconds = seconds;
-                                    maxServerMovedLabel = creature.gameObject != null ? creature.gameObject.name : "?";
-                                }
-                            }
-                        }
-
-                        _lastSentPositions[key] = new SentPosition { Position = position, Realtime = now };
-
-                        _creatureBuffer.Add(new CreatureStateEntry
-                        {
-                            Key = key,
-                            X = position.x,
-                            Y = position.y,
-                            Z = position.z,
-                            RotX = rotation.x,
-                            RotY = rotation.y,
-                            RotZ = rotation.z,
-                            RotW = rotation.w,
-                        });
-                    }
-
-                    if (_creatureBuffer.Count == 0)
-                    {
-                        continue;
-                    }
-
-                    var snapshot = new CreatureSnapshotMessage
-                    {
-                        ServerTick = serverTick,
-                        Creatures = _creatureBuffer.ToArray(),
-                    };
-
-                    _writer.Reset();
-                    snapshot.Write(_writer);
-                    if (_writer.Length > Protocol.MaxUnreliablePayloadBytes)
-                    {
-                        _oversizedCreaturePackets++;
-                        if (_oversizedCreaturePackets <= 3)
-                        {
-                            _log.LogError(
-                                $"[net] paquet de créatures REFUSÉ : {_writer.Length} octets pour " +
-                                $"{_creatureBuffer.Count} créature(s), au-dessus de la limite non fiable de " +
-                                $"{Protocol.MaxUnreliablePayloadBytes} octets. LiteNetLib l'aurait jeté sans le dire " +
-                                "dans nos journaux.");
-                        }
-
-                        break;
-                    }
-
-                    recipientPair.Key.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.Unreliable);
-                    _creatureSnapshotsBroadcast++;
-                    _creatureStatesBroadcast += _creatureBuffer.Count;
-                    recipientSession.CreatureBytesSent += _writer.Length;
-                    recipientSession.CreatureStatesSent += _creatureBuffer.Count;
-                    recipientSession.CreaturePacketsSent++;
-                    reached = end;
-                    sentChunks++;
-                }
-
-                if (sentChunks == 0)
-                {
-                    continue;
-                }
-
-                if (now < recipientSession.NextCreatureReport)
-                {
-                    continue;
-                }
-
-                recipientSession.NextCreatureReport = now + CreatureReportSeconds;
-
-                // Clés partagées parmi les candidates : l'identité est-elle injective ? Un seul
-                // contre-exemple suffit à dire que « une clé = une créature » ne tient pas, et c'est
-                // l'hypothèse sur laquelle repose tout le suivi (cf. PLAN.md §28).
-                _creatureKeyTally.Clear();
-                var sharedKeys = 0;
-                for (var i = 0; i < _creatureCandidates.Count; i++)
-                {
-                    var candidate = _creatureCache[_creatureCandidates[i].Value];
-                    var candidateKey = CreatureIdentity.KeyOf(candidate, out _);
-                    if (candidateKey == 0L)
-                    {
-                        continue;
-                    }
-
-                    _creatureKeyTally.TryGetValue(candidateKey, out var already);
-                    if (already > 0)
-                    {
-                        sharedKeys++;
-                    }
-
-                    _creatureKeyTally[candidateKey] = already + 1;
-                }
-
-                var sacrificed = _creatureCandidates.Count - reached;
-
-                // La liste est triée du plus proche au plus loin, donc la première sacrifiée est la plus
-                // proche de toutes — c'est elle qui dit si le plafond mord dans ce que le joueur voit.
-                var closestSacrificed = sacrificed > 0
-                    ? (float)System.Math.Sqrt(_creatureCandidates[reached].Key)
-                    : 0f;
-
-                var bytesPerSecond = recipientSession.CreatureBytesSent / CreatureReportSeconds;
-
-                _log.LogInfo(
-                    $"[net] créatures : {_creatureCache.Length} dans le monde, " +
-                    $"{_creatureCandidates.Count} à moins de {Protocol.CreatureRelevancyRadiusMeters:F0} m " +
-                    // Le point d'intérêt est écrit parce que deux destinataires qui reçoivent des ensembles
-                    // différents ne disent rien tant qu'on ne sait pas **d'où** le rayon est compté :
-                    // position du client, ou repli sur l'hôte quand il n'en a pas encore annoncé.
-                    $"du point ({interestX:F1}, {interestY:F1}, {interestZ:F1}) " +
-                    $"[{(fromSession ? "position du client" : "repli position de l'hôte")}], " +
-                    $"{asSpawn + asKeyed} diffusée(s) en {sentChunks} paquet(s) à " +
-                    $"'{recipientSession.Username}'#{recipientSession.PlayerId} " +
-                    $"({asSpawn} par {CreatureIdentity.MechanismSpawnPosition}, " +
-                    $"{asKeyed} par {CreatureIdentity.MechanismUniqueId}, {refused} sans clé écartée(s)), " +
-                    $"{sacrificed} sacrifiée(s) au plafond de " +
-                    $"{CreatureChunksPerTick * Protocol.MaxCreatureStates}" +
-                    (CreatureChunksOverridden ? " (plafond ABAISSÉ pour éprouver la garde)" : string.Empty) +
-                    (sacrificed > 0 ? $" (la plus proche à {closestSacrificed:F0} m)" : string.Empty) + ", " +
-                    $"clés partagées={sharedKeys} (sur {_creatureCandidates.Count} candidates), " +
-                    // « non mesuré » et « 0 m » ne sont pas la même chose : le maximum vaut 0 quand aucune clé
-                    // n'a été diffusée deux fois dans la fenêtre (un destinataire qui vient de se connecter),
-                    // et l'annoncer comme « 0 m » ferait croire à un serveur immobile qui n'a pas été observé.
-                    (maxServerMovedSeconds > 0f
-                        ? $"déplacement serveur max={maxServerMovedMeters:F2} m en {maxServerMovedSeconds:F2} s " +
-                          $"({maxServerMovedMeters / maxServerMovedSeconds:F1} m/s, '{maxServerMovedLabel}'), "
-                        : "déplacement serveur : non mesuré (aucune clé diffusée deux fois dans la fenêtre), ") +
-                    $"débit={bytesPerSecond / 1024f:F1} Ko/s " +
-                    $"({recipientSession.CreatureStatesSent} état(s) en {recipientSession.CreaturePacketsSent} paquet(s) " +
-                    $"sur {CreatureReportSeconds:F0} s), " +
-                    $"total envoyé={_creatureSnapshotsBroadcast} snapshot(s) / {_creatureStatesBroadcast} état(s)" +
-                    (_oversizedCreaturePackets == 0
-                        ? string.Empty
-                        : $", {_oversizedCreaturePackets} paquet(s) REFUSÉ(S) pour dépassement de taille"));
-
-                // Le sacrifice est assumé : ce sont les créatures du **bout** du rayon (le tri est du plus
-                // proche au plus loin), dont l'IA continue de tourner chez le client. Mais si le plafond
-                // mord dans une créature que le joueur a sous les yeux, ce n'est plus le même compromis —
-                // et c'est exactement le genre de bascule qui ne doit pas se produire en silence.
-                if (sacrificed > 0 && closestSacrificed < CloseSacrificeMeters && _closeSacrificeWarnings < 3)
-                {
-                    _closeSacrificeWarnings++;
-                    _log.LogWarning(
-                        $"[net] créatures : une créature à {closestSacrificed:F0} m n'est PAS diffusée à " +
-                        $"'{recipientSession.Username}'#{recipientSession.PlayerId} — le plafond de " +
-                        $"{CreatureChunksPerTick * Protocol.MaxCreatureStates} est atteint alors que " +
-                        $"{_creatureCandidates.Count} créatures sont dans le rayon. Le compromis « on ne suit que " +
-                        "le proche » ne tient plus : il faut changer le plafond ou le rayon.");
-                }
-
-                recipientSession.CreatureBytesSent = 0;
-                recipientSession.CreatureStatesSent = 0;
-                recipientSession.CreaturePacketsSent = 0;
-            }
-        }
-
         /// <summary>
         /// Diffuse l'état des véhicules du monde serveur (M4), à la même cadence que les créatures.
         ///
@@ -2754,146 +1044,6 @@ namespace Coop.Server
         /// Une entité sans identifiant n'est pas annoncée : le client ne pourrait pas la faire correspondre,
         /// et une entité en double est pire qu'une entité absente. C'est journalisé.
         /// </summary>
-        private void BroadcastNewVehicles()
-        {
-            if (_vehicleCache == null)
-            {
-                return;
-            }
-
-            var baseline = !_vehicleBaselineDone;
-            _vehicleBaselineDone = true;
-            var announced = 0;
-            var present = new HashSet<long>();
-
-            foreach (var vehicle in _vehicleCache)
-            {
-                if (vehicle == null || vehicle.gameObject == null)
-                {
-                    continue;
-                }
-
-                var key = VehicleIdentity.KeyOf(vehicle, out _);
-                if (key != 0L)
-                {
-                    present.Add(key);
-                }
-
-                if (key == 0L || !_knownVehicles.Add(key))
-                {
-                    continue;
-                }
-
-                if (baseline)
-                {
-                    continue;
-                }
-
-                if (!VehicleIdentity.TryGetUniqueId(vehicle, out var uniqueId))
-                {
-                    _log.LogWarning(
-                        $"[net] apparition : '{vehicle.gameObject.name}' (clé=0x{key:x16}) sans identifiant " +
-                        "d'entité — NON annoncée : le client ne pourrait pas la faire correspondre.");
-                    continue;
-                }
-
-                // `CraftData.GetTechType` lit le `TechTag` du prefab : c'est l'espèce (`SeaMoth`), pas le nom
-                // de l'instance (`SeaMoth(Clone)`), et c'est ce que le client sait résoudre pour instancier.
-                var tech = CraftData.GetTechType(vehicle.gameObject).ToString();
-                if (tech.Length > Protocol.MaxTechTypeNameLength)
-                {
-                    _log.LogWarning(
-                        $"[net] apparition : nom d'espèce trop long pour '{vehicle.gameObject.name}' — non annoncée.");
-                    continue;
-                }
-
-                var transform = vehicle.transform;
-                var position = transform != null ? transform.position : UnityEngine.Vector3.zero;
-                var rotation = transform != null ? transform.rotation : UnityEngine.Quaternion.identity;
-
-                // P1bis : la définition voyage avec l'annonce, et son empreinte est vérifiable.
-                // Un véhicule du jeu a une échelle neutre ; le contrat existe pour que le client
-                // puisse **refuser** une définition divergente au lieu de la supposer.
-                var definition = EntityDefinition.ForVehicle(tech);
-
-                var message = new EntitySpawnMessage
-                {
-                    Key = key,
-                    UniqueId = uniqueId,
-                    TechTypeName = tech,
-                    X = position.x,
-                    Y = position.y,
-                    Z = position.z,
-                    RotX = rotation.x,
-                    RotY = rotation.y,
-                    RotZ = rotation.z,
-                    RotW = rotation.w,
-                    ScaleX = definition.ScaleX,
-                    ScaleY = definition.ScaleY,
-                    ScaleZ = definition.ScaleZ,
-                    DefinitionHash = definition.ComputeHash(),
-                };
-
-                // Mémorisé **avant** l'envoi : un client qui se connecte pendant la diffusion doit trouver
-                // l'entité dans le carnet, sinon il ne la verrait jamais.
-                RememberSpawn(message);
-
-                var sent = 0;
-                foreach (var pair in _sessions)
-                {
-                    if (!pair.Value.Accepted)
-                    {
-                        continue;
-                    }
-
-                    Send(pair.Key, message.Write, DeliveryMethod.ReliableOrdered);
-                    sent++;
-                }
-
-                _entitySpawnsSent++;
-                announced++;
-
-                _log.LogInfo(
-                    $"[net] apparition : clé=0x{key:x16} '{vehicle.gameObject.name}' ({tech}) — " +
-                    $"diffusée à {sent} client(s), pos=({position.x:F1}, {position.y:F1}, {position.z:F1}), " +
-                    $"identité '{uniqueId}', définition=0x{message.DefinitionHash:x16}.");
-            }
-
-            if (announced > 0)
-            {
-                _log.LogInfo($"[net] apparition : {announced} entité(s) annoncée(s) ce balayage.");
-            }
-
-            // Les modules sont diffusés **avant** la détection de disparition : un module posé sur un
-            // véhicule qui vient d'apparaître ce balayage doit être annoncé, et l'ensemble périmé d'un
-            // véhicule détruit est oublié dans la boucle ci-dessous.
-            BroadcastVehicleUpgrades();
-
-            // Les clés connues qui ne sont plus dans le monde ont **disparu** : on les annonce (v11).
-            // Sans ce balayage, un véhicule détruit chez l'hôte restait chez tous les clients, immobile.
-            // Le premier passage ne peut rien annoncer : `_knownVehicles` vient d'être rempli.
-            List<long> vanished = null;
-            foreach (var known in _knownVehicles)
-            {
-                if (!present.Contains(known))
-                {
-                    (vanished ?? (vanished = new List<long>())).Add(known);
-                }
-            }
-
-            if (vanished == null)
-            {
-                return;
-            }
-
-            foreach (var key in vanished)
-            {
-                _knownVehicles.Remove(key);
-                _vehicleUpgrades.Remove(key);
-                BroadcastDespawn(key, EntityKind.Vehicle, "véhicule détruit chez le serveur");
-            }
-        }
-
         /// <summary>
         /// Annonce une disparition à **tous** les clients admis (v11, M6), et oublie l'entité du carnet.
         ///
@@ -2908,75 +1058,7 @@ namespace Coop.Server
         /// vrai (mesuré à l'étape L : `accordée=True` côté serveur, `objet dans l'inventaire=False` côté
         /// client).
         /// </param>
-        private void BroadcastDespawn(long key, byte kind, string reason, ushort exceptPlayerId = 0)
-        {
-            if (key == 0L)
-            {
-                return;
-            }
-
-            // Une entité disparue ne doit plus être rejouée à un client qui se connecte après coup.
-            _spawnedEntities.Remove(key);
-
-            var message = new EntityDespawnMessage
-            {
-                Key = key,
-                Kind = kind,
-                Reason = reason,
-            };
-
-            RememberDespawn(message);
-
-            var sent = 0;
-            foreach (var pair in _sessions)
-            {
-                if (!pair.Value.Accepted)
-                {
-                    continue;
-                }
-
-                if (exceptPlayerId != 0 && pair.Value.PlayerId == exceptPlayerId)
-                {
-                    continue;
-                }
-
-                Send(pair.Key, message.Write, DeliveryMethod.ReliableOrdered);
-                sent++;
-            }
-
-            _entityDespawnsSent++;
-
-            var what = kind == EntityKind.Vehicle ? "véhicule" : "objet";
-            _log.LogInfo(
-                $"[net] disparition : clé=0x{key:x16} ({what}) — annoncée à {sent} client(s), motif « {reason} »" +
-                (exceptPlayerId != 0 ? $", sauf au détenteur (id {exceptPlayerId})" : string.Empty) + ".");
-        }
-
-
         /// <summary>Range une annonce dans le carnet, en évinçant la plus ancienne au-delà de la borne.</summary>
-        private void RememberSpawn(EntitySpawnMessage message)
-        {
-            if (!_spawnedEntities.ContainsKey(message.Key))
-            {
-                if (_spawnOrder.Count >= MaxRememberedSpawns)
-                {
-                    var oldest = _spawnOrder.Dequeue();
-                    _spawnedEntities.Remove(oldest);
-                    _log.LogWarning(
-                        $"[net] apparition : carnet plein ({MaxRememberedSpawns}) — clé=0x{oldest:x16} oubliée " +
-                        "(un client qui se connecte maintenant ne la recevra pas).");
-                }
-
-                _spawnOrder.Enqueue(message.Key);
-            }
-
-            _spawnedEntities[message.Key] = message;
-
-            // Une clé qui réapparaît n'est plus « disparue » : le carnet de retraits doit oublier
-            // l'ancienne annonce, sinon le client recréerait puis retirerait la même entité.
-            _despawnedEntities.Remove(message.Key);
-        }
-
         /// <summary>
         /// Range un retrait dans le carnet, borné comme celui des apparitions.
         ///
@@ -2985,33 +1067,6 @@ namespace Coop.Server
         /// serveur l'a déjà accordé à quelqu'un. C'est le défaut que la v11 avait fermé pour les
         /// clients présents, et qui restait ouvert pour les suivants (P2).
         /// </summary>
-        private void RememberDespawn(EntityDespawnMessage message)
-        {
-            if (message == null || message.Key == 0L)
-            {
-                return;
-            }
-
-            // Une clé peut réapparaître puis disparaître de nouveau : la file ne doit pas la contenir
-            // deux fois, sinon une éviction consommerait un créneau sans rien retirer et le carnet
-            // grossirait au-delà de sa borne. 256 entrées au plus, donc `Contains` est sans coût notable.
-            if (!_despawnedEntities.ContainsKey(message.Key) && !_despawnOrder.Contains(message.Key))
-            {
-                if (_despawnOrder.Count >= MaxRememberedDespawns)
-                {
-                    var oldest = _despawnOrder.Dequeue();
-                    _despawnedEntities.Remove(oldest);
-                    _log.LogWarning(
-                        $"[net] disparition : carnet plein ({MaxRememberedDespawns}) — clé=0x{oldest:x16} oubliée " +
-                        "(un client qui se connecte maintenant ne la recevra pas).");
-                }
-
-                _despawnOrder.Enqueue(message.Key);
-            }
-
-            _despawnedEntities[message.Key] = message;
-        }
-
         /// <summary>
         /// Rejoue à un client qui vient d'être admis les entités fabriquées avant son arrivée.
         ///
@@ -3019,71 +1074,10 @@ namespace Coop.Server
         /// même partie), une entité **fabriquée** non. Mesuré à l'étape N : le deuxième client se connecte
         /// après l'annonce et ne reçoit rien — verdict False à 150 s, alors que le premier a tout créé.
         /// </summary>
-        private void SendSpawnedEntities(NetPeer peer, ClientSession session)
-        {
-            if (_spawnedEntities.Count > 0)
-            {
-                foreach (var message in _spawnedEntities.Values)
-                {
-                    Send(peer, message.Write, DeliveryMethod.ReliableOrdered);
-                    _entitySpawnsReplayed++;
-                }
-
-                _log.LogInfo(
-                    $"[net] apparition : {_spawnedEntities.Count} entité(s) fabriquée(s) rejouée(s) pour " +
-                    $"'{session.Username}'#{session.PlayerId} (arrivé après leur création).");
-            }
-
-            // Modules installés depuis le démarrage du serveur : le client qui arrive charge la même
-            // sauvegarde, donc il voit les modules **écrits dans la partie**, mais pas ceux installés en
-            // jeu après la dernière sauvegarde. Ils sont rejoués avant les retraits, comme le carnet
-            // d'apparitions avant celui des retraits : le client qui reçoit une entité doit déjà savoir
-            // dans quel état elle est (v15).
-            if (_vehicleUpgrades.Count > 0)
-            {
-                foreach (var message in _vehicleUpgrades.Values)
-                {
-                    Send(peer, message.Write, DeliveryMethod.ReliableOrdered);
-                    _vehicleUpgradesReplayed++;
-                }
-
-                _log.LogInfo(
-                    $"[net] modules : {_vehicleUpgrades.Count} ensemble(s) rejoué(s) pour " +
-                    $"'{session.Username}'#{session.PlayerId} (installés avant son arrivée).");
-            }
-
-            // P2 : le pendant des retraits. Il est indépendant du carnet d'apparitions — une session
-            // peut n'avoir que des retraits à rejouer (objet ramassé avant qu'elle n'arrive).
-            if (_despawnedEntities.Count == 0)
-            {
-                return;
-            }
-
-            foreach (var message in _despawnedEntities.Values)
-            {
-                Send(peer, message.Write, DeliveryMethod.ReliableOrdered);
-                _entityDespawnsReplayed++;
-            }
-
-            _log.LogInfo(
-                $"[net] disparition : {_despawnedEntities.Count} entité(s) disparue(s) rejouée(s) pour " +
-                $"'{session.Username}'#{session.PlayerId} (arrivé après leur retrait).");
-        }
-
-
         /// <summary>
         /// Charge normalisée d'un véhicule (M4, v14), ou -1 si le composant est absent : un véhicule
         /// sans batterie ne doit pas être annoncé « à plat ». Le sentinelle -1 est écrit tel quel.
         /// </summary>
-        private static float ReadVehicleEnergy(Vehicle vehicle)
-        {
-            // La conversion absolu -> normalisé vit dans `VehicleModules` (Shared), pour que le client
-            // applique exactement la même échelle. La v14 la faisait ici, avec `EnergyMixin.charge` brut :
-            // mesuré au run du 2026-10-20, un Seamoth y vaut `200`, donc la borne `> 1` transformait
-            // toute batterie pleine en `1` et toute batterie à moitié en `1` aussi.
-            return VehicleModules.ReadNormalized(vehicle);
-        }
-
         /// <summary>
         /// Diffuse les modules **installés** sur chaque véhicule connu (v15, M4), et seulement quand
         /// l'ensemble a changé.
@@ -3094,274 +1088,6 @@ namespace Coop.Server
         /// l'ordre d'itération de l'équipement du jeu n'est pas garanti, et deux ensembles identiques doivent
         /// produire le même message.
         /// </summary>
-        private void BroadcastVehicleUpgrades()
-        {
-            if (_vehicleCache == null || _vehicleCache.Length == 0)
-            {
-                return;
-            }
-
-            foreach (var vehicle in _vehicleCache)
-            {
-                if (vehicle == null || vehicle.gameObject == null)
-                {
-                    continue;
-                }
-
-                var key = VehicleIdentity.KeyOf(vehicle, out _);
-                if (key == 0L)
-                {
-                    // Même règle que pour la position : un véhicule sans identité partagée ne peut pas
-                    // recevoir de modules, puisque le client ne saurait pas lesquels.
-                    continue;
-                }
-
-                var types = VehicleModules.Read(vehicle);
-                _vehicleUpgrades.TryGetValue(key, out var previous);
-                if (previous != null && VehicleUpgradesMessage.SameSet(previous.TechTypes, types))
-                {
-                    continue;
-                }
-
-                var message = new VehicleUpgradesMessage
-                {
-                    VehicleKey = key,
-                    TechTypes = types,
-                };
-
-                // Mémorisé **avant** l'envoi : un client qui se connecte pendant la diffusion doit
-                // trouver l'ensemble dans le carnet, sinon il ne le recevrait jamais.
-                _vehicleUpgrades[key] = message;
-
-                if (previous == null && types.Length == 0)
-                {
-                    // Premier balayage d'un véhicule sans module : rien à annoncer, et l'annoncer à
-                    // chaque démarrage userait le canal fiable pour un état vide qui est déjà le défaut.
-                    continue;
-                }
-
-                var sent = 0;
-                foreach (var pair in _sessions)
-                {
-                    if (!pair.Value.Accepted)
-                    {
-                        continue;
-                    }
-
-                    Send(pair.Key, message.Write, DeliveryMethod.ReliableOrdered);
-                    sent++;
-                }
-
-                _vehicleUpgradesBroadcast++;
-
-                var names = VehicleModules.Describe(types, out var count);
-                _log.LogInfo(
-                    $"[net] modules : clé=0x{key:x16} '{vehicle.gameObject.name}' — {count} module(s) " +
-                    $"[{names}] {(previous == null ? "annoncés" : "mis à jour")} à {sent} client(s).");
-            }
-        }
-
-        private void BroadcastVehicleSnapshots(long serverTick, Player hostPlayer)
-        {
-            // Un volant que plus personne n'envoie doit redevenir libre avant le calcul des diffusés :
-            // sans ça, `conduits localement` resterait vrai chez les autres clients indéfiniment.
-            ReleaseSilentDrivers();
-
-            var now = UnityEngine.Time.realtimeSinceStartup;
-            if (_vehicleCache == null || now - _vehicleCacheRealtime >= VehicleCacheSeconds)
-            {
-                _vehicleCache = UnityEngine.Object.FindObjectsOfType<Vehicle>();
-                _vehicleCacheRealtime = now;
-                ReportVehicleIdentities();
-                BroadcastNewVehicles();
-            }
-
-            if (_vehicleCache == null || _vehicleCache.Length == 0)
-            {
-                return;
-            }
-
-            var radiusSquared =
-                Protocol.VehicleRelevancyRadiusMeters * Protocol.VehicleRelevancyRadiusMeters;
-
-            foreach (var recipientPair in _sessions)
-            {
-                var recipientSession = recipientPair.Value;
-                if (!recipientSession.Accepted)
-                {
-                    continue;
-                }
-
-                // Même règle que pour les créatures : le relevancy est celui du **destinataire**. Un
-                // client ne peut suivre que les véhicules de son propre monde, et son monde n'a de
-                // cellules chargées qu'autour de lui. Repli sur l'hôte tant qu'il n'a pas annoncé sa
-                // position (juste après le handshake), pour qu'il reçoive quelque chose plutôt que rien.
-                var interestX = recipientSession.PositionsReceived > 0 ? recipientSession.X : 0f;
-                var interestY = recipientSession.PositionsReceived > 0 ? recipientSession.Y : 0f;
-                var interestZ = recipientSession.PositionsReceived > 0 ? recipientSession.Z : 0f;
-                var fromSession = recipientSession.PositionsReceived > 0;
-
-                if (!fromSession && hostPlayer != null && hostPlayer.gameObject != null)
-                {
-                    var hostPosition = hostPlayer.transform.position;
-                    interestX = hostPosition.x;
-                    interestY = hostPosition.y;
-                    interestZ = hostPosition.z;
-                }
-
-                _vehicleCandidates.Clear();
-                for (var i = 0; i < _vehicleCache.Length; i++)
-                {
-                    var vehicle = _vehicleCache[i];
-                    if (vehicle == null || vehicle.transform == null)
-                    {
-                        continue;
-                    }
-
-                    var position = vehicle.transform.position;
-                    var dx = position.x - interestX;
-                    var dy = position.y - interestY;
-                    var dz = position.z - interestZ;
-                    var distanceSquared = dx * dx + dy * dy + dz * dz;
-
-                    if (distanceSquared > radiusSquared)
-                    {
-                        continue;
-                    }
-
-                    _vehicleCandidates.Add(new KeyValuePair<float, int>(distanceSquared, i));
-                }
-
-                if (_vehicleCandidates.Count == 0)
-                {
-                    continue;
-                }
-
-                // Les plus proches d'abord : si le plafond mord un jour, ce sont les véhicules du bout
-                // du rayon qui sont écartés, pas celui devant le joueur.
-                _vehicleCandidates.Sort((left, right) => left.Key.CompareTo(right.Key));
-
-                _vehicleBuffer.Clear();
-                var asUniqueId = 0;
-                var asAnchor = 0;
-                var withoutKey = 0;
-
-                for (var i = 0; i < _vehicleCandidates.Count && i < Protocol.MaxVehicleStates; i++)
-                {
-                    var vehicle = _vehicleCache[_vehicleCandidates[i].Value];
-                    var key = VehicleIdentity.KeyOf(vehicle, out var mechanism);
-                    if (key == 0L)
-                    {
-                        withoutKey++;
-                        _vehiclesWithoutKey++;
-                        continue;
-                    }
-
-                    if (mechanism == VehicleIdentity.MechanismUniqueId)
-                    {
-                        asUniqueId++;
-                    }
-                    else
-                    {
-                        asAnchor++;
-                    }
-
-                    var transform = vehicle.transform;
-                    var position = transform.position;
-                    var rotation = transform.rotation;
-
-                    _vehicleBuffer.Add(new VehicleStateEntry
-                    {
-                        Key = key,
-                        Energy = ReadVehicleEnergy(vehicle),
-                        X = position.x,
-                        Y = position.y,
-                        Z = position.z,
-                        RotX = rotation.x,
-                        RotY = rotation.y,
-                        RotZ = rotation.z,
-                        RotW = rotation.w,
-                    });
-                }
-
-                if (_vehicleBuffer.Count == 0)
-                {
-                    if (withoutKey > 0 && now >= recipientSession.NextVehicleReport)
-                    {
-                        recipientSession.NextVehicleReport = now + VehicleStreamReportSeconds;
-                        _log.LogWarning(
-                            $"[net] véhicules : {withoutKey} véhicule(s) à moins de " +
-                            $"{Protocol.VehicleRelevancyRadiusMeters:F0} m de " +
-                            $"'{recipientSession.Username}'#{recipientSession.PlayerId} n'ont **aucune clé** — " +
-                            "le protocole les a écartés plutôt que de les confondre avec un autre.");
-                    }
-
-                    continue;
-                }
-
-                var snapshot = new VehicleSnapshotMessage
-                {
-                    ServerTick = serverTick,
-                    Vehicles = _vehicleBuffer.ToArray(),
-                };
-
-                _writer.Reset();
-                snapshot.Write(_writer);
-                if (_writer.Length > Protocol.MaxUnreliablePayloadBytes)
-                {
-                    _oversizedVehiclePackets++;
-                    if (_oversizedVehiclePackets <= 3)
-                    {
-                        _log.LogError(
-                            $"[net] paquet de véhicules REFUSÉ : {_writer.Length} octets pour " +
-                            $"{_vehicleBuffer.Count} véhicule(s), au-dessus de la limite non fiable de " +
-                            $"{Protocol.MaxUnreliablePayloadBytes} octets. LiteNetLib l'aurait jeté sans le dire " +
-                            "dans nos journaux.");
-                    }
-
-                    continue;
-                }
-
-                recipientPair.Key.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.Unreliable);
-                _vehicleSnapshotsBroadcast++;
-                _vehicleStatesBroadcast += _vehicleBuffer.Count;
-                recipientSession.VehicleBytesSent += _writer.Length;
-                recipientSession.VehicleStatesSent += _vehicleBuffer.Count;
-                recipientSession.VehiclePacketsSent++;
-
-                if (now < recipientSession.NextVehicleReport)
-                {
-                    continue;
-                }
-
-                recipientSession.NextVehicleReport = now + VehicleStreamReportSeconds;
-
-                var truncated = System.Math.Max(0, _vehicleCandidates.Count - Protocol.MaxVehicleStates);
-                var bytesPerSecond = recipientSession.VehicleBytesSent / VehicleStreamReportSeconds;
-
-                _log.LogInfo(
-                    $"[net] véhicules : {_vehicleCache.Length} dans le monde, " +
-                    $"{_vehicleCandidates.Count} à moins de {Protocol.VehicleRelevancyRadiusMeters:F0} m " +
-                    $"du point ({interestX:F1}, {interestY:F1}, {interestZ:F1}) " +
-                    $"[{(fromSession ? "position du client" : "repli position de l'hôte")}], " +
-                    $"{_vehicleBuffer.Count} diffusé(s) à '{recipientSession.Username}'#{recipientSession.PlayerId} " +
-                    $"({asUniqueId} par {VehicleIdentity.MechanismUniqueId}, {asAnchor} par " +
-                    $"{VehicleIdentity.MechanismSpawnPosition}, {withoutKey} sans clé écarté(s))" +
-                    (truncated > 0 ? $", {truncated} au-delà du plafond de {Protocol.MaxVehicleStates}" : string.Empty) +
-                    $", débit={bytesPerSecond / 1024f:F1} Ko/s " +
-                    $"({recipientSession.VehicleStatesSent} état(s) en {recipientSession.VehiclePacketsSent} paquet(s) " +
-                    $"sur {VehicleStreamReportSeconds:F0} s), total envoyé={_vehicleSnapshotsBroadcast} snapshot(s) / " +
-                    $"{_vehicleStatesBroadcast} état(s)" +
-                    (_oversizedVehiclePackets == 0
-                        ? string.Empty
-                        : $", {_oversizedVehiclePackets} paquet(s) REFUSÉ(S) pour dépassement de taille"));
-
-                recipientSession.VehicleBytesSent = 0;
-                recipientSession.VehicleStatesSent = 0;
-                recipientSession.VehiclePacketsSent = 0;
-            }
-        }
-
         /// <summary>
         /// Journalise **une fois** de quoi sont faites les identités des véhicules du monde.
         ///
@@ -3370,61 +1096,6 @@ namespace Coop.Server
         /// d'apparition, la synchronisation dépend de l'instant où les deux instances les ont vus — et
         /// c'est écrit, pas supposé.
         /// </summary>
-        private void ReportVehicleIdentities()
-        {
-            var cached = _vehicleCache ?? Array.Empty<Vehicle>();
-            var byUniqueId = 0;
-            var byAnchor = 0;
-            var none = 0;
-            var names = new List<string>();
-
-            for (var i = 0; i < cached.Length; i++)
-            {
-                var vehicle = cached[i];
-                if (vehicle == null)
-                {
-                    continue;
-                }
-
-                var key = VehicleIdentity.KeyOf(vehicle, out var mechanism);
-                if (key == 0L || mechanism == VehicleIdentity.MechanismNone)
-                {
-                    none++;
-                }
-                else if (mechanism == VehicleIdentity.MechanismUniqueId)
-                {
-                    byUniqueId++;
-                }
-                else
-                {
-                    byAnchor++;
-                }
-
-                if (names.Count < 4)
-                {
-                    names.Add(VehicleIdentity.Describe(vehicle));
-                }
-            }
-
-            var report =
-                $"{cached.Length} véhicule(s) : {byUniqueId} par {VehicleIdentity.MechanismUniqueId}, " +
-                $"{byAnchor} par {VehicleIdentity.MechanismSpawnPosition}, {none} sans clé" +
-                (names.Count == 0 ? string.Empty : $" — {string.Join(" · ", names)}");
-
-            if (cached.Length == 0)
-            {
-                report = "aucun véhicule dans le monde";
-            }
-
-            if (string.Equals(report, _lastVehicleIdentityReport, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            _lastVehicleIdentityReport = report;
-            _log.LogInfo($"[net] identités de véhicules : {report}");
-        }
-
         /// <summary>
         /// Distance (m) de la créature la plus proche d'un point de référence, et son nom.
         ///
@@ -3490,7 +1161,6 @@ namespace Coop.Server
 
             return result;
         }
-
         /// <summary>
         /// Journalise **une fois** de quoi sont faites les identités des créatures du monde.
         ///
@@ -3509,100 +1179,6 @@ namespace Coop.Server
         /// mesurée avant d'en avoir fait apparaître un, et mieux vaut l'apprendre par une ligne de journal
         /// que par un run qui ne mesure rien.
         /// </summary>
-        private void ReportVehicles(Player hostPlayer, float now)
-        {
-            if (now < _nextVehicleDiagnostic)
-            {
-                return;
-            }
-
-            _nextVehicleDiagnostic = now + VehicleReportSeconds;
-
-            var vehicles = UnityEngine.Object.FindObjectsOfType<Vehicle>();
-            if (vehicles == null || vehicles.Length == 0)
-            {
-                _log.LogInfo(
-                    "[net] véhicules : aucun dans le monde — M4 (Seamoth autoritaire) n'a donc **rien à mesurer** " +
-                    "dans cette sauvegarde : le flux `VehicleSnapshot` n'enverra rien tant qu'un véhicule n'y " +
-                    "apparaît pas (cadence et interpolation sont tranchées par la mesure du §30, appliquées au §33).");
-                return;
-            }
-
-            // Les trois plus proches de l'hôte, nommées et situées : c'est assez pour savoir si M4 a de quoi
-            // mesurer. Leur **vitesse** n'est pas relevée ici, et c'est délibéré : un véhicule immobile
-            // donnerait `0 m/s` — un chiffre qui n'apprend rien et qu'on prendrait pour une mesure. Elle
-            // viendra d'un état de véhicule, le jour où il y en aura un à suivre.
-            var nearest = vehicles
-                .Where(vehicle => vehicle != null && vehicle.transform != null)
-                .Select(vehicle => new
-                {
-                    Name = vehicle.name,
-                    Distance = hostPlayer != null && hostPlayer.transform != null
-                        ? UnityEngine.Vector3.Distance(hostPlayer.transform.position, vehicle.transform.position)
-                        : 0f,
-                })
-                .OrderBy(entry => entry.Distance)
-                .Take(3)
-                .Select(entry =>
-                    $"'{entry.Name}' à {entry.Distance.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} m");
-
-            _log.LogInfo(
-                $"[net] véhicules : {vehicles.Length} dans le monde, les plus proches de l'hôte : " +
-                $"{string.Join(", ", nearest)}. Un véhicule à 20 m/s balaie 2 m par annonce à 10 Hz : c'est le " +
-                "pas que l'interpolation cliente doit absorber (mesuré au §33 : 0,27 m par image au maximum).");
-        }
-
-        private void ReportCreatureIdentities()
-        {
-            var cached = _creatureCache ?? Array.Empty<Creature>();
-            var byUniqueId = 0;
-            var bySpawn = 0;
-            var none = 0;
-            var withoutKeyNames = new List<string>();
-
-            for (var i = 0; i < cached.Length; i++)
-            {
-                var creature = cached[i];
-                if (creature == null)
-                {
-                    continue;
-                }
-
-                CreatureIdentity.KeyOf(creature, out var mechanism);
-                if (mechanism == CreatureIdentity.MechanismUniqueId)
-                {
-                    byUniqueId++;
-                }
-                else if (mechanism == CreatureIdentity.MechanismSpawnPosition)
-                {
-                    bySpawn++;
-                }
-                else
-                {
-                    none++;
-                    if (withoutKeyNames.Count < 5 && creature.gameObject != null)
-                    {
-                        withoutKeyNames.Add(creature.gameObject.name);
-                    }
-                }
-            }
-
-            var report =
-                $"{cached.Length} créature(s) : {bySpawn} par {CreatureIdentity.MechanismSpawnPosition}, " +
-                $"{byUniqueId} par {CreatureIdentity.MechanismUniqueId}, {none} sans clé" +
-                (withoutKeyNames.Count == 0
-                    ? string.Empty
-                    : $" (ex. : {string.Join(", ", withoutKeyNames)})");
-
-            if (string.Equals(report, _lastCreatureIdentityReport, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            _lastCreatureIdentityReport = report;
-            _log.LogInfo($"[net] identités de créatures : {report}");
-        }
-
         private void Send(NetPeer peer, Action<PacketWriter> write, DeliveryMethod method)
         {
             _writer.Reset();
@@ -3615,7 +1191,6 @@ namespace Coop.Server
     internal static class ServerClock
     {
         private static readonly System.Diagnostics.Stopwatch Watch = System.Diagnostics.Stopwatch.StartNew();
-
         public static long Milliseconds => Watch.ElapsedMilliseconds;
     }
 }

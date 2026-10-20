@@ -54,6 +54,15 @@ dans la colonne de droite et n'invalident pas le critère.
 | Ses réclamations redeviennent réclamables, sans fantôme | `réclamation(s) libérée(s) par la déconnexion de 'killi'#2` + `aucune clé n'est plus refusée au nom du joueur parti` | étape **U** de `tools/verify.sh` | prouvé (2026-10-20, étape U) |
 
 
+### P5 : découpage de `ServerNetwork`, sans changement de comportement (2026-10-20)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| Aucune ligne n'a été perdue ni dupliquée par le découpage | comparaison des multiplicités de lignes : **3 098** de part et d'autre, `manquantes: 0`, `en trop: 0` | script de découpage, `PLAN.md` §58.2 | vérifié (2026-10-20) |
+| Le comportement est inchangé (présence et véhicules) | `étape B : OK (110s)`, `étape J : OK (152s)`, `VERDICT GLOBAL : tout est vert` | `tools/verify.sh --only=B,J` | prouvé (2026-10-20) |
+| Aucun message ni champ n'a été ajouté par le découpage | `dotnet test` **296/296**, une seule classe `partial` | `src/Coop.Server/ServerNetwork*.cs` | vérifié (2026-10-20) |
+
+
 ## 1. Fondations : le mod démarre, le réseau parle, les journaux sont séparés
 
 | Affirmation | Instrument | Source | Statut |
