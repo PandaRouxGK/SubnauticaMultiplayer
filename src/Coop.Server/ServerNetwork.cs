@@ -3032,6 +3032,38 @@ namespace Coop.Server
                 $"'{session.Username}'#{session.PlayerId} (arrivé après leur retrait).");
         }
 
+
+        /// <summary>
+        /// Charge normalisée d'un véhicule (M4, v14), ou -1 si le composant est absent : un véhicule
+        /// sans batterie ne doit pas être annoncé « à plat ». Le sentinelle -1 est écrit tel quel.
+        /// </summary>
+        private static float ReadVehicleEnergy(Vehicle vehicle)
+        {
+            if (vehicle == null)
+            {
+                return -1f;
+            }
+
+            try
+            {
+                var mixin = vehicle.GetComponent<EnergyMixin>();
+                if (mixin == null)
+                {
+                    return -1f;
+                }
+
+                var charge = mixin.charge;
+                return charge < 0f ? 0f : (charge > 1f ? 1f : charge);
+            }
+            catch (System.Exception exception)
+            {
+                // Un véhicule en cours de destruction peut lever : l'absence d'énergie est une
+                // information valide (-1), pas une raison de perdre tout le snapshot.
+                UnityEngine.Debug.LogWarning($"[net] énergie de véhicule illisible : {exception.Message}");
+                return -1f;
+            }
+        }
+
         private void BroadcastVehicleSnapshots(long serverTick, Player hostPlayer)
         {
             // Un volant que plus personne n'envoie doit redevenir libre avant le calcul des diffusés :
@@ -3144,6 +3176,7 @@ namespace Coop.Server
                     _vehicleBuffer.Add(new VehicleStateEntry
                     {
                         Key = key,
+                        Energy = ReadVehicleEnergy(vehicle),
                         X = position.x,
                         Y = position.y,
                         Z = position.z,

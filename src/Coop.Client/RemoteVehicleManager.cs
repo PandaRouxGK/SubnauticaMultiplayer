@@ -313,6 +313,8 @@ namespace Coop.Client
                     entry.SegmentDuration = MinSegmentSeconds;
                 }
 
+                ApplyEnergy(entry, state.Energy);
+
                 entry.To = position;
                 entry.ToRotation = rotation;
                 entry.LastStateRealtime = now;
@@ -479,6 +481,44 @@ namespace Coop.Client
             _tracked.Clear();
         }
 
+
+        private int _energiesApplied;
+
+        /// <summary>
+        /// Applique la charge annoncée (v14). `-1` veut dire « inconnue » (pas de batterie) : on ne
+        /// touche à rien. L'écriture n'a lieu que si l'écart dépasse 1 %, pour ne pas réécrire la même
+        /// valeur dix fois par seconde.
+        /// </summary>
+        private void ApplyEnergy(Tracked entry, float energy)
+        {
+            if (energy < 0f || entry.Vehicle == null)
+            {
+                return;
+            }
+
+            var mixin = entry.Vehicle.GetComponent<EnergyMixin>();
+            if (mixin == null)
+            {
+                return;
+            }
+
+            if (Mathf.Abs(mixin.charge - energy) < 0.01f)
+            {
+                return;
+            }
+
+            // `charge` est une propriété **lecture seule** ; l'API du jeu expose `ModifyCharge`
+            // (unités absolues) et `capacity` (échelle). On convertit l'écart normalisé en unités.
+            var capacity = mixin.capacity;
+            if (capacity <= 0.001f)
+            {
+                return;
+            }
+
+            mixin.ModifyCharge((energy - mixin.charge) * capacity);
+            _energiesApplied++;
+        }
+
         /// <summary>Résumé d'une ligne, pour le journal périodique et pour les sondes.</summary>
         public string Describe()
         {
@@ -490,7 +530,7 @@ namespace Coop.Client
                 "suivis={0} snapshots={1} états={2} appariés={3} clé inconnue={4} rattachés par proximité={5} " +
                 "relâchés={6} conduits localement={7} écart avant lissage max={8:F2}m ({9}) " +
                 "pas par image max={10:F2}m moy={11:F2}m sur {12} image(s) en mouvement (fps≈{13:F0}) " +
-                "dont ≥1m={14}, vitesse implicite≈{15:F1} m/s",
+                "dont ≥1m={14}, vitesse implicite≈{15:F1} m/s, énergies appliquées={16}",
                 _tracked.Count,
                 _snapshotsReceived,
                 _statesReceived,
@@ -506,7 +546,8 @@ namespace Coop.Client
                 _frameSteps,
                 fps,
                 _frameStepsAboveOneMeter,
-                fps * (float)average);
+                fps * (float)average,
+                _energiesApplied);
         }
 
         /// <summary>Journalise le résumé toutes les 5 s : un run doit se lire, pas se déduire.</summary>

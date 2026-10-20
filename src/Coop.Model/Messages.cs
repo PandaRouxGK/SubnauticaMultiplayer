@@ -740,8 +740,21 @@ namespace Coop.Model
         public float RotZ;
         public float RotW;
 
+        /// <summary>
+        /// Charge de la batterie, normalisée `0..1` (`EnergyMixin.charge`), ou **-1 = inconnue**
+        /// (véhicule sans batterie, composant absent). Le sentinelle est explicite : `0` est une
+        /// batterie vide, pas une absence d'information — les confondre ferait croire à un client
+        /// qu'un Seamoth neuf est à plat.
+        /// </summary>
+        public float Energy;
+
         public void Write(PacketWriter writer)
         {
+            if (float.IsNaN(Energy) || float.IsInfinity(Energy))
+            {
+                throw new ProtocolException($"énergie de véhicule non finie ({Energy})");
+            }
+
             writer.WriteLong(Key);
             writer.WriteFloat(X);
             writer.WriteFloat(Y);
@@ -750,6 +763,7 @@ namespace Coop.Model
             writer.WriteFloat(RotY);
             writer.WriteFloat(RotZ);
             writer.WriteFloat(RotW);
+            writer.WriteFloat(Energy < 0f ? -1f : (Energy > 1f ? 1f : Energy));
         }
 
         public static VehicleStateEntry Read(PacketReader reader)
@@ -764,10 +778,18 @@ namespace Coop.Model
                 RotY = reader.ReadFloat(),
                 RotZ = reader.ReadFloat(),
                 RotW = reader.ReadFloat(),
+                Energy = reader.ReadFloat(),
             };
             PlayerPositionMessage.EnsureFinite(
                 entry.X, entry.Y, entry.Z,
                 entry.RotX, entry.RotY, entry.RotZ, entry.RotW);
+
+            if (float.IsNaN(entry.Energy) || float.IsInfinity(entry.Energy))
+            {
+                throw new ProtocolException($"énergie de véhicule reçue non finie ({entry.Energy})");
+            }
+
+            entry.Energy = entry.Energy < 0f ? -1f : (entry.Energy > 1f ? 1f : entry.Energy);
             return entry;
         }
     }

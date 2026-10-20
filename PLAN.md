@@ -3197,7 +3197,7 @@ pas. Confiance globale : **moyenne**. Rapport et transcript : `docs/council/`.
 ### 43.2 Ce qui ne va pas
 
 > **Photo datée du 2026-10-19**, conservée telle quelle. Les correctifs depuis sont au §44 (P0/P1/P1bis),
-> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**286** tests),
+> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**290** tests),
 > `PlayerPlausibility` garde la position, la sauvegarde est un contrat, et `verify.sh` compte désormais
 > 18 étapes (A–R, dont R pour le refus P0, §49).
 
@@ -4041,7 +4041,7 @@ sans clé non arbitrés ; **collisions de clé** comptées, pas arbitrées ; **r
 La règle « un état plus ancien ne s'applique pas » vivait dans `RemoteCreatureManager`, donc non testable.
 Elle est maintenant `Coop.Model.SnapshotTickGate` (tick croissant accepté, égal ou ancien refusé et compté,
 recul de plus de 2 000 ticks lu comme un redémarrage serveur, tick nul accepté sans déplacer le dernier),
-avec **six tests** dans `SnapshotTickGateTests` (`dotnet test` **286/286**).
+avec **six tests** dans `SnapshotTickGateTests` (`dotnet test` **290/290**).
 
 **Contrôle en jeu après extraction** : `tools/verify.sh --only=W` — **rouge**, client 3 :
 `verdict=False … écart max=2.01m sur états consécutifs … sur un intervalle de 0.10s`, avec un
@@ -4069,3 +4069,20 @@ client), et la relâche à 2 s sans état est le mécanisme à examiner.
   dérive, soit espacer la relâche (2 s) — deux choix à mesurer, et l'heure de session ne le permet pas.
 - W reste **strict et exécutable** (`--only=W`) ; il est **intermittent** (vert une fois, rouge une fois),
   donc il ne sert pas de critère de clôture. M3 reste clos sur son critère §6 (deux clients, E).
+
+## 55. M4 avancé : la charge du véhicule voyage (v14, 2026-10-20)
+
+`VehicleStateEntry` porte un champ `Energy` (float normalisé `0..1`) depuis la **v14** : le serveur lit
+`EnergyMixin.charge` de son véhicule (`ReadVehicleEnergy`, `-1` quand le composant manque — un véhicule
+sans batterie n'est pas « vide »), et le client applique la valeur sur sa copie via
+`EnergyMixin.ModifyCharge` (`charge` est une propriété **lecture seule**, `capacity` donne l'échelle ;
+l'écriture est ignorée en dessous de 1 % d'écart). `énergies appliquées=` est publié dans
+`[véhicule] état`.
+
+Hors jeu : `VehicleEnergyTests` (4 cas — aller-retour, sentinelle `-1`, valeur non finie refusée à
+l'écriture, hors bornes ramené dans `0..1`) ; `dotnet test` **290/290** ; `NetProbe selftest` 94/94 ;
+builds client et serveur rc=0 ; `tools/mod.manifest.json` et `Protocol.ConnectionKey` passent à 14.
+
+**Ce qui n'est pas fait** : aucune mesure en jeu de l'énergie (le run J ne l'assertait pas), et les
+**modules/upgrades** et les **dégâts** ne voyagent toujours pas. M4 reste donc **ouvert** : le critère §6
+demande l'énergie *et* les upgrades, pas l'un des deux.
