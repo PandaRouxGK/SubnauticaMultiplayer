@@ -134,6 +134,21 @@ namespace Coop.Client
 
             vehicle.transform.position = origin;
 
+            // Mode « volant tenu jusqu'au kill » (étape X, P2) : la sonde garde la main et ne libère rien,
+            // pour que le harnais puisse tuer le client **pendant** qu'il conduit. Sans ce mode, le volant
+            // était toujours rendu avant la fin de la sonde, et la libération à la déconnexion n'était
+            // couverte que par le code (limite écrite au §52.3).
+            if (System.Environment.GetEnvironmentVariable("COOP_DRIVE_KEEP") == "1")
+            {
+                Log.LogWarning(
+                    "[sonde] conduite : maintien — volant gardé jusqu'à la mort du client (COOP_DRIVE_KEEP=1).");
+
+                while (true)
+                {
+                    yield return null;
+                }
+            }
+
             // Garder le volant : c'est ce qui fait que le second client essuie un **refus** au lieu de
             // trouver le véhicule libre.
             var holdUntil = Time.realtimeSinceStartup + HoldAfterDriveSeconds;

@@ -82,14 +82,18 @@
 #   T  deux clients, **mode** différent -> même sauvegarde, même session, `-coopgamemode=Freedom` sur le
 #      client 2 : refus `mode de jeu différent`, client 1 admis. P0 est alors mesuré sur slot, session et
 #      mode ; seul le refus `changeSet` plus ancien reste hors jeu.
+#   X  un client, sonde de conduite **volant gardé** (`COOP_DRIVE_KEEP=1`) -> le client est tué pendant
+#      qu'il conduit : le serveur libère le volant au départ (`volant(s) libéré(s) par la déconnexion`),
+#      admet le revenu sous un nouvel id, et celui-ci recharge le monde. C'est la moitié de P2 que l'étape
+#      U ne mesurait pas (aucun volant n'était tenu pendant le kill, §52.3).
 #   U  deux clients, client 2 **tué puis relancé** -> le serveur diffuse `PlayerLeft`, libère les
 #      réclamations du parti (`réclamation(s) libérée(s)`), admet le revenu sous un nouvel id, lui rejoue
 #      les retraits ; le survivant finit avec `joueursDistants=1 avatarsActifs=1` (aucun fantôme) et
 #      aucune clé n'est refusée au nom du mort. C'est P2, rejoué à chaque batterie.
 #
 # Usage :
-#   tools/verify.sh                    # les vingt-trois étapes
-#   tools/verify.sh --only=B           # une seule étape (A..W, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les vingt-quatre étapes
+#   tools/verify.sh --only=B           # une seule étape (A..X, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -156,9 +160,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKLMNOPQRSTUVW,]*)
+    *[!ABCDEFGHIJKLMNOPQRSTUVWX,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A..U, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A..X, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -471,6 +475,27 @@ assert_u() {
     # Aucun fantôme : l'état final du survivant ne compte qu'un joueur distant et un avatar.
     expect_last U "$c1" '\[ping\] id=' 'joueursDistants=1 avatarsActifs=1'         "chez le survivant : un seul joueur distant, un seul avatar actif"
     expect U "$c1" 'id=3' "le survivant voit le nouveau venu (id=3), pas l'ancien"
+}
+
+assert_x() {
+    local server="$WORK_DIR/X/coop-server.log"
+    local c1b="$WORK_DIR/X/coop-client-1-b.log"
+
+    # Le volant est **tenu** quand le client meurt : c'est la moitié que l'étape U ne mesurait pas.
+    expect X "$server" '\[net\] conduite : clé=0x[0-9a-f]+ — prise par .*#1' \
+        "le client conduit réellement avant d'être tué (prise de volant journalisée)"
+    expect X "$server" 'PlayerLeft diffusé pour .* \(id=1\)' "le serveur diffuse le départ du conducteur tué"
+    # Deux mécanismes libèrent le volant, et le run du 2026-10-20 18:02 a montré que c'est **le silence**
+    # qui passe en premier (3 s sans état avant que le client ne soit tué) : la déconnexion trouve alors le
+    # volant déjà libre. Les deux sont acceptés **nommément**, et ce qui est asserté est l'issue — plus
+    # aucun conducteur ne tient le véhicule — pas le chemin pris pour y arriver.
+    expect X "$server" 'conduite : [1-9][0-9]* volant\(s\) libéré\(s\) par la déconnexion de .*#1|libérée \(silence de [0-9.]+ s\)' \
+        "le volant tenu est libéré (à la déconnexion, ou par le silence), pas laissé au mort"
+
+    # Le revenu est admis sous un nouvel id, et retrouve le monde : la libération n'a pas cassé la session.
+    expect X "$server" "handshake ACCEPTÉ : .*\(id=2" "le client revenu est admis sous un nouvel id"
+    expect X "$c1b" 'handshake ACCEPTÉ' "côté client : la reconnexion est acceptée"
+    expect X "$c1b" 'MONDE CHARGÉ' "côté client : le monde est rechargé"
 }
 
 assert_v() {
@@ -896,9 +921,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1267,6 +1292,25 @@ if wanted T "$ONLY"; then
         args+=(--no-build)
     fi
     step T "refus P0 : un mode de jeu différent est refusé, le mode identique est admis" assert_t "${args[@]}"
+fi
+
+if wanted X "$ONLY"; then
+    # P2, la moitié qui manquait (§52.3) : un client **tient le volant** quand il est tué. La sonde garde
+    # la main (`COOP_DRIVE_KEEP=1`) au lieu de la rendre, le harnais tue le client sur ce marqueur, et le
+    # serveur doit libérer le volant au départ — pas le garder au nom d'un joueur qui n'existe plus.
+    args=(--clients=1 --timeout=420
+        "--host-args=-coopmode=server -batchmode -nographics"
+        "--client-args=-coopmode=client -coopdebug=drive"
+        "--client-env=COOP_DRIVE_KEEP=1"
+        "--client-marker=\\[sonde\\] conduite : maintien"
+        "--reconnect=1"
+        "--reconnect-args=-coopmode=client"
+        "--reconnect-marker=connecté au serveur"
+        "--reconnect-settle=12")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step X "reconnexion P2 : le volant tenu par un client tué est libéré, et le revenu est admis" assert_x "${args[@]}"
 fi
 
 if wanted U "$ONLY"; then

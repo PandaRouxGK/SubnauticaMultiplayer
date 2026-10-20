@@ -45,6 +45,15 @@ dans la colonne de droite et n'invalident pas le critère.
 | La v14 ne transportait **pas** réellement l'énergie | `200.00 -> 200.00 (1.00 de la capacité)` et `énergies appliquées=125` sur un run où aucune charge ne change | journal du 2026-10-20 17:35, `PLAN.md` §56.1 | corrigé (2026-10-20) |
 
 
+### P2 : reconnexion, mesurée avec un volant tenu (2026-10-20)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| Un client tué **pendant qu'il conduit** ne garde pas le volant | `[net] conduite : clé=0x… libérée (silence de 3.0 s)` puis `PlayerLeft diffusé pour 'killi' (id=1)` | `ServerNetwork` (libération par silence et à la déconnexion) ; étape **X** de `tools/verify.sh` | prouvé (2026-10-20, étape X, 86 s) |
+| Le client revenu est admis sous un **nouvel** id et recharge le monde | `handshake ACCEPTÉ : 'killi' (id=2…)` + `handshake ACCEPTÉ` / `MONDE CHARGÉ` dans `coop-client-1-b.log` | `tools/run-session.sh --reconnect=1` ; sonde `COOP_DRIVE_KEEP=1` | prouvé (2026-10-20, étape X) |
+| Ses réclamations redeviennent réclamables, sans fantôme | `réclamation(s) libérée(s) par la déconnexion de 'killi'#2` + `aucune clé n'est plus refusée au nom du joueur parti` | étape **U** de `tools/verify.sh` | prouvé (2026-10-20, étape U) |
+
+
 ## 1. Fondations : le mod démarre, le réseau parle, les journaux sont séparés
 
 | Affirmation | Instrument | Source | Statut |

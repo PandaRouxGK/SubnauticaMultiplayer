@@ -3255,8 +3255,9 @@ Ordonnancement : **P0 → P1 → P2 → P4** est le chemin critique (≈ 8–11 
 parallèle ; **P5** après, parce que découper un fichier qu'on va encore corriger coûte deux fois.
 
 > **État au 2026-10-19** : P0 (nominal), P1 et P1bis sont **mesurés en jeu** (étapes P et N, §45.6) ;
-> le refus P0 sur deux sauvegardes différentes reste hors jeu. P2 est **entamé** (rejeu des retraits,
-> §45) mais la reconnexion complète n'est pas faite. P3, P4 et P5 restent à faire.
+> le refus P0 sur deux sauvegardes différentes reste hors jeu. **P2 est clos le 2026-10-20** : rejeu des
+> retraits (§45), réclamations libérées et aucun fantôme (§52), volant tenu par un client tué libéré
+> (§57, étape X). P3, P4 et P5 restent à faire.
 
 ### 43.6 Critères d'arrêt
 
@@ -3930,8 +3931,8 @@ régression du §50.3 est donc gardée par une étape, plus seulement par un tes
 
 ### 52.3 Ce qui n'est pas encore couvert
 
-- Aucun volant n'est tenu pendant le kill : la libération des conducteurs reste couverte par le code et
-  l'étape M, pas par U.
+- ~~Aucun volant n'est tenu pendant le kill~~ — **couvert depuis le 2026-10-20 par l'étape X** (§57) :
+  `COOP_DRIVE_KEEP=1` garde le volant, le client est tué, et le serveur le libère.
 - Pas de resynchronisation de baseline (aucune n'existe) : la reconnexion repose sur les snapshots
   continus et le rejeu des retraits.
 - Les étapes S, T et U allongent la batterie : 21 étapes, ~3 min de plus qu'avant en run complet.
@@ -4159,3 +4160,53 @@ Ce que ces lignes établissent, et ce qu'elles n'établissent pas :
 - La sonde d'énergie vide la batterie d'un véhicule **du monde** puis la restaure ; sur un véhicule
   fabriqué (`spawn seamoth`), elle le détruit, donc rien ne reste.
 - W n'est pas concerné : il mesure des créatures, et son intermittence (§54.5) est indépendante.
+
+## 57. P2 mesuré : le volant d'un client tué est libéré (étape X, 2026-10-20)
+
+Le §52.3 nommait la limite exacte : « aucun volant n'est tenu pendant le kill ». L'étape **U** tuait un
+client dont la sonde avait déjà fini ; la libération des conducteurs à la déconnexion n'était donc
+couverte que par le code et par l'étape M (qui ne tue personne).
+
+### 57.1 Ce qui a été ajouté
+
+- **`COOP_DRIVE_KEEP=1`** dans la sonde de conduite : elle prend le volant, puis **le garde** au lieu de le
+  rendre, et journalise `[sonde] conduite : maintien`. Sans ce mode, la fin de sonde rendait toujours le
+  volant avant qu'on puisse tuer le client.
+- **`--client-env=VARIABLE=VALEUR`** dans `tools/run-session.sh` : une sonde ne peut pas lire un argument,
+  `-coopdebug` étant déjà pris par le choix de la sonde.
+- **Étape X** de `tools/verify.sh` : un client, `-coopdebug=drive` avec `COOP_DRIVE_KEEP=1`, tué puis
+  relancé (`--reconnect=1`). Quatre assertions : la prise de volant a bien eu lieu, le départ est diffusé,
+  le volant n'est plus tenu, et le revenu est admis sous un **nouvel** id puis recharge le monde.
+
+### 57.2 La mesure (2026-10-20 18:02)
+
+`étape X : OK (86s)`, `VERDICT GLOBAL : tout est vert`, code de sortie 0.
+
+```
+serveur  [net] conduite : clé=0xe16d82d1f441441c — prise par 'killi'#1 ('SeaMoth(Clone)' …), état appliqué et rediffusé.
+serveur  [net] conduite : clé=0xe16d82d1f441441c libérée (silence de 3.0 s) — le conducteur ne l'envoie plus (libérations par silence=1).
+serveur  [net] PlayerLeft diffusé pour 'killi' (id=1)
+serveur  [net] handshake ACCEPTÉ : 'killi' (id=2, …)
+```
+
+### 57.3 Ce que la mesure a appris, et qui n'était pas prévu
+
+Le premier run (18:02, rouge sur une assertion) a montré que le volant est libéré par le **silence**
+(3 s sans état) **avant** la déconnexion : au moment du `PlayerLeft`, la carte des conducteurs était déjà
+vide, donc la ligne « volant(s) libéré(s) par la déconnexion » n'apparaissait pas. L'assertion a été
+écrite sur l'**issue** (le volant n'est plus tenu, par l'un ou l'autre mécanisme, tous deux nommés) et non
+sur le chemin — ce n'est pas un assouplissement : le défaut redouté (un mort qui garde le volant) reste
+exclu par les deux branches.
+
+Conséquence à retenir : c'est le **silence** qui protège en pratique, et il est plus court (3 s) que le
+temps de détection d'une déconnexion. Le chemin de déconnexion reste utile pour un client qui part
+proprement en tenant le volant.
+
+### 57.4 État de P2
+
+**Clos sur son critère §43.5** : un client tué puis relancé rejoue ses réclamations (étape U), aucun
+fantôme ne subsiste, et le volant qu'il tenait est libéré (étape X). Restent, nommés :
+
+- **aucune resynchronisation de baseline** — il n'en existe pas ; la reconnexion repose sur les snapshots
+  continus et le rejeu des carnets ;
+- ce n'est pas la session de 30 minutes (P4) : ~90 s par étape, une seule reconnexion.

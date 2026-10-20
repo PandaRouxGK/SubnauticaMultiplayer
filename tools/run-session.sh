@@ -82,6 +82,11 @@ LAST_WINPID=""
 CLIENT_WORLD_MARKER="MONDE CHARGÉ"
 HOST_ENV=""
 
+# Variables d'environnement du **client** (séparées par des espaces), appliquées à chaque client et au
+# client relancé. Une sonde qui doit se comporter autrement selon le run (garder le volant, par exemple)
+# ne peut pas lire un argument : `-coopdebug` est déjà pris par le choix de la sonde.
+CLIENT_ENV=""
+
 # Motif dont la présence dans un journal de client fait **échouer** le run. Par défaut : un verdict de sonde
 # qui vaut False. Sans ça, « le run s'est terminé » se lit comme « tout va bien », alors qu'un verdict False
 # est justement le cas où il faut s'arrêter et regarder.
@@ -102,6 +107,7 @@ Options :
   --client-marker=REGEX ce qu'on attend du client  (défaut : fin de sonde si -coopdebug, sinon connexion)
   --clients=N           nombre de clients à lancer   (défaut : 1 ; les suivants écrivent coop-client<i>.log)
   --host-env=VARIABLE=VALEUR   variable(s) d'environnement pour l'hôte, séparées par des espaces
+  --client-env=VARIABLE=VALEUR variable(s) d'environnement pour chaque client (et le client relancé)
                                (ex. "COOP_CREATURE_CHUNKS=1 COOP_DESPAWN_DELAY=20")
   --fail-if=REGEX       motif qui fait échouer le run (défaut : verdict=False ; "" pour désactiver)
   --timeout=SECONDES    délai maximal **par étape**  (défaut : 90)
@@ -130,6 +136,7 @@ for argument in "$@"; do
         --client-marker=*) CLIENT_MARKER="${argument#*=}" ;;
         --clients=*) CLIENTS="${argument#*=}" ;;
         --host-env=*) HOST_ENV="${argument#*=}" ;;
+        --client-env=*) CLIENT_ENV="${argument#*=}" ;;
         --fail-if=*) FAIL_IF="${argument#*=}" ;;
         --timeout=*) STEP_TIMEOUT="${argument#*=}" ;;
         --together) TOGETHER=1 ;;
@@ -397,9 +404,9 @@ launch_client() { # $1 = index
     fi
 
     if [ -n "$suffix" ]; then
-        launch_instance "COOP_LOG_SUFFIX=$suffix" "$client_args" "client $index" || true
+        launch_instance "COOP_LOG_SUFFIX=$suffix${CLIENT_ENV:+ $CLIENT_ENV}" "$client_args" "client $index" || true
     else
-        launch_instance "" "$client_args" "client $index" || true
+        launch_instance "${CLIENT_ENV:-}" "$client_args" "client $index" || true
     fi
 
     client_pids[$((index - 1))]="$LAST_WINPID"
