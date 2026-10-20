@@ -8,6 +8,14 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **13** : trois ajouts d'un seul coup, parce qu'ils changent tous les trois l'admission ou
+        /// l'apparition d'entités, et qu'un client v12 ne saurait lire aucun des trois :
+        /// (a) **empreinte de sauvegarde** dans le `HandshakeRequest` (slot, session, changeSet, mode) —
+        /// sans elle, un client sur une vieille partie désynchronisait silencieusement (§43.2) ;
+        /// (b) **`PlayerCorrection`** (#22) — le serveur peut enfin opposer un refus de position au
+        /// client au lieu de relayer n'importe quel saut (§43.3) ;
+        /// (c) **définition + `definitionHash`** dans `EntitySpawn` — le client recalcule l'empreinte
+        /// avant d'instancier et refuse une définition divergente (P1bis).
         /// **12** : ajout de la **libération du volant** (`VehicleRelease`, M4) : le conducteur rend le
         /// véhicule quand il le quitte, et le serveur le libère aussi après un silence de
         /// `VehicleSilenceReleaseSeconds`. Sans ce message, un véhicule restait attribué à son dernier
@@ -30,16 +38,29 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 12;
+        public const int Version = 13;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v12";
+        public const string ConnectionKey = "coop-subnautica-v13";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
+
+        /// <summary>
+        /// Longueur maximale annoncée pour la version du jeu (`2019.4.36f1`, `71288`). Le handshake
+        /// n'est pas un canal de texte libre : sans borne, un client pouvait envoyer 64 Ko dans ce
+        /// champ, que le serveur comparait puis refusait — un paquet valide mais inutilement lourd.
+        /// </summary>
+        public const int MaxGameVersionLength = 32;
+
+        /// <summary>
+        /// Longueur maximale de l'empreinte de la liste de mods : 16 caractères hexadécimaux produits
+        /// par <see cref="ModListHash.Compute"/> ; la borne laisse de la marge pour un futur schéma.
+        /// </summary>
+        public const int MaxModListHashLength = 64;
 
         /// <summary>Nombre maximum d'emplacements d'équipement dans un paquet <see cref="PlayerEquipmentMessage"/>.</summary>
         public const int MaxEquipmentSlots = 32;
@@ -86,6 +107,13 @@ namespace Coop.Model
 
         /// <summary>Longueur maximale du motif d'un <see cref="EntityDespawnMessage"/> (journal, pas décision).</summary>
         public const int MaxDespawnReasonLength = 96;
+
+        /// <summary>
+        /// Longueur maximale d'un motif **lisible** transporté par le protocole (déconnexion, départ,
+        /// refus de handshake). Un motif est journalisé et affiché tel quel ; sans borne, un pair pouvait
+        /// faire transporter 64 Ko de texte dans un champ qui finit dans un journal.
+        /// </summary>
+        public const int MaxReasonTextLength = 160;
 
         /// <summary>Intervalle de vérification des changements d'équipement local côté client, en millisecondes.</summary>
         public const int EquipmentCheckIntervalMs = 250;
@@ -265,6 +293,36 @@ namespace Coop.Model
 
         /// <summary>Délai maximum accordé pour franchir le handshake, en secondes.</summary>
         public const int HandshakeTimeoutSeconds = 10;
+
+        // — Empreinte de sauvegarde (P0, v13) ————————————————————————————————————————
+
+        /// <summary>Longueur maximale d'un nom de slot (`slot0000`).</summary>
+        public const int MaxSaveSlotLength = 64;
+
+        /// <summary>Longueur maximale d'un identifiant de session de sauvegarde (GUID).</summary>
+        public const int MaxSaveSessionLength = 64;
+
+        /// <summary>Longueur maximale d'un nom de mode de jeu.</summary>
+        public const int MaxGameModeLength = 16;
+
+        /// <summary>
+        /// Délai accordé au client pour résoudre son empreinte de sauvegarde avant de se connecter.
+        ///
+        /// AutoLoadBehaviour ouvre le panneau de chargement ~6 s après le menu ; 20 s couvre un
+        /// chargement de disque lent sans laisser le client boucler indéfiniment en silence.
+        /// </summary>
+        public const float SaveIdentityResolveTimeoutSeconds = 20f;
+
+        // — Positions des joueurs (P1, v13) ————————————————————————————————————————————
+
+        /// <summary>Longueur maximale du motif d'une `PlayerCorrection` (journal, pas décision).</summary>
+        public const int MaxCorrectionReasonLength = 96;
+
+        /// <summary>
+        /// Tolérance accordée au client pour appliquer une correction : en dessous, la correction est
+        /// comptée mais **pas appliquée** (éviter de téléporter le joueur pour un centimètre).
+        /// </summary>
+        public const float CorrectionApplyThresholdMeters = 0.75f;
     }
 
     /// <summary>Premier octet de chaque paquet : indique comment lire la suite.</summary>
@@ -311,6 +369,9 @@ namespace Coop.Model
 
         /// <summary>Libération du volant par son conducteur (ReliableOrdered, v12, M4).</summary>
         VehicleRelease = 21,
+
+        /// <summary>Position autoritaire renvoyée à un client dont la position a été refusée (v13, P1).</summary>
+        PlayerCorrection = 22,
     }
 
     /// <summary>
@@ -368,8 +429,15 @@ namespace Coop.Model
                         continue;
                     }
 
-                    var separator = arg.IndexOf('=');
-                    if (separator >= 0 && TryParseName(arg.Substring(separator + 1), out var mode))
+                    // Le nom doit être **exact** : `StartsWith` seul acceptait `-coopmodeevil=server`,
+                    // c'est-à-dire un argument d'un autre outil prenant le rôle du nôtre. On exige le
+                    // séparateur juste après `-coopmode`.
+                    if (arg.Length <= ArgumentName.Length || arg[ArgumentName.Length] != '=')
+                    {
+                        continue;
+                    }
+
+                    if (TryParseName(arg.Substring(ArgumentName.Length + 1), out var mode))
                     {
                         return mode;
                     }

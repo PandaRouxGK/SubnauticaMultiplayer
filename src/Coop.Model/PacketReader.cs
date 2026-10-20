@@ -15,6 +15,21 @@ namespace Coop.Model
         private readonly int _end;
         private int _position;
 
+        /// <summary>
+        /// Tampon de conversion des floats, **par thread** : allouer un tableau de 4 octets à chaque
+        /// `ReadFloat` produisait des milliers d'allocations par seconde sur un snapshot de joueurs.
+        /// Un `PacketReader` n'est pas réentrant, et deux lecteurs de deux threads ne partagent pas
+        /// ce champ grâce à `[ThreadStatic]`.
+        /// </summary>
+        [ThreadStatic] private static byte[] _floatScratch;
+
+        /// <summary>
+        /// Décodage **strict** : une séquence UTF-8 invalide est un paquet malformé, pas une chaîne
+        /// à caractères de remplacement. Sans cela, un octet hostile devenait silencieusement U+FFFD
+        /// dans un pseudo, un nom de `TechType` ou une empreinte de mods.
+        /// </summary>
+        private static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(false, true);
+
         public PacketReader(byte[] data) : this(data, 0, data?.Length ?? 0)
         {
         }
@@ -26,7 +41,10 @@ namespace Coop.Model
                 throw new ProtocolException("tampon nul");
             }
 
-            if (offset < 0 || length < 0 || offset + length > data.Length)
+            // `offset + length` peut déborder un int (offset=int.MaxValue, length=1) et
+            // redevenir négatif : une telle plage passerait le contrôle puis laisserait
+            // `_end < _start`. On teste donc la soustraction, qui ne déborde pas ici.
+            if (offset < 0 || length < 0 || offset > data.Length - length)
             {
                 throw new ProtocolException($"plage invalide (offset={offset}, length={length}, taille={data.Length})");
             }
@@ -90,17 +108,27 @@ namespace Coop.Model
         public float ReadFloat()
         {
             Require(4);
-            var bytes = new byte[4];
-            Buffer.BlockCopy(_data, _position, bytes, 0, 4);
+            var scratch = _floatScratch ?? (_floatScratch = new byte[4]);
+            Buffer.BlockCopy(_data, _position, scratch, 0, 4);
             _position += 4;
-            return BitConverter.ToSingle(bytes, 0);
+            return BitConverter.ToSingle(scratch, 0);
         }
 
         public string ReadString()
         {
             var length = ReadUInt16();
             Require(length);
-            var value = Encoding.UTF8.GetString(_data, _position, length);
+
+            string value;
+            try
+            {
+                value = StrictUtf8.GetString(_data, _position, length);
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new ProtocolException($"chaîne UTF-8 invalide ({length} octet(s))");
+            }
+
             _position += length;
             return value;
         }

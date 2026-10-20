@@ -13,22 +13,62 @@ namespace Coop.Model
         public string ModListHash;
         public string Username;
 
+        /// <summary>
+        /// Empreinte de la partie chargée (v13, P0). Jamais <c>null</c> à l'écriture : un client qui
+        /// n'a pas encore résolu sa sauvegarde envoie une empreinte vide, et le serveur la refuse
+        /// nommément plutôt que de laisser passer une divergence silencieuse.
+        /// </summary>
+        public SaveIdentity Save;
+
         public void Write(PacketWriter writer)
         {
+            // Bornes du handshake : ce sont les seuls champs qu'un pair inconnu choisit librement.
+            // `Username` garde sa règle de refus nommée côté serveur (`Validate`) ; les deux autres
+            // sont produits par le plugin, donc une valeur hors borne est un défaut local, pas une
+            // faute de l'utilisateur.
+            var gameVersion = GameVersion ?? string.Empty;
+            if (gameVersion.Length > Protocol.MaxGameVersionLength)
+            {
+                throw new ProtocolException($"version du jeu trop longue ({gameVersion.Length} > {Protocol.MaxGameVersionLength})");
+            }
+
+            var modListHash = ModListHash ?? string.Empty;
+            if (modListHash.Length > Protocol.MaxModListHashLength)
+            {
+                throw new ProtocolException($"empreinte de mods trop longue ({modListHash.Length} > {Protocol.MaxModListHashLength})");
+            }
+
             writer.WriteByte((byte)MessageType.HandshakeRequest);
             writer.WriteInt(ProtocolVersion);
-            writer.WriteString(GameVersion);
-            writer.WriteString(ModListHash);
-            writer.WriteString(Username);
+            writer.WriteString(gameVersion);
+            writer.WriteString(modListHash);
+            writer.WriteString(Username ?? string.Empty);
+            (Save ?? SaveIdentity.Create(string.Empty, string.Empty, -1, string.Empty)).WriteTo(writer);
         }
 
-        public static HandshakeRequest Read(PacketReader reader) => new HandshakeRequest
+        public static HandshakeRequest Read(PacketReader reader)
         {
-            ProtocolVersion = reader.ReadInt(),
-            GameVersion = reader.ReadString(),
-            ModListHash = reader.ReadString(),
-            Username = reader.ReadString(),
-        };
+            var request = new HandshakeRequest
+            {
+                ProtocolVersion = reader.ReadInt(),
+                GameVersion = reader.ReadString(),
+                ModListHash = reader.ReadString(),
+                Username = reader.ReadString(),
+                Save = SaveIdentity.ReadFrom(reader),
+            };
+
+            if (request.GameVersion.Length > Protocol.MaxGameVersionLength)
+            {
+                throw new ProtocolException($"version du jeu reçue trop longue ({request.GameVersion.Length})");
+            }
+
+            if (request.ModListHash.Length > Protocol.MaxModListHashLength)
+            {
+                throw new ProtocolException($"empreinte de mods reçue trop longue ({request.ModListHash.Length})");
+            }
+
+            return request;
+        }
     }
 
     /// <summary>Réponse du serveur : accepté ou refusé, avec la raison en clair pour le log client.</summary>
@@ -45,7 +85,7 @@ namespace Coop.Model
         {
             writer.WriteByte((byte)MessageType.HandshakeResponse);
             writer.WriteBool(Accepted);
-            writer.WriteString(Reason);
+            writer.WriteString(MessageText.Reason(Reason, "motif de refus de handshake"));
             writer.WriteLong(ServerTick);
             writer.WriteUInt16(AssignedPlayerId);
         }
@@ -53,7 +93,7 @@ namespace Coop.Model
         public static HandshakeResponse Read(PacketReader reader) => new HandshakeResponse
         {
             Accepted = reader.ReadBool(),
-            Reason = reader.ReadString(),
+            Reason = MessageText.Reason(reader.ReadString(), "motif de refus de handshake reçu"),
             ServerTick = reader.ReadLong(),
             AssignedPlayerId = reader.ReadUInt16(),
         };
@@ -117,12 +157,12 @@ namespace Coop.Model
         public void Write(PacketWriter writer)
         {
             writer.WriteByte((byte)MessageType.Disconnect);
-            writer.WriteString(Reason);
+            writer.WriteString(MessageText.Reason(Reason, "motif de déconnexion"));
         }
 
         public static DisconnectMessage Read(PacketReader reader) => new DisconnectMessage
         {
-            Reason = reader.ReadString(),
+            Reason = MessageText.Reason(reader.ReadString(), "motif de déconnexion reçu"),
         };
     }
 
@@ -182,14 +222,14 @@ namespace Coop.Model
             writer.WriteByte((byte)MessageType.PlayerLeft);
             writer.WriteUInt16(PlayerId);
             writer.WriteString(Username);
-            writer.WriteString(Reason);
+            writer.WriteString(MessageText.Reason(Reason, "motif de départ"));
         }
 
         public static PlayerLeftMessage Read(PacketReader reader) => new PlayerLeftMessage
         {
             PlayerId = reader.ReadUInt16(),
             Username = reader.ReadString(),
-            Reason = reader.ReadString(),
+            Reason = MessageText.Reason(reader.ReadString(), "motif de départ reçu"),
         };
     }
 
@@ -356,9 +396,12 @@ namespace Coop.Model
         public void Write(PacketWriter writer)
         {
             var list = Players ?? Array.Empty<PlayerStateEntry>();
-            if (list.Length > byte.MaxValue)
+            // Le serveur n'admet que `MaxClients` sessions et le snapshot exclut le destinataire :
+            // `MaxClients` est donc le vrai plafond. Le laisser à 255 laissait lire un paquet forgé
+            // de 255 joueurs, que le protocole n'autorise nulle part.
+            if (list.Length > Protocol.MaxClients)
             {
-                throw new ProtocolException($"trop de joueurs dans le snapshot ({list.Length})");
+                throw new ProtocolException($"trop de joueurs dans le snapshot ({list.Length} > {Protocol.MaxClients})");
             }
 
             writer.WriteByte((byte)MessageType.PlayersSnapshot);
@@ -374,6 +417,11 @@ namespace Coop.Model
         {
             var tick = reader.ReadLong();
             var count = reader.ReadByte();
+            if (count > Protocol.MaxClients)
+            {
+                throw new ProtocolException($"trop de joueurs reçus dans le snapshot ({count} > {Protocol.MaxClients})");
+            }
+
             var players = count == 0 ? Array.Empty<PlayerStateEntry>() : new PlayerStateEntry[count];
             for (var i = 0; i < count; i++)
             {
@@ -846,9 +894,17 @@ namespace Coop.Model
 
         public void Write(PacketWriter writer)
         {
+            // Même borne qu'à la lecture : sans elle, le serveur pouvait émettre un message que
+            // ses propres clients refusaient ensuite (nom > 64 caractères accepté par WriteString).
+            var name = TechTypeName ?? string.Empty;
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException($"nom de TechType trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
             writer.WriteByte((byte)MessageType.PickupResult);
             writer.WriteLong(ItemKey);
-            writer.WriteString(TechTypeName ?? string.Empty);
+            writer.WriteString(name);
             writer.WriteBool(Granted);
             writer.WriteUInt16(HolderId);
             writer.WriteUInt16(ClaimedBy);
@@ -996,12 +1052,47 @@ namespace Coop.Model
         public float X, Y, Z;
         public float RotX, RotY, RotZ, RotW;
 
+        /// <summary>Échelle de la définition (1,1,1 pour un véhicule du jeu).</summary>
+        public float ScaleX = 1f, ScaleY = 1f, ScaleZ = 1f;
+
+        /// <summary>
+        /// Empreinte de la définition que le serveur applique (v13, P1bis). Le client la **recalcule**
+        /// et refuse l'entité si elle diffère : c'est ce qui rend le contrat de contenu falsifiable
+        /// au lieu d'être une convention. `0` est refusé à l'écriture comme à la lecture — aucune
+        /// définition réelle ne produit un hash nul.
+        /// </summary>
+        public long DefinitionHash;
+
+        public EntityDefinition BuildDefinition() => new EntityDefinition
+        {
+            TechTypeName = TechTypeName ?? string.Empty,
+            ScaleX = ScaleX,
+            ScaleY = ScaleY,
+            ScaleZ = ScaleZ,
+        };
+
         public void Write(PacketWriter writer)
         {
+            // Même règle que `EntityDespawn` : une entité annoncée sous la clé 0 ne pourrait
+            // jamais être retirée ni réclamée, puisque ces deux messages refusent la clé 0.
+            // Annoncer une entité impossible à désigner produirait un fantôme permanent.
+            if (Key == 0L)
+            {
+                throw new ProtocolException("apparition sans clé d'entité (clé=0)");
+            }
+
             var id = UniqueId ?? string.Empty;
             if (id.Length > Protocol.MaxEntityIdLength)
             {
                 throw new ProtocolException($"identifiant d'entité trop long ({id.Length} > {Protocol.MaxEntityIdLength})");
+            }
+
+            // Un identifiant vide ne porte aucune identité : le client s'en sert comme `UniqueIdentifier`
+            // pour retrouver l'objet dans sa sauvegarde, et une chaîne vide ne désigne rien. Le serveur
+            // n'annonce jamais cet état (il renonce à l'annonce sans identifiant).
+            if (id.Length == 0)
+            {
+                throw new ProtocolException("apparition sans identifiant d'entité (UniqueId vide)");
             }
 
             var name = TechTypeName ?? string.Empty;
@@ -1009,6 +1100,18 @@ namespace Coop.Model
             {
                 throw new ProtocolException($"nom de TechType trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
             }
+
+            if (DefinitionHash == 0L)
+            {
+                throw new ProtocolException("apparition sans empreinte de définition (definitionHash=0)");
+            }
+
+            // La lecture refuse déjà ces valeurs : les accepter à l'écriture produirait un
+            // message que nos propres clients rejetteraient, et l'entité ne serait jamais créée.
+            PlayerPositionMessage.EnsureFinite(
+                X, Y, Z,
+                RotX, RotY, RotZ, RotW,
+                ScaleX, ScaleY, ScaleZ);
 
             writer.WriteByte((byte)MessageType.EntitySpawn);
             writer.WriteLong(Key);
@@ -1021,6 +1124,10 @@ namespace Coop.Model
             writer.WriteFloat(RotY);
             writer.WriteFloat(RotZ);
             writer.WriteFloat(RotW);
+            writer.WriteFloat(ScaleX);
+            writer.WriteFloat(ScaleY);
+            writer.WriteFloat(ScaleZ);
+            writer.WriteLong(DefinitionHash);
         }
 
         public static EntitySpawnMessage Read(PacketReader reader)
@@ -1037,7 +1144,21 @@ namespace Coop.Model
                 RotY = reader.ReadFloat(),
                 RotZ = reader.ReadFloat(),
                 RotW = reader.ReadFloat(),
+                ScaleX = reader.ReadFloat(),
+                ScaleY = reader.ReadFloat(),
+                ScaleZ = reader.ReadFloat(),
+                DefinitionHash = reader.ReadLong(),
             };
+
+            if (msg.Key == 0L)
+            {
+                throw new ProtocolException("apparition reçue sans clé d'entité (clé=0)");
+            }
+
+            if (msg.UniqueId.Length == 0)
+            {
+                throw new ProtocolException("apparition reçue sans identifiant d'entité (UniqueId vide)");
+            }
 
             if (msg.UniqueId.Length > Protocol.MaxEntityIdLength)
             {
@@ -1049,10 +1170,72 @@ namespace Coop.Model
                 throw new ProtocolException($"nom de TechType reçu trop long ({msg.TechTypeName.Length})");
             }
 
+            if (msg.DefinitionHash == 0L)
+            {
+                throw new ProtocolException("apparition sans empreinte de définition (definitionHash=0)");
+            }
+
             PlayerPositionMessage.EnsureFinite(
                 msg.X, msg.Y, msg.Z,
-                msg.RotX, msg.RotY, msg.RotZ, msg.RotW);
+                msg.RotX, msg.RotY, msg.RotZ, msg.RotW,
+                msg.ScaleX, msg.ScaleY, msg.ScaleZ);
 
+            return msg;
+        }
+    }
+
+    /// <summary>
+    /// Position autoritaire renvoyée au client dont la position a été refusée (v13, P1).
+    ///
+    /// Pourquoi un message et pas un simple silence : le serveur a refusé la position et garde la
+    /// précédente. Sans correction, le client continuerait à se voir à l'endroit refusé tandis que
+    /// tous les autres le voient à l'ancien — une divergence qui ne se corrige jamais. Le message
+    /// porte la position **acceptée** et le motif, pour que le client puisse la journaliser et la
+    /// distinguer d'un simple retard réseau.
+    /// </summary>
+    public sealed class PlayerCorrectionMessage
+    {
+        public long ServerTick;
+        public float X, Y, Z;
+        public string Reason;
+
+        public void Write(PacketWriter writer)
+        {
+            var reason = Reason ?? string.Empty;
+            if (reason.Length > Protocol.MaxCorrectionReasonLength)
+            {
+                throw new ProtocolException($"motif de correction trop long ({reason.Length} > {Protocol.MaxCorrectionReasonLength})");
+            }
+
+            // La lecture refuse une correction non finie : l'écrire serait envoyer au client
+            // un message qu'il rejette, donc une correction perdue sans le dire.
+            PlayerPositionMessage.EnsureFinite(X, Y, Z, 0f, 0f, 0f, 1f);
+
+            writer.WriteByte((byte)MessageType.PlayerCorrection);
+            writer.WriteLong(ServerTick);
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteString(reason);
+        }
+
+        public static PlayerCorrectionMessage Read(PacketReader reader)
+        {
+            var msg = new PlayerCorrectionMessage
+            {
+                ServerTick = reader.ReadLong(),
+                X = reader.ReadFloat(),
+                Y = reader.ReadFloat(),
+                Z = reader.ReadFloat(),
+                Reason = reader.ReadString(),
+            };
+
+            if (msg.Reason.Length > Protocol.MaxCorrectionReasonLength)
+            {
+                throw new ProtocolException($"motif de correction reçu trop long ({msg.Reason.Length})");
+            }
+
+            PlayerPositionMessage.EnsureFinite(msg.X, msg.Y, msg.Z, 0, 0, 0, 1);
             return msg;
         }
     }
@@ -1130,6 +1313,11 @@ namespace Coop.Model
 
         public void Write(PacketWriter writer)
         {
+            if (Key == 0L)
+            {
+                throw new ProtocolException("disparition sans clé d'entité (clé=0)");
+            }
+
             if (Kind != EntityKind.Vehicle && Kind != EntityKind.Item)
             {
                 throw new ProtocolException($"espèce d'entité invalide ({Kind}) dans une disparition");
@@ -1156,6 +1344,11 @@ namespace Coop.Model
                 Reason = reader.ReadString(),
             };
 
+            if (msg.Key == 0L)
+            {
+                throw new ProtocolException("disparition reçue sans clé d'entité (clé=0)");
+            }
+
             if (msg.Kind != EntityKind.Vehicle && msg.Kind != EntityKind.Item)
             {
                 throw new ProtocolException($"espèce d'entité inconnue ({msg.Kind}) dans une disparition");
@@ -1170,10 +1363,34 @@ namespace Coop.Model
         }
     }
 
+    /// <summary>
+    /// Aides de texte partagées par les messages qui transportent un motif **lisible**. Une borne
+    /// appliquée à un seul des deux sens finirait par produire un message que nos propres clients
+    /// refusent — c'est exactement la classe de défaut que cette session ferme.
+    /// </summary>
+    internal static class MessageText
+    {
+        public static string Reason(string value, string label)
+        {
+            var reason = value ?? string.Empty;
+            if (reason.Length > Protocol.MaxReasonTextLength)
+            {
+                throw new ProtocolException($"{label} trop long ({reason.Length} > {Protocol.MaxReasonTextLength})");
+            }
+
+            return reason;
+        }
+    }
+
     public static class MessageCodec
     {
         public static byte[] Encode(Action<PacketWriter> write, PacketWriter reusable = null)
         {
+            if (write == null)
+            {
+                throw new ArgumentNullException(nameof(write));
+            }
+
             var writer = reusable ?? new PacketWriter();
             writer.Reset();
             write(writer);

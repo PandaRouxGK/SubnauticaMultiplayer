@@ -80,6 +80,7 @@ namespace NetProbe
                 GameVersion = "2.0.0.1",
                 ModListHash = "a1b2c3d4e5f60718",
                 Username = "Élodie-Ünïcode",
+                Save = SaveIdentity.Create("slot0000", "aae68629-1111-2222-3333-444455556666", 83031, "Freedom"),
             };
 
             var handshakeBytes = MessageCodec.Encode(handshake.Write);
@@ -94,6 +95,76 @@ namespace NetProbe
                 && handshakeRoundTrip.ModListHash == handshake.ModListHash
                 && handshakeRoundTrip.Username == handshake.Username,
                 "round-trip HandshakeRequest (accents inclus)");
+
+            Check(
+                handshakeRoundTrip.Save != null
+                && handshakeRoundTrip.Save.Slot == handshake.Save.Slot
+                && handshakeRoundTrip.Save.SessionId == handshake.Save.SessionId
+                && handshakeRoundTrip.Save.ChangeSet == handshake.Save.ChangeSet
+                && handshakeRoundTrip.Save.GameMode == handshake.Save.GameMode
+                && handshakeRoundTrip.Save.Hash == handshake.Save.Hash
+                && handshakeRoundTrip.Save.RecomputeHash() == handshakeRoundTrip.Save.Hash,
+                "round-trip HandshakeRequest (empreinte de sauvegarde v13 + hash recalculé)");
+
+            // Un handshake amputé de son empreinte ne doit pas se lire comme une partie valide :
+            // c'est cette troncature qui séparerait un client v12 d'un serveur v13 sans le dire.
+            var truncatedHandshakeThrew = false;
+            try
+            {
+                var cutHandshake = new byte[handshakeBytes.Length - 4];
+                Array.Copy(handshakeBytes, cutHandshake, cutHandshake.Length);
+                var cutHandshakeReader = new PacketReader(cutHandshake);
+                cutHandshakeReader.ReadByte();
+                HandshakeRequest.Read(cutHandshakeReader);
+            }
+            catch (ProtocolException)
+            {
+                truncatedHandshakeThrew = true;
+            }
+
+            Check(truncatedHandshakeThrew, "HandshakeRequest tronqué (empreinte amputée) -> ProtocolException");
+
+            // Bornes du handshake : ces deux champs sont choisis par un pair inconnu. Sans borne, un
+            // client pouvait faire transporter 64 Ko dans chacun avant que le serveur ne les compare.
+            var longGameVersionThrew = false;
+            try
+            {
+                MessageCodec.Encode(new HandshakeRequest
+                {
+                    ProtocolVersion = Protocol.Version,
+                    GameVersion = new string('9', Protocol.MaxGameVersionLength + 1),
+                    ModListHash = handshake.ModListHash,
+                    Username = handshake.Username,
+                    Save = handshake.Save,
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                longGameVersionThrew = true;
+            }
+
+            Check(longGameVersionThrew, "HandshakeRequest (version du jeu trop longue) -> ProtocolException à l'écriture");
+
+            var longModHashThrew = false;
+            try
+            {
+                var forged = new PacketWriter();
+                forged.WriteByte((byte)MessageType.HandshakeRequest);
+                forged.WriteInt(Protocol.Version);
+                forged.WriteString("2.0.0.1");
+                forged.WriteString(new string('a', Protocol.MaxModListHashLength + 1));
+                forged.WriteString("killi");
+                handshake.Save.WriteTo(forged);
+                var forgedReader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+                forgedReader.ReadByte();
+                HandshakeRequest.Read(forgedReader);
+            }
+            catch (ProtocolException)
+            {
+                longModHashThrew = true;
+            }
+
+            Check(longModHashThrew, "HandshakeRequest (empreinte de mods trop longue) -> ProtocolException à la lecture");
 
             var response = new HandshakeResponse
             {
@@ -612,17 +683,520 @@ namespace NetProbe
 
             Check(threw, "paquet tronqué -> ProtocolException");
 
+            // Position autoritaire (v13, P1) : le serveur renvoie la position qu'il a acceptée et son motif.
+            var correction = new PlayerCorrectionMessage
+            {
+                ServerTick = 4242L,
+                X = -114.46f,
+                Y = 2.29f,
+                Z = -54.21f,
+                Reason = "déplacement de 100.00 m en 0.050 s (2000.0 m/s)",
+            };
+            var correctionReader = new PacketReader(MessageCodec.Encode(correction.Write));
+            Check(correctionReader.ReadByte() == (byte)MessageType.PlayerCorrection, "opcode PlayerCorrection");
+            var correctionRt = PlayerCorrectionMessage.Read(correctionReader);
+            Check(
+                correctionRt.ServerTick == correction.ServerTick
+                && correctionRt.Reason == correction.Reason
+                && Math.Abs(correctionRt.X - correction.X) < 0.0001f
+                && Math.Abs(correctionRt.Z - correction.Z) < 0.0001f,
+                "round-trip PlayerCorrection (position acceptée + motif)");
+
+            var longCorrectionThrew = false;
+            try
+            {
+                MessageCodec.Encode(new PlayerCorrectionMessage
+                {
+                    ServerTick = 1L,
+                    Reason = new string('x', Protocol.MaxCorrectionReasonLength + 1),
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                longCorrectionThrew = true;
+            }
+
+            Check(longCorrectionThrew, "PlayerCorrection (motif trop long) -> ProtocolException à l'écriture");
+
+            var nanCorrectionThrew = false;
+            try
+            {
+                MessageCodec.Encode(new PlayerCorrectionMessage
+                {
+                    ServerTick = 1L,
+                    X = float.NaN,
+                    Y = 1f,
+                    Z = 1f,
+                    Reason = "test",
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                nanCorrectionThrew = true;
+            }
+
+            Check(nanCorrectionThrew, "PlayerCorrection (position NaN) -> ProtocolException à l'écriture");
+
+            // Apparition (v10) + contrat de contenu (v13, P1bis) : la définition voyage, et son
+            // empreinte doit être recalculable par le client. Sans ce hash, « le serveur m'annonce un
+            // Seamoth » ne se distingue pas de « le serveur m'annonce autre chose ».
+            var spawnDefinition = EntityDefinition.ForVehicle("SeaMoth");
+            var spawn = new EntitySpawnMessage
+            {
+                Key = 0x7ce3b6a1e8e7e312L,
+                UniqueId = "0a472465-f9e8-4780-8b3e-a308429250ce",
+                TechTypeName = "SeaMoth",
+                X = -118.4f,
+                Y = -13.4f,
+                Z = -52.9f,
+                RotW = 1f,
+                ScaleX = 1f,
+                ScaleY = 1f,
+                ScaleZ = 1f,
+                DefinitionHash = spawnDefinition.ComputeHash(),
+            };
+            var spawnReader = new PacketReader(MessageCodec.Encode(spawn.Write));
+            Check(spawnReader.ReadByte() == (byte)MessageType.EntitySpawn, "opcode EntitySpawn");
+            var spawnRt = EntitySpawnMessage.Read(spawnReader);
+            Check(
+                spawnRt.Key == spawn.Key
+                && spawnRt.UniqueId == spawn.UniqueId
+                && spawnRt.TechTypeName == spawn.TechTypeName
+                && spawnRt.DefinitionHash == spawn.DefinitionHash
+                && Math.Abs(spawnRt.ScaleX - spawn.ScaleX) < 0.0001f
+                && spawnRt.BuildDefinition().ComputeHash() == spawnRt.DefinitionHash,
+                "round-trip EntitySpawn (échelle + definitionHash recalculé)");
+
+            var zeroDefinitionHashThrew = false;
+            try
+            {
+                var noHash = new EntitySpawnMessage
+                {
+                    Key = 1L,
+                    UniqueId = "id",
+                    TechTypeName = "SeaMoth",
+                    RotW = 1f,
+                    DefinitionHash = 0L,
+                };
+                var noHashReader = new PacketReader(MessageCodec.Encode(noHash.Write));
+                noHashReader.ReadByte();
+                EntitySpawnMessage.Read(noHashReader);
+            }
+            catch (ProtocolException)
+            {
+                zeroDefinitionHashThrew = true;
+            }
+
+            Check(zeroDefinitionHashThrew, "EntitySpawn (definitionHash=0) -> ProtocolException à la lecture");
+
+            var emptyUniqueIdThrew = false;
+            try
+            {
+                MessageCodec.Encode(new EntitySpawnMessage
+                {
+                    Key = 1L,
+                    UniqueId = string.Empty,
+                    TechTypeName = "SeaMoth",
+                    RotW = 1f,
+                    DefinitionHash = spawnDefinition.ComputeHash(),
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                emptyUniqueIdThrew = true;
+            }
+
+            Check(emptyUniqueIdThrew, "EntitySpawn (UniqueId vide) -> ProtocolException à l'écriture");
+
+            var emptyUniqueIdReadThrew = false;
+            try
+            {
+                var forged = new PacketWriter();
+                forged.WriteByte((byte)MessageType.EntitySpawn);
+                forged.WriteLong(1L);
+                forged.WriteString(string.Empty);
+                forged.WriteString("SeaMoth");
+                for (var i = 0; i < 7; i++)
+                {
+                    forged.WriteFloat(0f);
+                }
+
+                forged.WriteFloat(1f);
+                forged.WriteFloat(1f);
+                forged.WriteFloat(1f);
+                forged.WriteLong(spawnDefinition.ComputeHash());
+                var forgedReader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+                forgedReader.ReadByte();
+                EntitySpawnMessage.Read(forgedReader);
+            }
+            catch (ProtocolException)
+            {
+                emptyUniqueIdReadThrew = true;
+            }
+
+            Check(emptyUniqueIdReadThrew, "EntitySpawn (UniqueId vide forgé) -> ProtocolException à la lecture");
+
+            var zeroDefinitionHashWriteThrew = false;
+            try
+            {
+                MessageCodec.Encode(new EntitySpawnMessage
+                {
+                    Key = 1L,
+                    UniqueId = "id",
+                    TechTypeName = "SeaMoth",
+                    RotW = 1f,
+                    DefinitionHash = 0L,
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                zeroDefinitionHashWriteThrew = true;
+            }
+
+            Check(zeroDefinitionHashWriteThrew, "EntitySpawn (definitionHash=0) -> ProtocolException à l'écriture");
+
+            var nanSpawnThrew = false;
+            try
+            {
+                MessageCodec.Encode(new EntitySpawnMessage
+                {
+                    Key = 1L,
+                    UniqueId = "id",
+                    TechTypeName = "SeaMoth",
+                    Y = float.NegativeInfinity,
+                    RotW = 1f,
+                    DefinitionHash = spawnDefinition.ComputeHash(),
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                nanSpawnThrew = true;
+            }
+
+            Check(nanSpawnThrew, "EntitySpawn (position -infini) -> ProtocolException à l'écriture");
+
+            var zeroSpawnKeyThrew = false;
+            try
+            {
+                var noKey = new EntitySpawnMessage
+                {
+                    UniqueId = "id",
+                    TechTypeName = "SeaMoth",
+                    RotW = 1f,
+                    DefinitionHash = spawnDefinition.ComputeHash(),
+                };
+                MessageCodec.Encode(noKey.Write);
+            }
+            catch (ProtocolException)
+            {
+                zeroSpawnKeyThrew = true;
+            }
+
+            Check(zeroSpawnKeyThrew, "EntitySpawn (clé 0) -> ProtocolException à l'écriture");
+
+            var zeroSpawnReadThrew = false;
+            try
+            {
+                var forged = new PacketWriter();
+                forged.WriteByte((byte)MessageType.EntitySpawn);
+                forged.WriteLong(0L);
+                forged.WriteString("id");
+                forged.WriteString("SeaMoth");
+                for (var i = 0; i < 7; i++)
+                {
+                    forged.WriteFloat(0f);
+                }
+
+                forged.WriteFloat(1f);
+                forged.WriteFloat(1f);
+                forged.WriteFloat(1f);
+                forged.WriteLong(spawnDefinition.ComputeHash());
+                var forgedReader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+                forgedReader.ReadByte();
+                EntitySpawnMessage.Read(forgedReader);
+            }
+            catch (ProtocolException)
+            {
+                zeroSpawnReadThrew = true;
+            }
+
+            Check(zeroSpawnReadThrew, "EntitySpawn (clé 0 forgée) -> ProtocolException à la lecture");
+
+            // Ramassage (v8) : la réclamation et la décision, avec l'identité revendiquée.
+            var claim = new PickupClaimMessage
+            {
+                PlayerId = 2,
+                ItemKey = 0x10ee181a0699267dL,
+                TechTypeName = "PowerCell",
+            };
+            var claimReader = new PacketReader(MessageCodec.Encode(claim.Write));
+            Check(claimReader.ReadByte() == (byte)MessageType.PickupClaim, "opcode PickupClaim");
+            var claimRt = PickupClaimMessage.Read(claimReader);
+            Check(
+                claimRt.PlayerId == claim.PlayerId
+                && claimRt.ItemKey == claim.ItemKey
+                && claimRt.TechTypeName == claim.TechTypeName,
+                "round-trip PickupClaim");
+
+            var pickupResult = new PickupResultMessage
+            {
+                ItemKey = claim.ItemKey,
+                TechTypeName = claim.TechTypeName,
+                Granted = false,
+                HolderId = 1,
+                ClaimedBy = 2,
+            };
+            var pickupResultReader = new PacketReader(MessageCodec.Encode(pickupResult.Write));
+            Check(pickupResultReader.ReadByte() == (byte)MessageType.PickupResult, "opcode PickupResult");
+            var pickupResultRt = PickupResultMessage.Read(pickupResultReader);
+            Check(
+                !pickupResultRt.Granted
+                && pickupResultRt.HolderId == 1
+                && pickupResultRt.ClaimedBy == 2
+                && pickupResultRt.ItemKey == claim.ItemKey,
+                "round-trip PickupResult (refus + détenteur effectif)");
+
+            var longPickupNameThrew = false;
+            try
+            {
+                MessageCodec.Encode(new PickupResultMessage
+                {
+                    ItemKey = 1L,
+                    TechTypeName = new string('x', Protocol.MaxTechTypeNameLength + 1),
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                longPickupNameThrew = true;
+            }
+
+            Check(longPickupNameThrew, "PickupResult (nom trop long) -> ProtocolException à l'écriture");
+
+            // Conduite (v9) : état du client, décision du serveur, libération explicite (v12).
+            var control = new VehicleControlMessage
+            {
+                PlayerId = 2,
+                VehicleKey = 0x7ce3b6a1e8e7e312L,
+                Sequence = 77,
+                X = -118.4f,
+                Y = -13.4f,
+                Z = -52.9f,
+                RotW = 1f,
+                SpeedX = 20f,
+            };
+            var controlReader = new PacketReader(MessageCodec.Encode(control.Write));
+            Check(controlReader.ReadByte() == (byte)MessageType.VehicleControl, "opcode VehicleControl");
+            var controlRt = VehicleControlMessage.Read(controlReader);
+            Check(
+                controlRt.PlayerId == control.PlayerId
+                && controlRt.VehicleKey == control.VehicleKey
+                && controlRt.Sequence == control.Sequence
+                && Math.Abs(controlRt.SpeedX - control.SpeedX) < 0.0001f,
+                "round-trip VehicleControl (position + vitesse)");
+
+            var nanControlThrew = false;
+            try
+            {
+                var nanControl = new VehicleControlMessage { VehicleKey = 1L, RotW = 1f, X = float.NaN };
+                var nanReader = new PacketReader(MessageCodec.Encode(nanControl.Write));
+                nanReader.ReadByte();
+                VehicleControlMessage.Read(nanReader);
+            }
+            catch (ProtocolException)
+            {
+                nanControlThrew = true;
+            }
+
+            Check(nanControlThrew, "VehicleControl (position NaN) -> ProtocolException à la lecture");
+
+            var controlResult = new VehicleControlResultMessage
+            {
+                VehicleKey = control.VehicleKey,
+                Granted = false,
+                DriverId = 1,
+            };
+            var controlResultReader = new PacketReader(MessageCodec.Encode(controlResult.Write));
+            Check(controlResultReader.ReadByte() == (byte)MessageType.VehicleControlResult, "opcode VehicleControlResult");
+            var controlResultRt = VehicleControlResultMessage.Read(controlResultReader);
+            Check(
+                !controlResultRt.Granted
+                && controlResultRt.DriverId == 1
+                && controlResultRt.VehicleKey == control.VehicleKey,
+                "round-trip VehicleControlResult (refus nommé par le conducteur effectif)");
+
+            var release = new VehicleReleaseMessage { VehicleKey = control.VehicleKey };
+            var releaseReader = new PacketReader(MessageCodec.Encode(release.Write));
+            Check(releaseReader.ReadByte() == (byte)MessageType.VehicleRelease, "opcode VehicleRelease");
+            Check(VehicleReleaseMessage.Read(releaseReader).VehicleKey == release.VehicleKey, "round-trip VehicleRelease");
+
+            // Motifs de bits des floats : l'écriture passe désormais par une union (aucune allocation),
+            // donc la conversion doit préserver **exactement** le motif — `-0` ne doit pas devenir `+0`,
+            // un NaN garder sa charge, un dénormal ne pas tomber à zéro.
+            var floatPatterns = new[]
+            {
+                0f,
+                -0f,
+                float.PositiveInfinity,
+                float.NegativeInfinity,
+                float.Epsilon,
+                -float.Epsilon,
+                float.MinValue,
+                float.MaxValue,
+                BitConverter.Int32BitsToSingle(unchecked((int)0x7fc00001)),
+            };
+            // Motifs lisibles bornés : un champ qui finit dans un journal ne doit pas pouvoir
+            // transporter 64 Ko, et la borne doit exister des deux côtés du codec.
+            var longDisconnectReasonThrew = false;
+            try
+            {
+                MessageCodec.Encode(new DisconnectMessage
+                {
+                    Reason = new string('x', Protocol.MaxReasonTextLength + 1),
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                longDisconnectReasonThrew = true;
+            }
+
+            Check(longDisconnectReasonThrew, "Disconnect (motif trop long) -> ProtocolException à l'écriture");
+
+            var longLeftReasonReadThrew = false;
+            try
+            {
+                var forged = new PacketWriter();
+                forged.WriteByte((byte)MessageType.PlayerLeft);
+                forged.WriteUInt16(2);
+                forged.WriteString("killi");
+                forged.WriteString(new string('x', Protocol.MaxReasonTextLength + 1));
+                var forgedReader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+                forgedReader.ReadByte();
+                PlayerLeftMessage.Read(forgedReader);
+            }
+            catch (ProtocolException)
+            {
+                longLeftReasonReadThrew = true;
+            }
+
+            Check(longLeftReasonReadThrew, "PlayerLeft (motif trop long forgé) -> ProtocolException à la lecture");
+
+            var floatPatternsOk = true;
+            foreach (var pattern in floatPatterns)
+            {
+                var patternWriter = new PacketWriter();
+                patternWriter.WriteFloat(pattern);
+                var patternReader = new PacketReader(patternWriter.BackingBuffer, 0, patternWriter.Length);
+                floatPatternsOk &= BitConverter.SingleToInt32Bits(patternReader.ReadFloat())
+                                   == BitConverter.SingleToInt32Bits(pattern);
+            }
+
+            Check(floatPatternsOk, "WriteFloat/ReadFloat préservent -0, ±infini, NaN et les dénormaux");
+
+            // Retrait (v11) : clé non nulle, espèce explicite, motif de journal.
+            var despawn = new EntityDespawnMessage
+            {
+                Key = control.VehicleKey,
+                Kind = EntityKind.Vehicle,
+                Reason = "véhicule détruit chez le serveur",
+            };
+            var despawnReader = new PacketReader(MessageCodec.Encode(despawn.Write));
+            Check(despawnReader.ReadByte() == (byte)MessageType.EntityDespawn, "opcode EntityDespawn");
+            var despawnRt = EntityDespawnMessage.Read(despawnReader);
+            Check(
+                despawnRt.Key == despawn.Key
+                && despawnRt.Kind == EntityKind.Vehicle
+                && despawnRt.Reason == despawn.Reason,
+                "round-trip EntityDespawn (clé + espèce + motif)");
+
+            var zeroDespawnKeyThrew = false;
+            try
+            {
+                MessageCodec.Encode(new EntityDespawnMessage { Kind = EntityKind.Item }.Write);
+            }
+            catch (ProtocolException)
+            {
+                zeroDespawnKeyThrew = true;
+            }
+
+            Check(zeroDespawnKeyThrew, "EntityDespawn (clé 0) -> ProtocolException à l'écriture");
+
+            var zeroDespawnReadThrew = false;
+            try
+            {
+                var forged = new PacketWriter();
+                forged.WriteByte((byte)MessageType.EntityDespawn);
+                forged.WriteLong(0L);
+                forged.WriteByte(EntityKind.Item);
+                forged.WriteString("ramassé");
+                var forgedReader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+                forgedReader.ReadByte();
+                EntityDespawnMessage.Read(forgedReader);
+            }
+            catch (ProtocolException)
+            {
+                zeroDespawnReadThrew = true;
+            }
+
+            Check(zeroDespawnReadThrew, "EntityDespawn (clé 0 forgée) -> ProtocolException à la lecture");
+
+            // Décodage UTF-8 strict : un paquet malformé est refusé, un emoji valide passe.
+            var invalidUtf8Threw = false;
+            try
+            {
+                var forged = new PacketWriter();
+                forged.WriteByte((byte)MessageType.Disconnect);
+                forged.WriteUInt16(2);
+                forged.WriteByte(0x00);
+                forged.WriteByte(0xC3); // début de séquence sans continuation
+                var forgedReader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+                forgedReader.ReadByte();
+                DisconnectMessage.Read(forgedReader);
+            }
+            catch (ProtocolException)
+            {
+                invalidUtf8Threw = true;
+            }
+
+            Check(invalidUtf8Threw, "ReadString (UTF-8 invalide) -> ProtocolException");
+
+            var unicodeWriter = new PacketWriter();
+            unicodeWriter.WriteString("Élodie-🌊");
+            var unicodeReader = new PacketReader(unicodeWriter.BackingBuffer, 0, unicodeWriter.Length);
+            Check(unicodeReader.ReadString() == "Élodie-🌊", "ReadString accepte accents et emoji (UTF-8 strict)");
+
             // L'empreinte de mods doit ignorer l'ordre de chargement mais réagir au contenu.
             var hashA = ModListHash.Compute(new[] { "mod.b", "mod.a" });
             var hashB = ModListHash.Compute(new[] { "mod.a", "mod.b" });
             var hashC = ModListHash.Compute(new[] { "mod.a", "mod.c" });
             Check(hashA == hashB, "ModListHash indépendant de l'ordre");
             Check(hashA != hashC, "ModListHash sensible au contenu");
+            Check(
+                ModListHash.Compute(new[] { "a\nb" }) != ModListHash.Compute(new[] { "a", "b" }),
+                "ModListHash : un saut de ligne ne collisionne pas avec deux identifiants");
 
-            // Lecture du rôle depuis la ligne de commande.
+            // Le plafond du snapshot de joueurs est `MaxClients`, pas 255 (octet).
+            var tooManyPlayersThrew = false;
+            try
+            {
+                var tooMany = new PlayersSnapshotMessage
+                {
+                    ServerTick = 1L,
+                    Players = new PlayerStateEntry[Protocol.MaxClients + 1],
+                };
+                MessageCodec.Encode(tooMany.Write);
+            }
+            catch (ProtocolException)
+            {
+                tooManyPlayersThrew = true;
+            }
+
+            Check(tooManyPlayersThrew, $"PlayersSnapshot (> MaxClients={Protocol.MaxClients}) -> ProtocolException à l'écriture");
+
+            // Lecture du rôle depuis la ligne de commande : le nom doit être exact.
             Check(LaunchModeParser.Parse(new[] { "Subnautica.exe", "-coopmode=server" }) == LaunchMode.Server, "parse -coopmode=server");
             Check(LaunchModeParser.Parse(new[] { "Subnautica.exe", "-coopmode=client" }) == LaunchMode.Client, "parse -coopmode=client");
             Check(LaunchModeParser.Parse(new[] { "Subnautica.exe" }) == LaunchMode.Off, "parse sans argument -> Off");
+            Check(LaunchModeParser.Parse(new[] { "Subnautica.exe", "-coopmodeevil=server" }) == LaunchMode.Off, "parse -coopmodeevil=server -> Off (nom exact)");
 
             Console.WriteLine();
             Console.WriteLine(failures == 0 ? "SELFTEST: SUCCES" : $"SELFTEST: {failures} ECHEC(S)");
