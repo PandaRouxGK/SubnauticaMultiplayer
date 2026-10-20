@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les quinze étapes, et ce que chacune prouve :
+# Les dix-sept étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -60,10 +60,19 @@
 #   O  deux clients, sonde de disparition -> l'hôte fabrique le même Seamoth puis le **détruit** ; le serveur
 #      l'annonce (`EntityDespawn`, protocole v11) et les **deux** clients détruisent leur copie. Le critère
 #      est « l'objet n'est plus dans le monde local », pas « un message est arrivé ».
+#   P  un client, sonde de position -> la garde P1 ne corrige **pas** un déplacement légitime (0 correction
+#      sur 6 s de nage à 1,25 m/s) et **refuse** un téléport de 100 m : le serveur journalise
+#      `position REFUSÉE` puis `RESYNCHRONISÉE`, et le client applique la correction. Le même run vérifie
+#      le chemin nominal de P0 : le client envoie `save=slot…` et le serveur répond `empreinte de
+#      sauvegarde acceptée`.
+#   Q  deux clients **séquentiels**, sonde de disparition -> l'hôte fabrique puis détruit le véhicule
+#      avec **un seul** client présent (délai 20 s) ; le second n'entre qu'après. Il reçoit le retrait rejoué, constate
+#      que l'entité est absente, et la sonde affirme qu'il ne la recrée pas : c'est la preuve de P2 (rejeu
+#      des retraits), qui n'existait pas avant.
 #
 # Usage :
-#   tools/verify.sh                    # les quinze étapes
-#   tools/verify.sh --only=B           # une seule étape (A..O, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les dix-sept étapes
+#   tools/verify.sh --only=B           # une seule étape (A..Q, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -110,7 +119,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L  étapes à lancer (défaut : les douze)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q  étapes à lancer (défaut : les dix-sept)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -130,9 +139,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKLMNO,]*)
+    *[!ABCDEFGHIJKLMNOPQ,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -359,6 +368,11 @@ assert_b() {
     # d'attendre l'autre client, et les chargements de monde ne se chevauchent plus. C'est la ligne que la
     # présente étape avait perdue quand les deux clients démarraient dans le même dixième de seconde.
     expect_any B 'avatar instancié pour .*tenue=[1-9][0-9]* pièce\(s\)' "l'avatar distant naît avec la tenue de son joueur" "$c1" "$c2"
+    # La sonde doit avoir attendu un **autre client**, pas l'avatar de l'hôte (id 9999) : sans cette
+    # assertion, un retour du défaut du 2026-10-19 (l'hôte compté comme pair, mesures mutuelles non
+    # exercées) ne serait visible que par un `verdict=False` tardif, sans dire pourquoi.
+    expect B "$c1" 'autre\(s\) client\(s\) connu\(s\)' \
+        "client 1 : la sonde a attendu un autre client, pas l'avatar de l'hôte"
     expect B "$c1" '\[sonde\] présence : verdict=True' "client 1 : la sonde de présence rend True"
     expect B "$c2" '\[sonde\] présence : verdict=True' "client 2 : la sonde de présence rend True"
 
@@ -495,10 +509,17 @@ assert_n() {
     expect N "$c1" '\[net\] apparition reçue : clé=0x[0-9a-f]+' "client 1 : l'annonce arrive"
     expect N "$c1" "\\[spawn\\] entité créée : clé=0x[0-9a-f]+ '.*' \\(Seamoth\\)" "client 1 : l'entité est créée"
     expect N "$c1" '\[sonde\] apparition : verdict=True' "client 1 : la clé locale correspond à la clé annoncée"
+    # P1bis : le contrat de contenu doit être vérifiable **et discriminant** (une définition falsifiée
+    # doit être refusée). Sans la seconde moitié, « le hash se vérifie » serait vrai même si la
+    # vérification renvoyait toujours vrai — le faux vert que le §35.2 a déjà coûté une fois.
+    expect N "$c1" 'définition vérifiée=True.*définition falsifiée refusée=True' \
+        "client 1 : le contrat de contenu vérifie la définition et refuse une définition falsifiée"
 
     expect N "$c2" '\[net\] apparition reçue : clé=0x[0-9a-f]+' "client 2 : l'annonce arrive"
     expect N "$c2" "\\[spawn\\] entité créée : clé=0x[0-9a-f]+ '.*' \\(Seamoth\\)" "client 2 : l'entité est créée"
     expect N "$c2" '\[sonde\] apparition : verdict=True' "client 2 : la clé locale correspond à la clé annoncée"
+    expect N "$c2" 'définition vérifiée=True.*définition falsifiée refusée=True' \
+        "client 2 : le contrat de contenu vérifie la définition et refuse une définition falsifiée"
 }
 
 assert_o() {
@@ -528,6 +549,33 @@ assert_o() {
     expect O "$c2" '\[sonde\] disparition : verdict=True' "client 2 : la sonde vérifie que l'objet a disparu"
     expect O "$c2" "cette instance (avait l'objet et l'a détruit|ne l'a jamais eu, et ne l'a pas recréé)" \
         "client 2 : l'issue est nommée (retiré, ou jamais eu sans fantôme)"
+}
+
+assert_q() {
+    local server="$WORK_DIR/Q/coop-server.log"
+    local c1="$WORK_DIR/Q/coop-client.log"
+    local c2="$WORK_DIR/Q/coop-client-2.log"
+
+    # Le premier client est celui que la sonde de l'hôte attend (`COOP_DESPAWN_CLIENTS=1`) : il vit la
+    # destruction en direct, et c'est ce qui borne le run. Le second n'est lancé **qu'après son verdict**,
+    # donc après le retrait : il ne peut le connaître que par le rejeu du carnet (P2).
+    expect Q "$c1" '\[sonde\] disparition : verdict=True' "le client présent à la destruction conclut True"
+    expect Q "$server" "\\[sonde\\] disparition : véhicule .* détruit après [0-9]+s" \
+        "l'hôte détruit le véhicule avant l'arrivée du second client"
+
+    # La preuve P2 elle-même : le serveur **dit** qu'il rejoue, et le client tardif reçoit un retrait pour
+    # une entité qu'il n'a jamais eue localement — puis ne la fabrique pas après coup.
+    expect Q "$server" '\[net\] disparition : 1 entité\(s\) disparue\(s\) rejouée\(s\) pour .*#2' \
+        "le serveur rejoue le retrait au client arrivé après coup"
+    expect Q "$c2" '\[net\] disparition reçue : clé=0x[0-9a-f]+ \(véhicule\)' \
+        "le client tardif reçoit le retrait rejoué"
+    expect Q "$c2" 'véhicule 0x[0-9a-f]+ absent localement — rien à retirer' \
+        "le client tardif ne l'avait jamais eu : rien à détruire, et ce n'est pas une erreur"
+    expect Q "$c2" '\[sonde\] disparition : verdict=True' "le client tardif conclut True"
+    expect Q "$c2" "cette instance ne l'a jamais eu, et ne l'a pas recréé" \
+        "le client tardif nomme l'issue : jamais eu, pas recréé"
+    expect_missing Q "$c2" '\[spawn\] entité créée' \
+        "le client tardif ne recrée pas une entité que le serveur a déjà retirée"
 }
 
 assert_m() {
@@ -642,6 +690,35 @@ assert_i() {
     expect I "$client" 'gels refusés 0 -> 2' "les deux appels (Begin puis End) sont bien interceptés"
 }
 
+assert_p() {
+    local client="$WORK_DIR/P/coop-client.log"
+    local server="$WORK_DIR/P/coop-server.log"
+
+    # P0 (chemin nominal) : l'empreinte part avec le handshake et le serveur l'accepte. Le chemin de
+    # **refus** (deux sauvegardes différentes) n'est pas exerçable avec une seule fixture ; il est couvert
+    # par les tests hors jeu, et c'est écrit ainsi dans PLAN.md §44.4.
+    expect P "$client" 'save=slot=' "le client envoie l'empreinte de sa sauvegarde dans le handshake"
+    expect P "$server" 'empreinte de sauvegarde acceptée' "le serveur accepte une empreinte identique"
+
+    # P1 : la sonde ne rend True que si la nage n'a produit **aucune** correction et si le téléport a
+    # produit au moins une correction appliquée. Les deux moitiés sont nécessaires : un garde qui ne
+    # corrige jamais passerait la première, un garde qui corrige tout passerait la seconde.
+    expect P "$client" '\[sonde\] position : verdict=True' \
+        "la nage normale n'est pas corrigée et le téléport l'est"
+    expect P "$client" 'nage normale : 0 correction' "aucune correction sur un déplacement légitime"
+    expect P "$client" 'téléport de 100 m : correction reçue=True, appliquée=True' \
+        "le client applique la correction renvoyée par le serveur"
+
+    # Côté serveur : le refus est nommé, la resynchronisation est nommée, et le taux est publié — c'est
+    # ce taux qui porte le critère d'arrêt à 5 % du §43.6.
+    expect P "$server" '\[net\] position REFUSÉE de .*correction renvoyée' \
+        "le serveur refuse le saut et renvoie une correction"
+    expect P "$server" '\[net\] position RESYNCHRONISÉE' \
+        "après trois refus consécutifs, la position est resynchronisée"
+    expect P "$server" '\[net\] position : .*refusée\(s\) \([0-9.]+%\)' \
+        "le taux de refus de position est publié"
+}
+
 assert_h() {
     local server="$WORK_DIR/H/coop-server.log"
     local client="$WORK_DIR/H/coop-client.log"
@@ -673,9 +750,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q}"
 fi
 
 if wanted A "$ONLY"; then
@@ -897,6 +974,21 @@ if wanted O "$ONLY"; then
     step O "disparition d'entité : le véhicule fabriqué puis détruit chez l'hôte disparaît chez les clients" assert_o "${args[@]}"
 fi
 
+if wanted Q "$ONLY"; then
+    # P2 : le second client arrive **après** le retrait. La séquence est portée par le harnais lui-même
+    # (lancement séquentiel) : la sonde de l'hôte n'attend qu'un client, le détruit, et le client 1 ne
+    # rend la main qu'après son verdict — le client 2 démarre donc après la destruction.
+    args=(--clients=2 --timeout=420
+        "--host-args=-coopmode=server -coopdebug=despawn"
+        "--host-env=COOP_DESPAWN_CLIENTS=1 COOP_DESPAWN_DELAY=20"
+        "--client-args=-coopmode=client -coopdebug=despawn"
+        "--client-marker=\\[sonde\\] disparition : verdict=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step Q "rejeu d'un retrait : un client arrivé après la destruction reçoit le retrait et ne recrée rien" assert_q "${args[@]}"
+fi
+
 if wanted M "$ONLY"; then
     # M4 / v9 : un client **conduit** le Seamoth de la sauvegarde, l'autre tente de le lui prendre. Le
     # premier garde la main ; le second reçoit un refus nommé (`VehicleControlResult`).
@@ -934,6 +1026,20 @@ if wanted I "$ONLY"; then
         args+=(--no-build)
     fi
     step I "menu Échap du client : le temps ne s'arrête pas" assert_i "${args[@]}"
+fi
+
+if wanted P "$ONLY"; then
+    # P0/P1 : un client dans le monde, hôte dédié. La sonde nage 6 s à 1,25 m/s (aucune correction
+    # attendue), puis maintient un téléport de 100 m pendant 0,6 s : le serveur doit le refuser, renvoyer
+    # la dernière position acceptée, et resynchroniser après trois refus.
+    args=(--clients=1 --timeout=300
+        "--host-args=-coopmode=server -batchmode -nographics"
+        "--client-args=-coopmode=client -coopdebug=position"
+        "--client-marker=\\[sonde\\] position : verdict=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step P "position autoritaire : la nage normale n'est pas corrigée, le téléport est refusé et corrigé" assert_p "${args[@]}"
 fi
 
 if wanted D "$ONLY"; then

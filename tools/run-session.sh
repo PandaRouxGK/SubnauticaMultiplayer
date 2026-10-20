@@ -83,7 +83,8 @@ Options :
   --wait-server-marker=REGEX  ligne du journal **serveur** attendue après les clients (autotest de l'hôte)
   --client-marker=REGEX ce qu'on attend du client  (défaut : fin de sonde si -coopdebug, sinon connexion)
   --clients=N           nombre de clients à lancer   (défaut : 1 ; les suivants écrivent coop-client<i>.log)
-  --host-env=VARIABLE=VALEUR   variable d'environnement pour l'hôte (ex. COOP_CREATURE_CHUNKS=1)
+  --host-env=VARIABLE=VALEUR   variable(s) d'environnement pour l'hôte, séparées par des espaces
+                               (ex. "COOP_CREATURE_CHUNKS=1 COOP_DESPAWN_DELAY=20")
   --fail-if=REGEX       motif qui fait échouer le run (défaut : verdict=False ; "" pour désactiver)
   --timeout=SECONDES    délai maximal **par étape**  (défaut : 90)
   --together            lance tous les clients (sans chevaucher leurs chargements de monde)
@@ -177,13 +178,18 @@ winpid_of() {
 launch_instance() {
     local env_pair="$1" args="$2" label="$3"
     local msys_pid winpid
+    local env_words=()
 
     # Le `cd` est fait dans le shell courant puis défait, et non dans un sous-shell : `( … & )` rendrait le
     # PID du sous-shell, pas celui de l'exécutable, et on arrêterait le mauvais processus. `env` remplace
     # son propre processus (exec), donc le PID rendu par `$!` reste bien celui du jeu.
     pushd "$GAME_DIR_BASH" >/dev/null || return 1
     if [ -n "$env_pair" ]; then
-        env "$env_pair" ./Subnautica.exe $args >/dev/null 2>&1 &
+        # Plusieurs `VARIABLE=VALEUR` séparées par des espaces (« COOP_A=1 COOP_B=2 ») : chacune doit
+        # être un argument distinct d'`env`. Une valeur contenant un espace n'est pas supportée, et
+        # aucune variable du projet n'en a besoin (compteurs et durées sont des nombres).
+        read -r -a env_words <<< "$env_pair"
+        env "${env_words[@]}" ./Subnautica.exe $args >/dev/null 2>&1 &
     else
         ./Subnautica.exe $args >/dev/null 2>&1 &
     fi

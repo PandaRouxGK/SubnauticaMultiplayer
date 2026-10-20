@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 13,
+  "pluginDir": "BepInEx/plugins/Coop",
+  "note": "Modèle versionné du manifeste d'installation. tools/deploy.sh refuse d'installer si ce protocolVersion diffère de src/Coop.Model/Protocol.cs, puis écrit dans le dossier du jeu une copie avec builtAtUtc, gitCommit, tailles et sha256 réels. Aucune empreinte n'est inventée ici.",
+  "requiredFiles": [
+    "Coop.Client.dll",
+    "Coop.Server.dll",
+    "Coop.Model.dll",
+    "LiteNetLib.dll"
+  ],
+  "files": []
+}
