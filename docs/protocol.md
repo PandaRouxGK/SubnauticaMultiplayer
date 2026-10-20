@@ -321,6 +321,9 @@ seule fois, puis oubliée.
    `slot="a"/session="b|c"`) ne peuvent plus produire le même hash ; les valeurs usuelles (`slot0000`,
    GUID, `Freedom`) sont inchangées. Le client attend sa propre empreinte au plus `20 s`
    (`SaveIdentityResolveTimeoutSeconds`), puis se connecte quand même : le refus sera nommé, pas silencieux.
+   Une instance peut se voir imposer sa sauvegarde (`-coopsave=slot0001`, `COOP_SAVE_SLOT`) : c'est ce qui
+   permet à l'étape **R** de `tools/verify.sh` de faire refuser un second client pour `sauvegarde
+   différente` pendant que le premier est admis (`PLAN.md` §49).
 2. **Le contrat de contenu n'est pas un pipeline.** Le serveur décrit ce qu'il annonce (espèce, échelle) et
    son empreinte canonique quantifiée au millimètre ; le client recompute et refuse une divergence. Il ne
    transporte **aucun** AssetBundle : une espèce que le client ne sait pas résoudre est refusée et comptée.

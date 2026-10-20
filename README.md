@@ -29,7 +29,10 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`entités créées ici=0`) ;
 - **contrat de contenu (P1bis)** : étape N verte — `définition vérifiée=True (hash=0x3da1f4bf782becdf)`
   et `définition falsifiée refusée=True` chez **les deux** clients, `définitions refusées=0` ;
-- **batterie des dix-sept étapes** : chaque étape a un verdict vert le 2026-10-19 (`PLAN.md` §46).
+- **batterie des dix-sept étapes (A–Q)** : chaque étape a un verdict vert le 2026-10-19 (`PLAN.md` §46).
+  Une **dix-huitième**, `R`, prouve depuis le 2026-10-20 le refus P0 « deux sauvegardes différentes »
+  en jeu (`étape R : OK (62s)` : client 1 sur `slot0000` admis, client 2 sur `slot0001` refusé
+  nommément, `PLAN.md` §49.5).
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
@@ -87,6 +90,10 @@ cd "/c/Program Files (x86)/Steam/steamapps/common/Subnautica"
   `[Reseau] Hote` / `Port` et `[Joueur] Pseudo` (créé au premier lancement) ;
 - serveur : `BepInEx/config/coop.subnautica.server.cfg`, section `[Reseau] Port` ;
 - variable d'environnement équivalente : `COOP_MODE=server|client` ;
+- sauvegarde imposée (utile pour le harnais, et pour deux parties différentes côte à côte) :
+  `-coopsave=slot0001` ou `COOP_SAVE_SLOT=slot0001`. Sans ce réglage, le menu charge la première
+  sauvegarde venue. Une valeur invalide **n'ouvre aucune partie** : l'instance reste au menu avec le
+  motif dans le journal, plutôt que de charger silencieusement une autre sauvegarde ;
 - journaux séparés par instance : `BepInEx/logs/coop-server.log`, `coop-client.log`,
   `coop-client-<n>.log` ;
 - un launcher existe **hors de ce dépôt** (démarrage, arrêt, sauvegarde par fichier de contrôle).
@@ -101,9 +108,9 @@ avec `-nographics`. Ce n'est pas un binaire serveur.
 | `dotnet test` | secondes | logique pure : empreinte de sauvegarde, plausibilité, définition/hash, messages, bornes de lecture |
 | `dotnet run --project tools/NetProbe -- selftest` | secondes | aller-retour de chaque message, refus des paquets tronqués et des `NaN` |
 | `tools/deploy.sh --verify` | secondes | binaires installés = manifeste |
-| `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only`, et les assertions P/Q/N/B acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
-| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–Q) |
-| `tools/verify.sh` | long (~33 min) | les dix-sept étapes, un seul verdict |
+| `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only`, et les assertions P/Q/N/B/R acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
+| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–R) |
+| `tools/verify.sh` | long (~35 min) | les dix-huit étapes, un seul verdict |
 
 `verify.sh` et `run-session.sh` lancent de vraies instances : ils exigent le jeu, une sauvegarde
 `slot0000` et Git Bash. Les tests hors jeu ne remplacent pas ces runs — ils les rendent moins

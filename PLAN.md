@@ -3194,8 +3194,9 @@ pas. Confiance globale : **moyenne**. Rapport et transcript : `docs/council/`.
 ### 43.2 Ce qui ne va pas
 
 > **Photo datée du 2026-10-19**, conservée telle quelle. Les correctifs depuis sont au §44 (P0/P1/P1bis),
-> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**243** tests),
-> `PlayerPlausibility` garde la position, la sauvegarde est un contrat, et `verify.sh` compte 17 étapes.
+> §47 (durcissement du modèle) et §48 (symétrie écriture/lecture) : `tests/` existe (**260** tests),
+> `PlayerPlausibility` garde la position, la sauvegarde est un contrat, et `verify.sh` compte désormais
+> 18 étapes (A–R, dont R pour le refus P0, §49).
 
 | Défaut | Fait | Conséquence |
 |---|---|---|
@@ -3573,7 +3574,7 @@ rejouées vertes après les changements — P, Q, N, B, L, O et D.**
 
 | Commande | Résultat |
 |---|---|
-| `dotnet test SubnauticaCoop.sln` | **243/243**, 0 échec, 0 avertissement |
+| `dotnet test SubnauticaCoop.sln` | **260/260**, 0 échec, 0 avertissement |
 | `dotnet run --project tools/NetProbe -- selftest` | **94/94**, `SELFTEST: SUCCES`, exit 0 |
 | `tools/check-verify-assertions.sh` | vert (17 étapes acceptées, P/Q/N/B discriminantes) |
 | builds `Coop.Client` + `Coop.Server` (Release) | 0 avertissement, 0 erreur |
@@ -3628,7 +3629,7 @@ Décision assumée : la clé `0` est désormais refusée pour `EntitySpawn` comm
 
 | Commande | Résultat |
 |---|---|
-| `dotnet test SubnauticaCoop.sln` | **243/243**, 0 échec (Debug et Release) |
+| `dotnet test SubnauticaCoop.sln` | **260/260**, 0 échec (Debug et Release) |
 | `dotnet run --project tools/NetProbe -- selftest` | **94/94**, `SELFTEST: SUCCES`, exit 0 |
 | builds `Coop.Client` + `Coop.Server` | Debug et Release, 0 erreur |
 | `tools/check-verify-assertions.sh` | vert (17 étapes acceptées) |
@@ -3652,7 +3653,7 @@ inconnu ou d'un identifiant dont dépend la correspondance d'entité :
 | Un pseudo Steam de plus de 32 caractères faisait refuser le handshake (« pseudo trop long ») : le joueur ne pouvait pas se connecter | `NormalizeUsername` tronque à `MaxUsernameLength`, sans couper une paire de surrogates, et le journalise | build client rc=0 |
 | `EntitySpawnMessage` acceptait `UniqueId` vide : le client s'en sert comme `UniqueIdentifier` pour retrouver l'entité dans sa sauvegarde, donc une chaîne vide ne désigne rien | identifiant vide refusé à l'écriture **et** à la lecture | 2 tests + 2 contrôles `NetProbe` |
 
-Contrôles hors jeu après ces ajouts : `dotnet test` **243/243**, `NetProbe selftest` **94/94**.
+Contrôles hors jeu après ces ajouts : `dotnet test` **260/260**, `NetProbe selftest` **94/94**.
 
 ### 48.5 Zéro allocation à l'écriture, culture, et mémoire du retrait côté client
 
@@ -3670,4 +3671,86 @@ Contrôles hors jeu après ces ajouts : `dotnet test` **243/243**, `NetProbe sel
 | `HandshakeResponse.Reason`, `Disconnect.Reason` et `PlayerLeft.Reason` n'avaient aucune borne : un pair pouvait faire transporter 64 Ko de texte dans un champ journalisé | `Protocol.MaxReasonTextLength=160` appliqué à l'écriture **et** à la lecture via `MessageText.Reason` | 4 tests + 2 contrôles `NetProbe` |
 | `PacketReader.Rewind`, `Remaining` et `ReadRemainingBytes` n'étaient exercés par aucun test direct | 8 tests de primitives (décalage de départ, reste exact, copie, lecture après la fin) | `dotnet test` |
 
-Contrôles hors jeu à la clôture : `dotnet test` **243/243**, `NetProbe selftest` **94/94**.
+Contrôles hors jeu à la clôture : `dotnet test` **260/260**, `NetProbe selftest` **94/94**.
+
+## 49. Preuve en jeu du refus P0 : deux sauvegardes différentes (2026-10-20, mesurée)
+
+### 49.1 Le trou, et pourquoi il existait
+
+P0 promet que deux instances qui n'ont pas la même sauvegarde **ne se parlent pas**. Le chemin nominal
+était mesuré (étape P : `save=slot=…` puis `empreinte de sauvegarde acceptée`), et le refus était couvert
+par `SaveIdentityTests` et `SaveIdentityWireLimitTests`. Mais aucun run ne le prononçait : `AutoLoadBehaviour`
+chargeait **la première sauvegarde chargeable**, donc les deux instances ouvraient forcément la même partie.
+Le refus n'était vrai que dans le modèle.
+
+### 49.2 Ce qui a été ajouté
+
+| Élément | Rôle | Où |
+|---|---|---|
+| `SaveSlotPreference` | lit `-coopsave=slot0001` ou `COOP_SAVE_SLOT`, nom exact, valeur validée (lettres/chiffres/`-`/`_`, ≤ 64) ; une valeur explicite invalide donne `null` **sans repli** | `src/Coop.Model/SaveSlotPreference.cs`, 17 tests |
+| `AutoLoadBehaviour` | choisit le bouton de chargement dont `saveGame` correspond, journalise `sauvegarde demandée : 'slot0001'` puis `trouvée`, et **s'arrête au menu** si elle est absente | `src/Shared/AutoLoadBehaviour.cs` |
+| `run-session.sh --client-2-args` | arguments des clients 2+ (le client 1 garde les siens et sert de contrôle) | `tools/run-session.sh` |
+| étape **R** | copie `slot0000` → `slot0001`, lance l'hôte + deux clients, exige le refus nommé des deux côtés et l'admission du client 1 | `tools/verify.sh` (`assert_r`) |
+| `check-verify-assertions.sh` | vérifie que les assertions R acceptent le format du code **et** échouent quand on retire les lignes du refus (12 échecs nommés sur neuf lignes retirées) | `tools/check-verify-assertions.sh` |
+| ordre déterministe des slots | `FindObjectsOfType` ne garantit aucun ordre : le premier run a chargé `slot0001` au lieu de `slot0000` partout, donc aucune divergence. Les boutons sont triés par nom de slot, et l'étape R nomme explicitement le slot de chaque rôle | `src/Shared/AutoLoadBehaviour.cs`, `tools/verify.sh` |
+
+### 49.3 Procédure
+
+```bash
+# prérequis : jeu installé, fixture slot0000, Git Bash
+tools/verify.sh --only=R          # ~2 min, deux clients
+tools/verify.sh --only=R --keep-logs   # garde les journaux dans verify-logs/R/
+```
+
+Ce que la commande fait, dans l'ordre : copie `SNAppData/SavedGames/slot0000` vers `slot0001` (seulement
+si `slot0001` n'existe pas déjà — un slot existant n'est jamais modifié), lance l'hôte sur `slot0000`, le
+client 1 sans préférence (contrôle), puis le client 2 avec `-coopsave=slot0001`. À la fin, les instances
+sont arrêtées **avant** la suppression de la copie.
+
+### 49.4 Ce que l'étape exige
+
+- client 2 : `[monde] sauvegarde demandée : 'slot0001'`, puis `sauvegarde demandée 'slot0001' trouvée`,
+  puis `save=slot='slot0001'` dans le handshake ;
+- serveur : `handshake REFUSÉ pour … : sauvegarde différente (client='slot0001', serveur='slot0000')` ;
+- client 2 : `handshake REFUSÉ par le serveur : sauvegarde différente (client='slot0001', serveur='slot0000')` ;
+- client 1, **même run** : `handshake ACCEPTÉ` — sans ce contrôle, une panne générale du handshake ferait
+  « réussir » le refus ;
+- client 2 : **aucun** `handshake ACCEPTÉ`.
+
+### 49.5 Mesure du 2026-10-20 : étape verte
+
+`tools/verify.sh --only=R` : **`étape R : OK (62s)`**, `VERDICT GLOBAL : tout est vert`, exit 0.
+Lignes obtenues (horodatages retirés) :
+
+```
+client 1  [monde] sauvegarde demandée : 'slot0000'
+          [monde] sauvegarde demandée 'slot0000' trouvée
+          [net] handshake envoyé (protocole v13, jeu=1.22.83031, save=slot='slot0000' session='aae68629-…' changeSet=83031 mode=Creative hash=0xd2ec243fe410e147)
+          [net] handshake ACCEPTÉ (id=1, tick serveur=553)
+serveur   [net] empreinte de sauvegarde acceptée : client=slot='slot0000' … · serveur=slot='slot0000' … hash=0xd2ec243fe410e147
+          [net] handshake REFUSÉ pour 'killi' : sauvegarde différente (client='slot0001', serveur='slot0000')
+client 2  [monde] sauvegarde demandée : 'slot0001'
+          [monde] sauvegarde demandée 'slot0001' trouvée
+          [net] handshake envoyé (… save=slot='slot0001' … hash=0x7ea8cb612149479e)
+          [net] handshake REFUSÉ par le serveur : sauvegarde différente (client='slot0001', serveur='slot0000')
+```
+
+Le **premier** run (avant correctif) a échoué pour une raison utile : `GetActiveSlotNames` rendait
+`[slot0000, slot0001]`, mais `FindObjectsOfType` a rendu les boutons dans l'autre ordre, donc le serveur
+**et** le client 1 ont chargé `slot0001`. Le client 2, lui aussi sur `slot0001`, a été **admis** — et
+l'assertion `expect_missing` l'a dit nommément au lieu de laisser passer un vert. C'est le défaut que le
+run devait révéler : sans ordre déterministe, « la même sauvegarde » n'était pas garantie. Corrigé par le
+tri par nom de slot et par des slots explicites dans l'étape.
+
+### 49.6 Ce que l'étape ne prouve pas
+
+- Elle compare des **slots** : la copie conserve `sessionId`, `changeSet` et le mode, donc le motif exercé
+  est la comparaison de slot. Les refus sur session, mode et `changeSet` plus ancien restent prouvés hors
+  jeu seulement.
+- Une copie de sauvegarde n'est pas une seconde **partie jouée** : si le jeu refusait de lister un dossier
+  copié, le journal le dirait (`sauvegarde demandée 'slot0001' introuvable`) et l'étape échouerait — le
+  test ne peut pas passer pour la mauvaise raison.
+- Elle ne remplace pas les tests de `SaveCompatibility` : elle exerce **un** chemin (slot), pas les combinaisons
+  session/mode/`changeSet`.
+- Elle dépend de la présence de `slot0000` : sur une installation sans cette fixture, l'étape échoue avec
+  `sauvegarde de référence absente` plutôt que de mesurer autre chose.
