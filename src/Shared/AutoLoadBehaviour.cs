@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using BepInEx.Logging;
 using UnityEngine;
@@ -48,6 +49,18 @@ namespace Coop.Shared
         /// </summary>
         public static bool WorldLoaded { get; private set; }
 
+        /// <summary>
+        /// Condition posée par le plugin **client** : « une adresse de serveur est connue ».
+        ///
+        /// Sans elle, ce comportement ouvrait la partie trois secondes après le menu — bien avant qu'un
+        /// joueur ait pu saisir l'IP d'un serveur distant — et le client se retrouvait seul dans le monde,
+        /// à jouer une partie que personne ne simulait. La porte est volontairement **sans délai** :
+        /// mieux vaut rester au menu que charger une partie dans l'ignorance du serveur.
+        ///
+        /// Le serveur ne la pose pas (`null`) et charge exactement comme avant.
+        /// </summary>
+        public static Func<bool> BeforeLoad;
+
         private IEnumerator Start()
         {
             Log.LogInfo("[monde] attente du menu principal...");
@@ -55,6 +68,23 @@ namespace Coop.Shared
             Log.LogInfo("[monde] uGUI_MainMenu.main disponible.");
 
             yield return new WaitForSeconds(MenuSettleSeconds);
+
+            if (BeforeLoad != null)
+            {
+                if (!BeforeLoad())
+                {
+                    Log.LogInfo(
+                        "[monde] chargement en attente d'une adresse de serveur (panneau de connexion, " +
+                        "-coopserver ou fichier de configuration) — le monde ne sera pas ouvert avant.");
+                }
+
+                while (!BeforeLoad())
+                {
+                    yield return new WaitForSeconds(1f);
+                }
+
+                Log.LogInfo("[monde] adresse de serveur connue -> chargement du monde.");
+            }
 
             var saveLoadManager = SaveLoadManager.main;
             if (saveLoadManager == null)
@@ -73,7 +103,8 @@ namespace Coop.Shared
             uGUI_MainMenu.main.OnButtonLoad();
             yield return new WaitForSeconds(MenuSettleSeconds);
 
-            var buttons = Object.FindObjectsOfType<MainMenuLoadButton>();
+            // Qualifié : `using System;` (pour `Func`) apporte aussi `object`, et `Object` seul devient ambigu.
+            var buttons = UnityEngine.Object.FindObjectsOfType<MainMenuLoadButton>();
             Log.LogInfo($"[monde] MainMenuLoadButton trouvés: {buttons.Length}");
 
             // Sauvegarde imposée (`-coopsave=slot0001` ou `COOP_SAVE_SLOT`) : c'est ce qui permet au

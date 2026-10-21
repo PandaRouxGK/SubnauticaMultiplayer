@@ -128,6 +128,16 @@ namespace Coop.Server
             // lieu de laisser un client se téléporter toutes les 150 ms.
             public float ResyncWindowStart = -1f;
             public int ResyncsInWindow;
+
+            // — Demandes de fabrication (v16, M4/M6) ————————————————————————————————————
+            //
+            // Le serveur garde l'instant de la prochaine fabrication **autorisée** et le compte de ce qui
+            // a été accordé/refusé. Sans ce dernier, un client qui martèle des demandes refusées serait
+            // invisible dans le journal ; avec, le refus est nommé et compté.
+            public float NextEntitySpawnAt;
+            public int EntitySpawnRequests;
+            public int EntitySpawnsGranted;
+            public int EntitySpawnsRefused;
         }
         private readonly NetManager _net;
         private readonly EventBasedNetListener _listener;
@@ -385,8 +395,34 @@ namespace Coop.Server
         private readonly List<KeyValuePair<float, int>> _vehicleCandidates = new List<KeyValuePair<float, int>>();
         private readonly List<CreatureStateEntry> _creatureBuffer = new List<CreatureStateEntry>();
         private readonly List<KeyValuePair<float, int>> _creatureCandidates = new List<KeyValuePair<float, int>>();
+        /// <summary>
+        /// Dernière instance construite. Une sonde (et elle seule) a besoin de savoir si un client est
+        /// **dans le monde** : tuer une créature avant que le client n'ait chargé sa scène ne mesure pas
+        /// le même chemin (mesuré au premier run de l'étape Z, le 2026-10-21).
+        /// </summary>
+        internal static ServerNetwork Current { get; private set; }
+
+        /// <summary>Clients admis qui ont déjà annoncé une position, c'est-à-dire qui ont chargé leur monde.</summary>
+        internal int ClientsInWorld
+        {
+            get
+            {
+                var count = 0;
+                foreach (var session in _sessions.Values)
+                {
+                    if (session.Accepted && session.PositionsReceived > 0)
+                    {
+                        count++;
+                    }
+                }
+
+                return count;
+            }
+        }
+
         public ServerNetwork(string gameVersion, string modListHash, ManualLogSource log)
         {
+            Current = this;
             _log = log;
             _gameVersion = gameVersion;
             _modListHash = modListHash;
@@ -567,6 +603,10 @@ namespace Coop.Server
 
                 case MessageType.VehicleRelease:
                     HandleVehicleRelease(session, VehicleReleaseMessage.Read(reader));
+                    break;
+
+                case MessageType.EntitySpawnRequest:
+                    HandleEntitySpawnRequest(peer, session, EntitySpawnRequestMessage.Read(reader));
                     break;
 
                 default:

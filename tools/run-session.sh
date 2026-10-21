@@ -19,7 +19,19 @@
 #   tools/run-session.sh --together                   # lance tous les clients **avant** d'attendre leurs
 #                                                     # marqueurs (nécessaire aux sondes qui se mesurent
 #                                                     # mutuellement : l'un doit déjà être là)
+#   tools/run-session.sh --minutes=30 --clients=2 \
+#       --client-marker="connecté au serveur"         # **session longue** (P4) : une fois les marqueurs
+#                                                     # atteints, la session est tenue 30 min avant l'arrêt
 #   tools/run-session.sh --help
+#
+# `--minutes` ne remplace pas la session humaine de P4 : il tient les instances en vie le temps demandé et
+# laisse le graveur (`tools/session-verdict.sh`) décider. Sans lui, un run rend la main dès les marqueurs
+# — c'est ce qui convenait aux sondes, pas à une session de jeu.
+#
+# Depuis que l'adresse du serveur n'a plus de défaut (`127.0.0.1` était un piège pour un joueur
+# distant), chaque client lancé ici reçoit **explicitement** `-coopserver=<adresse>` : 127.0.0.1 par
+# défaut, surchargeable par `--server-addr=` ou `COOP_SERVER`. Sans ça, toutes les étapes existantes
+# resteraient au menu à attendre une saisie qui n'arrive jamais dans un run automatisé.
 #
 # Les marqueurs sont des expressions régulières étendues, cherchées **après l'en-tête du run courant**
 # (l'en-tête « === Coop client — … === » que chaque instance réécrit au démarrage) : une ligne laissée
@@ -59,6 +71,10 @@ CLIENT_MARKER=""
 WAIT_SERVER_MARKER=""
 CLIENTS=1
 STEP_TIMEOUT=90
+
+# Adresse du serveur imposée à chaque client. `COOP_SERVER` est aussi ce que lit le plugin : le harnais
+# et un lancement manuel parlent donc le même langage.
+SERVER_ADDR="${COOP_SERVER:-127.0.0.1}"
 KEEP=0
 BUILD=1
 KILL_ALL=0
@@ -74,6 +90,12 @@ RECONNECT_MARKER=""
 RECONNECT_DELAY=6
 RECONNECT_SERVER_MARKER="PlayerLeft diffusé"
 RECONNECT_SETTLE=10
+# Durée de **session** (minutes) tenue après les marqueurs, avant l'arrêt. Zéro = comportement des sondes :
+# le script rend la main dès les marqueurs atteints. P4 demande 30.
+MINUTES=0
+# Délai (s) de session avant le kill du client de `--reconnect` : zéro = kill dès le marqueur. P4 veut une
+# reconnexion **au milieu** de la session, pas au démarrage.
+RECONNECT_AFTER=0
 # Attente après les marqueurs, avant l'arrêt : laisse les compteurs périodiques (`[ping]`) se réécrire.
 SETTLE=0
 LAST_WINPID=""
@@ -106,6 +128,7 @@ Options :
   --wait-server-marker=REGEX  ligne du journal **serveur** attendue après les clients (autotest de l'hôte)
   --client-marker=REGEX ce qu'on attend du client  (défaut : fin de sonde si -coopdebug, sinon connexion)
   --clients=N           nombre de clients à lancer   (défaut : 1 ; les suivants écrivent coop-client<i>.log)
+  --server-addr=ADRESSE adresse imposée aux clients via -coopserver  (défaut : 127.0.0.1)
   --host-env=VARIABLE=VALEUR   variable(s) d'environnement pour l'hôte, séparées par des espaces
   --client-env=VARIABLE=VALEUR variable(s) d'environnement pour chaque client (et le client relancé)
                                (ex. "COOP_CREATURE_CHUNKS=1 COOP_DESPAWN_DELAY=20")
@@ -119,10 +142,12 @@ Options :
                         puis le relance (journal coop-client-N-b.log) — scénario P2
   --reconnect-args="…"  arguments du client relancé (défaut : ceux du client N)
   --reconnect-marker=REGEX  marqueur attendu du client relancé (défaut : CLIENT_MARKER)
+  --reconnect-after=S   attente de S secondes de session **avant** le kill du client (défaut : 0)
   --reconnect-delay=S   attente entre le kill et la relance (défaut : 6)
   --reconnect-server-marker=REGEX  ligne serveur attendue après le kill (défaut : PlayerLeft diffusé)
   --reconnect-settle=S  attente après la relance pour laisser les compteurs se réécrire (défaut : 10)
   --settle=S            attente après les marqueurs, avant l'arrêt (défaut : 0) — pour lire un compteur
+  --minutes=N           tient la session N minutes après les marqueurs avant d'arrêter (défaut : 0)
 OPTIONS
 }
 
@@ -135,6 +160,7 @@ for argument in "$@"; do
         --wait-server-marker=*) WAIT_SERVER_MARKER="${argument#*=}" ;;
         --client-marker=*) CLIENT_MARKER="${argument#*=}" ;;
         --clients=*) CLIENTS="${argument#*=}" ;;
+        --server-addr=*) SERVER_ADDR="${argument#*=}" ;;
         --host-env=*) HOST_ENV="${argument#*=}" ;;
         --client-env=*) CLIENT_ENV="${argument#*=}" ;;
         --fail-if=*) FAIL_IF="${argument#*=}" ;;
@@ -146,10 +172,12 @@ for argument in "$@"; do
         --reconnect=*) RECONNECT_CLIENT="${argument#*=}" ;;
         --reconnect-args=*) RECONNECT_ARGS="${argument#*=}" ;;
         --reconnect-marker=*) RECONNECT_MARKER="${argument#*=}" ;;
+        --reconnect-after=*) RECONNECT_AFTER="${argument#*=}" ;;
         --reconnect-delay=*) RECONNECT_DELAY="${argument#*=}" ;;
         --reconnect-server-marker=*) RECONNECT_SERVER_MARKER="${argument#*=}" ;;
         --reconnect-settle=*) RECONNECT_SETTLE="${argument#*=}" ;;
         --settle=*) SETTLE="${argument#*=}" ;;
+        --minutes=*) MINUTES="${argument#*=}" ;;
         -h|--help) usage; exit 0 ;;
         *) echo "option inconnue : $argument (--help)" >&2; exit 2 ;;
     esac
@@ -392,6 +420,14 @@ for index in $(seq 1 "$CLIENTS"); do
     client_pids+=("")
 done
 
+# Adresse explicite ajoutée aux arguments d'un client, sans écraser un `-coopserver` déjà fourni.
+with_server_addr() { # $1 = arguments du client
+    case " $1 " in
+        *" -coopserver="*) printf '%s' "$1" ;;
+        *) printf '%s -coopserver=%s' "$1" "$SERVER_ADDR" ;;
+    esac
+}
+
 launch_client() { # $1 = index
     local index="$1" suffix="${client_suffixes[$((index - 1))]}"
     client_starts[$((index - 1))]=$(date +%s)
@@ -402,6 +438,8 @@ launch_client() { # $1 = index
     if [ "$index" -gt 1 ] && [ -n "$CLIENT_ARGS_2" ]; then
         client_args="$CLIENT_ARGS_2"
     fi
+
+    client_args=$(with_server_addr "$client_args")
 
     if [ -n "$suffix" ]; then
         launch_instance "COOP_LOG_SUFFIX=$suffix${CLIENT_ENV:+ $CLIENT_ENV}" "$client_args" "client $index" || true
@@ -463,6 +501,13 @@ if [ "$RECONNECT_CLIENT" -gt 0 ]; then
         exit 1
     fi
 
+    # P4 veut une reconnexion **au milieu** de la session : sans ce délai, le kill tombe au démarrage et
+    # ne prouve que « le client revient juste après être entré » (c'est ce que font les étapes U et X).
+    if [ "$RECONNECT_AFTER" -gt 0 ]; then
+        echo "[reconnexion] ${RECONNECT_AFTER}s de session avant l'arrêt forcé du client $idx"
+        sleep "$RECONNECT_AFTER"
+    fi
+
     echo "[reconnexion] arrêt forcé du client $idx (PID Windows $pid)"
     taskkill //F //PID "$pid" >/dev/null 2>&1 || true
 
@@ -480,6 +525,7 @@ if [ "$RECONNECT_CLIENT" -gt 0 ]; then
 
     reconnect_args="$RECONNECT_ARGS"
     [ -n "$reconnect_args" ] || reconnect_args="$CLIENT_ARGS"
+    reconnect_args=$(with_server_addr "$reconnect_args")
     reconnect_marker="$RECONNECT_MARKER"
     [ -n "$reconnect_marker" ] || reconnect_marker="$CLIENT_MARKER"
     reconnect_log="$LOG_DIR/coop-client-$idx-b.log"
@@ -503,6 +549,20 @@ fi
 if [ -n "$WAIT_SERVER_MARKER" ]; then
     echo "[4/4] côté serveur : attente de « $WAIT_SERVER_MARKER »"
     wait_for_marker "$SERVER_LOG" "$WAIT_SERVER_MARKER" "serveur (autotest)" || { kill_instances; exit 1; }
+fi
+
+# Session longue (P4) : les marqueurs disent que tout est en place, pas que la session tient. Ici on la
+# **tient** le temps demandé, et chaque minute restante est écrite — un run qui s'arrête à 3 min sur 30 ne
+# doit pas ressembler à un run complet.
+if [ "$MINUTES" -gt 0 ]; then
+    session_end=$(( $(date +%s) + MINUTES * 60 ))
+    echo "[session] ${MINUTES} min tenues après les marqueurs — arrêt automatique à l'échéance"
+    while [ "$(date +%s)" -lt "$session_end" ]; do
+        remaining=$(( session_end - $(date +%s) ))
+        printf '      %s min %ss restantes\n' "$((remaining / 60))" "$((remaining % 60))"
+        sleep 60
+    done
+    echo "[session] échéance atteinte ($(elapsed_since "$started") depuis le lancement)"
 fi
 
 echo "run complet en $(elapsed_since "$started") (marqueurs atteints)"

@@ -12,8 +12,8 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `14` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v14` | `Protocol.ConnectionKey` |
+| Version du protocole | `17` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v17` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
 | Encodage | little-endian, tampons réutilisables, chaînes UTF-8 **strictes en lecture**, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
@@ -54,19 +54,21 @@ et encodé en UTF-8.
 | 10 | `PlayerEquipment` | client → serveur, puis serveur → autres | ReliableOrdered | `PlayerId` ushort, compte octet, puis les noms de `TechType` |
 | 11 | `PlayerHeldItem` | client → serveur, puis serveur → autres | ReliableOrdered | `PlayerId` ushort, `TechTypeName` string, compte octet, puis les paramètres d'animation actifs |
 | 12 | `PlayerColor` | serveur → client | ReliableOrdered | `PlayerId` ushort, `ColorIndex` octet |
-| 13 | `CreatureSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte ushort, puis par créature : `Key` long, position (3), quaternion (4) |
-| 14 | `VehicleSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet, puis par véhicule : `Key` long, position (3), quaternion (4), `Energy` float (0..1, normalisé par `EnergyInterface.GetValues`, **-1 = pas de batterie**) |
+| 13 | `CreatureSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte ushort, puis par créature : `Key` long, position (3), quaternion (4), `Health` float (0..1, `LiveMixin.health / maxHealth`, **-1 = pas de `LiveMixin`**, v17). Une valeur non finie est refusée à l'écriture comme à la lecture |
+| 14 | `VehicleSnapshot` | serveur → client | Unreliable | `ServerTick` long, compte octet, puis par véhicule : `Key` long, position (3), quaternion (4), `Energy` float (0..1, normalisé par `EnergyInterface.GetValues`, **-1 = pas de batterie**), `Health` float (0..1, `LiveMixin.health / maxHealth`, **-1 = pas de `LiveMixin`**, v16). Une valeur non finie (`NaN`/∞) est refusée à l'écriture comme à la lecture |
 | 15 | `PickupClaim` | client → serveur | ReliableOrdered | `PlayerId` ushort (revendiqué, falsifiable), `ItemKey` long, `TechTypeName` string |
 | 16 | `PickupResult` | serveur → demandeur | ReliableOrdered | `ItemKey` long, `TechTypeName` string (**≤ 64**, refusé au-delà à l'écriture comme à la lecture), `Granted` bool, `HolderId` ushort, `ClaimedBy` ushort |
 | 17 | `VehicleControl` | client → serveur | Unreliable (10 Hz) | `PlayerId` ushort (revendiqué, falsifiable), `VehicleKey` long, `Sequence` int, position et rotation (7 floats), vitesse (3 floats) |
 | 18 | `VehicleControlResult` | serveur → demandeur | ReliableOrdered | `VehicleKey` long, `Granted` bool, `DriverId` ushort |
 | 19 | `EntitySpawn` | serveur → client | ReliableOrdered | `Key` long (**jamais 0**), `UniqueId` string (**non vide**, ≤ 64), `TechTypeName` string (≤ 64), position (3 floats), quaternion (4 floats), échelle (3 floats), `DefinitionHash` long (**jamais 0**). Position, quaternion et échelle doivent être **finis** ; toute valeur `NaN`/∞ est refusée à l'écriture comme à la lecture |
-| 20 | `EntityDespawn` | serveur → client | ReliableOrdered | `Key` long (**jamais 0**, refusé à l'écriture comme à la lecture), `Kind` octet (`1` véhicule, `2` objet), `Reason` string (≤ 96) |
+| 20 | `EntityDespawn` | serveur → client | ReliableOrdered | `Key` long (**jamais 0**, refusé à l'écriture comme à la lecture), `Kind` octet (`1` véhicule, `2` objet, **`3` créature** — v17), `Reason` string (≤ 96) |
 | 21 | `VehicleRelease` | client → serveur | ReliableOrdered | `VehicleKey` long |
 | 22 | `PlayerCorrection` | serveur → client | ReliableOrdered | `ServerTick` long, position acceptée (3 floats, **finie** : `NaN`/∞ refusée à l'écriture comme à la lecture), `Reason` string (≤ 96) |
 | 23 | `VehicleUpgrades` | serveur → client | ReliableOrdered | `VehicleKey` long (**jamais 0**, refusé à l'écriture comme à la lecture), compte octet (**≤ `MaxVehicleUpgrades` = 8**, refusé au-delà), puis les entiers `TechType` (ushort), **triés et dédupliqués** à la lecture comme à l'écriture |
+| 24 | `EntitySpawnRequest` | client → serveur | ReliableOrdered | `RequestId` int, `TechType` ushort (**jamais 0**, refusé à l'écriture comme à la lecture), position (3 floats), quaternion (4 floats) — chaque nombre doit être **fini** |
+| 25 | `EntitySpawnResult` | serveur → demandeur | ReliableOrdered | `RequestId` int, `Granted` bool, `Key` long (**jamais 0 si accordée**, refusé à l'écriture comme à la lecture), `Reason` string (≤ 96, **non vide si refusée**) |
 
-Cinq points de contrat que ces messages portent :
+Les points de contrat que ces messages portent :
 
 - **Le serveur force `PlayerId`** sur ce qu'il rediffuse (#10, #11, #12) : un client ne peut donc pas se faire
   passer pour un autre ni choisir sa couleur (voir `docs/authority.md`).
@@ -91,6 +93,17 @@ Cinq points de contrat que ces messages portent :
   faire (objet ramassé). `Kind` évite deux index côté client — une clé de véhicule et une clé d'objet sont
   deux hachages de formes différentes. Le détenteur d'un objet ramassé est **exclu** de la diffusion de
   son propre retrait : son exemplaire est déjà dans son inventaire.
+- **Le client ne fabrique pas, il demande (#24/#25, v16).** Une entité demandée par un joueur n'existe que
+  dans **son** monde : la laisser vivre localement reviendrait à la voir seul, à la sauvegarder peut-être,
+  et à diverger. Le serveur arbitre donc (liste blanche, portée, cadence, plafond), fabrique, puis
+  l'annonce existante (#19) crée la copie chez tout le monde — **demandeur compris**, ce qui évite le
+  doublon. La décision est rendue au demandeur avec la **clé** de l'entité : c'est ce qui lui permet de
+  vérifier que l'objet qui apparaît est bien celui qu'il a demandé. Un refus est **nommé** et transporté,
+  comme pour le ramassage (#16) et la conduite (#18). Section 4 sexies.
+- **La santé d'un véhicule voyage dans le flux rapide (#14, v16).** `LiveMixin.health / maxHealth`, avec la
+  même sentinelle que l'énergie (`-1` = inconnue) : `0` est un véhicule détruit, pas une absence de
+  mesure. Le client applique la fraction **sans tuer** sa copie — la mort est une décision du serveur, qui
+  annonce le retrait (#20).
 - **L'empreinte de sauvegarde fait partie du handshake (#1, v13).** `Slot`, `SessionId`, `ChangeSet` et
   `GameMode` sont joints à un `Hash` d'intégrité ; le serveur refuse une partie différente, une cliente
   plus ancienne (`ChangeSet` inférieur) ou une empreinte altérée, avec le motif en clair. Un client sans
@@ -134,8 +147,7 @@ doit pas coûter un aller-retour.
 | Constante | Valeur | Justification |
 |---|---|---|
 | `MaxUnreliablePayloadBytes` | `1023` | **mesurée**, pas supposée : LiteNetLib refuse au-delà et l'écrit dans le journal *Unity*, hors de nos logs — le premier envoi de créatures (64 × 36 = 2 304 octets) a été jeté sans que rien ne le dise côté mod. La valeur vient du message de LiteNetLib lui-même : « exceeded maximum of 1023 bytes » (`Protocol.cs`) |
-| `CreatureStateEntryBytes` | `8 + 7 × 4 = 36` | calculée ici pour que le plafond suive si une entrée grossit (clé 64 bits + position + quaternion) |
-| `MaxCreatureStates` | `16` | 16 × 36 = 576 octets + en-tête (opcode, tick, compte). L'autotest de `tools/NetProbe` mesure un paquet plein à **587 octets** et vérifie qu'il tient sous 1 023 |
+| `CreatureStateEntryBytes` | `8 + 8 × 4 = 40` | calculée ici pour que le plafond suive si une entrée grossit (clé 64 bits + position + quaternion + santé, v17) |
 | `MaxEquipmentSlots` | `32` | borne de lecture d'un `PlayerEquipmentMessage` |
 | `MaxTechTypeNameLength` | `64` | borne des noms de `TechType` et de paramètres |
 | `MaxActionParams` | `8` | paramètres `holding_*` d'un objet tenu |
@@ -148,6 +160,7 @@ doit pas coûter un aller-retour.
 | `CreatureRelevancyRadiusMeters` | `120` | un client n'a rien à faire d'une créature à 800 m : la relevancy s'applique **dès le premier envoi**, pas après (`Protocol.cs`, plan §7) |
 | `MaxCreatureChunksPerTick` | `4` | un paquet ne peut porter que `MaxCreatureStates` créatures ; n'en envoyer qu'un seul faisait couper/rétablir l'IA de la même créature une fois par seconde (mesuré). Quatre paquets couvrent donc **64 créatures par client et par tick** |
 | `CreatureAdoptionTimeoutSeconds` | `2.0` | durée pendant laquelle une créature reste adoptée après son dernier état ; 1 s suffisait à la relâcher puis la ré-adopter en boucle (mesuré) |
+| `MaxCreatureStates` | `16` | 16 × 40 = 640 octets + en-tête ; l'autotest de `tools/NetProbe` mesure un paquet plein à **651 octets**, sous 1 023 |
 
 **Coût mesuré du plafond** (rapports du serveur, 2026-10-17) : `23,4 Ko/s` par client pour 64 créatures
 diffusées en 4 paquets, `19` à `22` créatures **sacrifiées** au plafond dans une zone à 83–87 candidates,
@@ -160,13 +173,30 @@ en silence.
 | Constante | Valeur | Justification |
 |---|---|---|
 | `VehicleStreamIntervalTicks` | `2` | **10 Hz**, la cadence des créatures : la mesure du §30 a montré qu'un Seamoth à 20 m/s produit alors des pas de `2,15 m`, et que c'est l'**interpolation cliente** — pas une cadence plus élevée — qui rend le mouvement continu (`RemoteVehicleManager`) |
-| `VehicleStateEntryBytes` | `8 + 7 × 4 = 36` | même forme que l'entrée de créature (clé 64 bits + position + quaternion), calculée pour que le plafond suive si elle grossit |
-| `MaxVehicleStates` | `16` | 16 × 36 = 576 octets + en-tête ; l'autotest de `tools/NetProbe` mesure un paquet plein à **586 octets**, sous 1 023 |
+| `VehicleStateEntryBytes` | `8 + 9 × 4 = 44` | clé 64 bits + position + quaternion + énergie (v14) + santé (v16), calculée pour que le plafond suive si elle grossit |
+| `MaxVehicleStates` | `16` | 16 × 44 = 704 octets + en-tête ; l'autotest de `tools/NetProbe` mesure un paquet plein à **714 octets**, sous 1 023 |
 | `VehicleRelevancyRadiusMeters` | `150` | plus large que le rayon des créatures (`120 m`) : un Seamoth se voit de loin et **se conduit de loin** ; le perdre à 121 m ferait sauter sa position à chaque passage de la frontière |
 | `VehicleTrackingTimeoutSeconds` | `2.0` | durée pendant laquelle le client continue d'interpoler sans nouvelle annonce ; au-delà, il relâche le véhicule (la simulation locale reprend) plutôt que de le laisser figé |
 
-Le message ne transporte **que** la position et l'orientation. Ni énergie, ni modules, ni dégâts, ni
-conduite : c'est dit dans `PLAN.md` §33 et dans la section 6 ci-dessous.
+Le flux #14 transporte la **position, l'orientation, l'énergie et la santé** ; les **modules** voyagent à
+part (#23) parce qu'ils changent rarement et qu'un module perdu change la profondeur du véhicule — un
+message fiable coûte moins qu'un état qui se corrige tout seul. La **conduite** n'est pas dans ce flux :
+elle a son propre message (#17) et sa décision (#18).
+
+### Fabrication demandée par un client (v16)
+
+| Constante | Valeur | Justification |
+|---|---|---|
+| `MaxEntitySpawnDistanceMeters` | `8` | la position demandée est comparée à la dernière position **acceptée** du joueur (celle de la garde P1, pas celle qu'il prétend avoir) ; au-delà, le client fabriquerait hors de sa portée et hors de toute simulation |
+| `EntitySpawnCooldownSeconds` | `5` | délai minimal entre deux fabrications accordées à la même session ; c'est une borne de cadence, pas un confort |
+| `MaxEntitySpawnsPerSession` | `8` | un joueur construit quelques véhicules dans une partie ; au-delà, la demande est refusée avec un motif plutôt que de laisser un client peupler le monde du serveur |
+| `MaxSpawnReasonLength` | `96` | motif de refus transporté (journal + message fiable) ; une chaîne non bornée est un paquet non borné |
+| liste blanche d'espèces | `Seamoth`, `Exosuit` | `ServerNetwork.SpawnableTechTypes` : seuls les véhicules dont le suivi (position, énergie, santé, modules) est déjà prouvé. Élargir cette liste est une décision, pas un effet de bord |
+
+L'ordre des refus est celui du code, et il compte pour la mesure : espèce, position connue, **cadence**,
+plafond, puis **portée**. Un client qui redemande aussitôt reçoit donc « cadence » avant tout examen de la
+distance — c'est ce que la sonde de l'étape Y a mesuré (et c'est pourquoi elle attend la fin du délai avant
+de tester la portée).
 
 ### Couleur de joueur
 
@@ -288,6 +318,10 @@ Ce que l'annonce ne fait pas, elle seule : **retirer**. Le retrait est un messag
 4 quater), et le carnet des entités fabriquées est borné à `256` (`MaxRememberedSpawns`) — une entité
 oubliée n'est plus rejouée aux clients suivants (c'est journalisé).
 
+Depuis la v16, **un client peut demander** cette fabrication (#24, section 4 sexies) : le serveur reste la
+seule source d'apparition, mais la demande vient d'un joueur. Le demandeur n'instancie rien lui-même — il
+attend l'annonce #19 comme les autres, ce qui évite la copie en double.
+
 ---
 
 ## 4 quater. Retrait d'entité : trois décisions, chacune née d'une mesure
@@ -339,6 +373,83 @@ seule fois, puis oubliée.
 
 ---
 
+---
+
+## 4 sexies. Dégâts des véhicules et fabrication demandée (v16)
+
+Deux manques nommés depuis le début de M4 : un véhicule endommagé chez l'hôte restait intact chez les
+autres, et un `spawn` fait **chez un client** n'existait pas dans le monde du serveur (l'étape N ne prouve
+que la fabrication par l'hôte). La v16 ferme les deux, et chacun avec une décision qui mérite d'être dite.
+
+### La santé : une valeur, pas un événement
+
+1. **Le serveur lit `LiveMixin`**, normalise (`health / maxHealth`) et met la fraction dans l'entrée de
+   véhicule (#14) — la même entrée que la position, donc au même rythme de 10 Hz et sans message nouveau.
+   Un véhicule sans `LiveMixin` vaut `-1`. `0` est une valeur légitime (épave) et n'est jamais confondue
+   avec l'absence de mesure.
+2. **Le client applique sans tuer.** La copie reçoit la fraction sur son `LiveMixin` (en écrivant le champ,
+   pas par une méthode du jeu qui déclencherait les événements de destruction), et une santé à `0` **ne
+   détruit pas** la copie : la mort est une décision du serveur, qui annonce le retrait (#20). Détruire
+   localement ferait disparaître un véhicule que le serveur pourrait encore réparer.
+3. **L'écart est publié, pas masqué.** La sonde cliente relit la santé **après** application et journalise
+   `santé appliquée=N écart santé max=… `, puis un `verdict=True` quand l'écart final tient sous `0,05` de
+   la capacité. À l'étape J : `appliquée=1`, écart final `0,00` (le maximum transitoire de `0,60` est la
+   première image, avant que la copie n'ait reçu l'état — il est journalisé, pas caché).
+
+### La fabrication demandée : quatre règles, un chemin
+
+Le client demande (#24), le serveur décide, fabrique dans **son** monde, et l'annonce #19 crée la copie
+chez tout le monde. Ce dernier point est la règle la plus importante : le demandeur **n'instancie rien
+lui-même**, il attend l'annonce comme les autres. Un client qui créerait sa propre copie la verrait deux
+fois (une locale, une annoncée) ou seule.
+
+Les quatre règles, dans l'ordre où le serveur les applique :
+
+1. **liste blanche d'espèces** — une valeur reçue n'est pas une permission ;
+2. **position connue** — sans position acceptée, il n'y a rien à comparer, donc refus nommé ;
+3. **cadence et plafond** — `5 s` entre deux accords, `8` par session ; le refus est nommé ;
+4. **portée** — `8 m` autour de la dernière position **acceptée**.
+
+Côté serveur, `ServerEntityFactory` est un composant (et non une méthode statique) parce que le prefab se
+charge de façon asynchrone (`CraftData.GetPrefabForTechTypeAsync`) : les demandes passent par une file et
+la réponse arrive par callback, sur le thread principal. La fabrique écrit un `UniqueIdentifier.Id` neuf
+sur l'objet (**c'est ce qui rend la clé stable pour tous** — un véhicule fabriqué à l'exécution n'en a pas
+toujours), puis relit la clé **après** la pose de l'identifiant et de la position. Une clé nulle est un
+échec nommé et l'objet partiel est détruit : une entité que personne ne peut désigner ne doit pas rester
+dans le monde du serveur sans être annoncée.
+
+---
+
+---
+
+## 4 septies. Dégâts et mort d'une créature (v17)
+
+Il manquait deux choses, et elles n'ont pas la même nature : la **santé** d'une créature ne voyageait pas
+(un poisson abattu chez l'hôte restait intact chez les autres), et sa **mort** n'était pas une décision
+transmise (une créature détruite côté serveur cessait simplement d'être annoncée ; le client la relâchait
+au bout de `2 s` et **rétablissait son IA locale** — un mort qui nage).
+
+1. **La fraction de vie voyage dans l'entrée de créature** (#13), au même rythme de 10 Hz que la position,
+   avec la sentinelle `-1` de l'énergie et de la santé des véhicules. `0` est une créature morte, pas une
+   absence de mesure. Le serveur lit `LiveMixin` **une fois par diffusion**, après avoir résolu les
+   composants au (re)chargement du cache : un `GetComponent` par créature et par tick serait payé dix fois
+   par seconde pour un composant qui ne change pas.
+2. **Le client applique sans tuer.** Il écrit la fraction sur le `LiveMixin` de sa copie, jamais par
+   `TakeDamage` : la mort est une décision du serveur, et un client qui tuerait localement ferait
+   disparaître une créature que le serveur pourrait encore guérir. Une fraction à `0` reste donc une copie
+   debout, jusqu'à l'annonce.
+3. **La mort est un `EntityDespawn` d'espèce `Creature`** (#20, `Kind=3`), émis une seule fois par clé
+   (registre borné à `512`) et **jamais** rediffusé ensuite : une créature morte sort du flux, sinon un
+   client qui a déjà retiré sa copie la verrait revenir. Le client détruit la copie **sans rendre l'IA**,
+   et garde la clé dans un registre de retraits : un état arrivé juste après ne doit pas la ré-adopter.
+4. **Un retrait reçu avant le chargement du monde n'est pas perdu.** Le client applique les retraits en
+   attente dès que le monde est chargé ; si le gestionnaire de créatures ne connaît pas encore la clé (son
+   registre est construit au premier état), `EntityDespawner` **balaye le monde local** par clé et détruit
+   la copie. Sans ce balayage, le premier run de l'étape Z a mesuré exactement le défaut : retrait reçu en
+   attente, appliqué à un registre vide, puis poisson chargé **vivant** — et son IA rétablie.
+
+---
+
 ## 5. Admission et refus
 
 `ServerNetwork.Validate` (`src/Coop.Server/ServerNetwork.cs`) refuse un handshake, **en donnant la raison en
@@ -381,15 +492,18 @@ premier avait tout créé. Les deux carnets sont bornés à `256` ; une clé rec
 
 Dit franchement, pour que ce document ne laisse pas croire à un contrat plus large qu'il n'est :
 
-- **Véhicules : position et conduite, rien d'autre.** Le flux #14 transporte la position et l'orientation
-  des véhicules du serveur, le client les interpole (`PLAN.md` §33), et depuis la v9 le **conducteur**
-  envoie son état (#17) : le serveur vérifie que la clé désigne un de ses véhicules, que le joueur est à
-  moins de `10 m`, et qu'aucun autre joueur ne conduisait déjà, puis applique et rediffuse (#18 rend la
-  décision au demandeur). Ne sont **pas** transportés : l'énergie, les modules, les dégâts — un client qui
-  conduit et un serveur qui ne simule pas le véhicule ne peuvent pas décider d'une panne. La
-  synchronisation suppose aussi un véhicule **présent dans la sauvegarde des deux côtés** : la création
-d'entité (v10, #19) et son retrait (v11, #20) existent désormais, mais **seulement du serveur vers les
-clients** — un véhicule fabriqué **chez un client** n'existe pas dans le monde du serveur.
+- **Véhicules : position, énergie, modules, santé, conduite.** Le flux #14 porte la position, l'orientation,
+  l'énergie (v14) et la santé (v16) ; les modules voyagent à part (#23, v15) parce qu'ils changent rarement
+  et qu'un module perdu change la profondeur du véhicule. Le client interpole la position (`PLAN.md` §33),
+  applique l'énergie, les modules et la fraction de santé — sans **tuer** sa copie : la mort est une
+  décision du serveur. Depuis la v9 le **conducteur** envoie son état (#17) : le serveur vérifie que la clé
+  désigne un de ses véhicules, que le joueur est à moins de `10 m`, et qu'aucun autre joueur ne conduisait
+  déjà, puis applique et rediffuse (#18). La synchronisation suppose un véhicule **présent des deux côtés** :
+  la création (#19, v10) et le retrait (#20, v11) existent, et depuis la v16 un client peut **demander**
+  une fabrication (#24) que le serveur arbitre (liste blanche, portée de `8 m`, cadence de `5 s`, plafond de
+  `8` par session) puis fabrique dans **son** monde avant de l'annoncer à tous. Ce qui n'existe pas : un
+  **coût** de fabrication (inventaire, matériaux), un effet de jeu mesuré de la santé (destruction,
+  réparation), et la persistance d'une entité fabriquée à l'exécution.
 - **Le volant se libère (v12, #21)** : le conducteur qui descend le rend immédiatement, et un silence de
   `VehicleSilenceReleaseSeconds` (3 s) le libère aussi. Le véhicule n'est donc plus perdu jusqu'à la
   déconnexion de son dernier conducteur.
@@ -409,6 +523,5 @@ clients** — un véhicule fabriqué **chez un client** n'existe pas dans le mon
   reçoit le rejeu des **apparitions et des retraits** ; il ne récupère ni ses réclamations de ramassage, ni
   un volant, ni une resynchronisation de baseline. Les réclamations du joueur **parti** sont libérées (pas
   transmises) et un client relancé est un nouveau joueur, avec un nouvel id. Mesuré le 2026-10-20 :
-  `PlayerLeft`, `handshake ACCEPTÉ … id=3`, retraits rejoués, `avatarsActifs=1` (aucun fantôme).
-- **Version 13** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
-  tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).
+  `PlayerLeft`, `handshake ACCEPTÉ … id=3`, retraits rejoués, `avatarsActifs=1` (aucun fantôme).- **Version 16** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
+tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

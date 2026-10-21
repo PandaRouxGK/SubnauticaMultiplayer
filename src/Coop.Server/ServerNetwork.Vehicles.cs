@@ -361,6 +361,22 @@ namespace Coop.Server
             // toute batterie pleine en `1` et toute batterie à moitié en `1` aussi.
             return VehicleModules.ReadNormalized(vehicle);
         }
+        private static float ReadVehicleHealth(Vehicle vehicle)
+        {
+            // `LiveMixin.health` est absolu (mesuré : `200` pour un Seamoth neuf, comme l'énergie) et
+            // `maxHealth` donne l'échelle : c'est `GetHealthFraction()` qui fait la division, et c'est
+            // cette fraction que le client applique. `-1` quand le composant manque — un véhicule sans
+            // points de vie n'est pas un véhicule détruit.
+            var mixin = vehicle.GetComponent<LiveMixin>();
+            if (mixin == null)
+            {
+                mixin = vehicle.GetComponentInChildren<LiveMixin>();
+            }
+
+            return mixin != null && mixin.maxHealth > 0.001f
+                ? UnityEngine.Mathf.Clamp01(mixin.GetHealthFraction())
+                : -1f;
+        }
         private void BroadcastVehicleUpgrades()
         {
             if (_vehicleCache == null || _vehicleCache.Length == 0)
@@ -540,6 +556,7 @@ namespace Coop.Server
                     {
                         Key = key,
                         Energy = ReadVehicleEnergy(vehicle),
+                        Health = ReadVehicleHealth(vehicle),
                         X = position.x,
                         Y = position.y,
                         Z = position.z,

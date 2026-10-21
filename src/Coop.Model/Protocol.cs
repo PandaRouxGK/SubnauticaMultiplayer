@@ -8,6 +8,24 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **17** : les **dégâts des créatures** (M3/M4) : la fraction de vie voyage dans l'entrée de
+        /// créature (#13), et la mort est une **décision du serveur** annoncée par `EntityDespawn` avec
+        /// `EntityKind.Creature` — un client ne peut pas tuer une créature que le serveur simule encore.
+        /// Sans ça, un poisson abattu chez l'hôte restait vivant chez les autres, et un poisson mort
+        /// côté serveur était relâché chez le client avec son IA rétablie.
+        /// **16** : deux manques nommés de M4, fermés ensemble parce qu'ils touchent tous les deux un
+        /// véhicule qui n'existe pas encore partout :
+        /// (a) **santé** dans `VehicleStateEntry` — un véhicule endommagé chez l'hôte restait intact chez
+        /// les autres ; la fraction voyage dans le flux déjà en place, avec la sentinelle `-1` de
+        /// l'énergie (`0` = détruit, pas « inconnu ») ;
+        /// (b) **fabrication demandée par un client** (`EntitySpawnRequest` / `EntitySpawnResult`) —
+        /// le client ne fabrique rien : il demande, le serveur arbitre puis fabrique, et l'annonce
+        /// existante crée la copie chez tout le monde, demandeur compris.
+        /// **15** : ajout des **modules** (`VehicleUpgrades`, M4) : l'ensemble installé voyage à part de
+        /// la position, en fiable, parce qu'un module manquant change la profondeur et la charge utile
+        /// du véhicule.
+        /// **14** : ajout de l'**énergie** dans `VehicleStateEntry` (M4) — la charge normalisée voyage
+        /// avec la position, au même rythme, plutôt que dans un message séparé.
         /// **13** : trois ajouts d'un seul coup, parce qu'ils changent tous les trois l'admission ou
         /// l'apparition d'entités, et qu'un client v12 ne saurait lire aucun des trois :
         /// (a) **empreinte de sauvegarde** dans le `HandshakeRequest` (slot, session, changeSet, mode) —
@@ -38,13 +56,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 15;
+        public const int Version = 17;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v15";
+        public const string ConnectionKey = "coop-subnautica-v17";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -190,15 +208,15 @@ namespace Coop.Model
 
         /// <summary>
         /// Taille d'une entrée de créature sur le fil : clé 64 bits (8) + position et quaternion
-        /// (7 × 4). C'est ce chiffre qui décide du plafond ci-dessous, et il est calculé ici plutôt
-        /// qu'écrit en dur ailleurs : le jour où une entrée grossit, le plafond suit.
+        /// (7 × 4) + santé (v17, 4). C'est ce chiffre qui décide du plafond ci-dessous, et il est calculé
+        /// ici plutôt qu'écrit en dur ailleurs : le jour où une entrée grossit, le plafond suit.
         /// </summary>
-        public const int CreatureStateEntryBytes = 8 + 7 * 4;
+        public const int CreatureStateEntryBytes = 8 + 8 * 4;
 
         /// <summary>
         /// Nombre maximum de créatures dans un <see cref="CreatureSnapshotMessage"/>.
         ///
-        /// Dérivé de la limite de paquet : 16 × 36 = 576 octets, plus l'en-tête (opcode, tick, compte)
+        /// Dérivé de la limite de paquet : 16 × 40 = 640 octets, plus l'en-tête (opcode, tick, compte)
         /// — largement sous les <see cref="MaxUnreliablePayloadBytes"/>, sans avoir à découper en
         /// plusieurs paquets. Le plafond précédent (64) ne tenait pas dans un paquet, et le test du
         /// selftest le vérifie désormais pour que ça ne puisse pas revenir.
@@ -255,10 +273,11 @@ namespace Coop.Model
 
         /// <summary>
         /// Taille d'une entrée de véhicule sur le fil : clé 64 bits (8) + position et quaternion
-        /// (7 × 4) — même forme que <see cref="CreatureStateEntryBytes"/>, et calculée de la même façon
-        /// pour que le plafond suive le jour où l'entrée grossit.
+        /// (7 × 4) + énergie (v14) + santé (v16) — soit 44 octets, même forme que
+        /// <see cref="CreatureStateEntryBytes"/>, et calculée de la même façon pour que le plafond suive le
+        /// jour où l'entrée grossit.
         /// </summary>
-        public const int VehicleStateEntryBytes = 8 + 7 * 4;
+        public const int VehicleStateEntryBytes = 8 + 9 * 4;
 
         /// <summary>
         /// Nombre maximum de véhicules dans un <see cref="VehicleSnapshotMessage"/>.
@@ -275,6 +294,29 @@ namespace Coop.Model
         /// est refusé plutôt que tronqué en silence.
         /// </summary>
         public const int MaxVehicleUpgrades = 8;
+
+        /// <summary>
+        /// Distance (m) maximale entre le joueur demandeur et la position où il demande une fabrication.
+        ///
+        /// Ce n'est pas une règle de confort : sans elle, un client pourrait demander un Seamoth à l'autre
+        /// bout de la carte, c'est-à-dire créer une entité hors de sa portée et hors de toute simulation.
+        /// La position comparée est la dernière **acceptée** par la garde P1, pas celle que le client
+        /// prétend avoir.
+        /// </summary>
+        public const float MaxEntitySpawnDistanceMeters = 8f;
+
+        /// <summary>Délai (s) minimal entre deux fabrications accordées à la même session.</summary>
+        public const float EntitySpawnCooldownSeconds = 5f;
+
+        /// <summary>
+        /// Nombre maximal de fabrications accordées à une session. Un joueur construit quelques véhicules
+        /// dans une partie ; au-delà, la demande est refusée avec un motif, plutôt que de laisser un client
+        /// peupler le monde du serveur.
+        /// </summary>
+        public const int MaxEntitySpawnsPerSession = 8;
+
+        /// <summary>Longueur maximale d'un motif de refus d'apparition (journal + message fiable).</summary>
+        public const int MaxSpawnReasonLength = 96;
 
         /// <summary>
         /// Rayon (m) autour d'un joueur dans lequel un véhicule est jugé pertinent.
@@ -386,6 +428,18 @@ namespace Coop.Model
         /// être perdu comme un état de position (le prochain le remplacerait).
         /// </summary>
         VehicleUpgrades = 23,
+
+        /// <summary>
+        /// Demande de fabrication d'une entité, émise par un client (ReliableOrdered, v16).
+        ///
+        /// Le client ne fabrique **rien** localement : il demande, le serveur décide. Sans ce message, une
+        /// entité créée chez un client n'existerait pas chez les autres et le demandeur serait le seul à la
+        /// voir — exactement ce que le modèle autoritaire interdit.
+        /// </summary>
+        EntitySpawnRequest = 24,
+
+        /// <summary>Décision du serveur sur une demande de fabrication, au seul demandeur (v16).</summary>
+        EntitySpawnResult = 25,
     }
 
     /// <summary>

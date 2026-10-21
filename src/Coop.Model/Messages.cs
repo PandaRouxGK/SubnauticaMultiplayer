@@ -636,8 +636,24 @@ namespace Coop.Model
         public float RotZ;
         public float RotW;
 
+        /// <summary>
+        /// Points de vie, normalisés `0..1` (`LiveMixin.health / maxHealth`), ou **-1 = inconnue**
+        /// (créature sans `LiveMixin`), v17. Même sentinelle que celle des véhicules, et pour la même
+        /// raison : `0` est une créature morte, pas une absence de mesure. Un écrivain **doit** la
+        /// renseigner — la valeur par défaut d'une structure est `0`, donc « morte ».
+        ///
+        /// Le client l'applique **sans tuer** : la mort est une décision du serveur, annoncée par
+        /// `EntityDespawn` (`EntityKind.Creature`).
+        /// </summary>
+        public float Health;
+
         public void Write(PacketWriter writer)
         {
+            if (float.IsNaN(Health) || float.IsInfinity(Health))
+            {
+                throw new ProtocolException($"santé de créature non finie ({Health})");
+            }
+
             writer.WriteLong(Key);
             writer.WriteFloat(X);
             writer.WriteFloat(Y);
@@ -646,6 +662,7 @@ namespace Coop.Model
             writer.WriteFloat(RotY);
             writer.WriteFloat(RotZ);
             writer.WriteFloat(RotW);
+            writer.WriteFloat(Health < 0f ? -1f : (Health > 1f ? 1f : Health));
         }
 
         public static CreatureStateEntry Read(PacketReader reader)
@@ -660,10 +677,18 @@ namespace Coop.Model
                 RotY = reader.ReadFloat(),
                 RotZ = reader.ReadFloat(),
                 RotW = reader.ReadFloat(),
+                Health = reader.ReadFloat(),
             };
             PlayerPositionMessage.EnsureFinite(
                 entry.X, entry.Y, entry.Z,
                 entry.RotX, entry.RotY, entry.RotZ, entry.RotW);
+
+            if (float.IsNaN(entry.Health) || float.IsInfinity(entry.Health))
+            {
+                throw new ProtocolException($"santé de créature reçue non finie ({entry.Health})");
+            }
+
+            entry.Health = entry.Health < 0f ? -1f : (entry.Health > 1f ? 1f : entry.Health);
             return entry;
         }
     }
@@ -748,11 +773,27 @@ namespace Coop.Model
         /// </summary>
         public float Energy;
 
+        /// <summary>
+        /// Points de vie, normalisés `0..1` (`LiveMixin.health / LiveMixin.maxHealth`), ou **-1 = inconnue**
+        /// (véhicule sans `LiveMixin`, ou composant absent). Même sentinelle que l'énergie, et pour la même
+        /// raison : `0` est un véhicule détruit, pas une absence d'information.
+        ///
+        /// Ce que le client en fait : il applique la fraction sur sa copie **sans la tuer** — la mort est
+        /// une décision du serveur, qui annonce le retrait. Tuer localement sur une santé à zéro ferait
+        /// disparaître un véhicule que le serveur pourrait encore réparer.
+        /// </summary>
+        public float Health;
+
         public void Write(PacketWriter writer)
         {
             if (float.IsNaN(Energy) || float.IsInfinity(Energy))
             {
                 throw new ProtocolException($"énergie de véhicule non finie ({Energy})");
+            }
+
+            if (float.IsNaN(Health) || float.IsInfinity(Health))
+            {
+                throw new ProtocolException($"santé de véhicule non finie ({Health})");
             }
 
             writer.WriteLong(Key);
@@ -764,6 +805,7 @@ namespace Coop.Model
             writer.WriteFloat(RotZ);
             writer.WriteFloat(RotW);
             writer.WriteFloat(Energy < 0f ? -1f : (Energy > 1f ? 1f : Energy));
+            writer.WriteFloat(Health < 0f ? -1f : (Health > 1f ? 1f : Health));
         }
 
         public static VehicleStateEntry Read(PacketReader reader)
@@ -779,6 +821,7 @@ namespace Coop.Model
                 RotZ = reader.ReadFloat(),
                 RotW = reader.ReadFloat(),
                 Energy = reader.ReadFloat(),
+                Health = reader.ReadFloat(),
             };
             PlayerPositionMessage.EnsureFinite(
                 entry.X, entry.Y, entry.Z,
@@ -790,6 +833,13 @@ namespace Coop.Model
             }
 
             entry.Energy = entry.Energy < 0f ? -1f : (entry.Energy > 1f ? 1f : entry.Energy);
+
+            if (float.IsNaN(entry.Health) || float.IsInfinity(entry.Health))
+            {
+                throw new ProtocolException($"santé de véhicule reçue non finie ({entry.Health})");
+            }
+
+            entry.Health = entry.Health < 0f ? -1f : (entry.Health > 1f ? 1f : entry.Health);
             return entry;
         }
     }
@@ -1442,6 +1492,13 @@ namespace Coop.Model
 
         /// <summary>Objet ramassable : clé de <c>ItemIdentity</c>.</summary>
         public const byte Item = 2;
+
+        /// <summary>
+        /// Créature : clé de <c>CreatureIdentity</c> (v17). Un troisième index, parce qu'une clé de
+        /// créature est un troisième hachage de forme différente — la confondre avec un objet ferait
+        /// chercher un `Pickupable` à la place d'un poisson.
+        /// </summary>
+        public const byte Creature = 3;
     }
 
     /// <summary>
@@ -1461,7 +1518,7 @@ namespace Coop.Model
     {
         public long Key;
 
-        /// <summary><see cref="EntityKind.Vehicle"/> ou <see cref="EntityKind.Item"/>.</summary>
+        /// <summary><see cref="EntityKind.Vehicle"/>, <see cref="EntityKind.Item"/> ou <see cref="EntityKind.Creature"/> (v17).</summary>
         public byte Kind;
 
         /// <summary>Motif lisible, pour le journal du receveur · jamais interprété.</summary>
@@ -1474,7 +1531,7 @@ namespace Coop.Model
                 throw new ProtocolException("disparition sans clé d'entité (clé=0)");
             }
 
-            if (Kind != EntityKind.Vehicle && Kind != EntityKind.Item)
+            if (Kind != EntityKind.Vehicle && Kind != EntityKind.Item && Kind != EntityKind.Creature)
             {
                 throw new ProtocolException($"espèce d'entité invalide ({Kind}) dans une disparition");
             }
@@ -1505,7 +1562,7 @@ namespace Coop.Model
                 throw new ProtocolException("disparition reçue sans clé d'entité (clé=0)");
             }
 
-            if (msg.Kind != EntityKind.Vehicle && msg.Kind != EntityKind.Item)
+            if (msg.Kind != EntityKind.Vehicle && msg.Kind != EntityKind.Item && msg.Kind != EntityKind.Creature)
             {
                 throw new ProtocolException($"espèce d'entité inconnue ({msg.Kind}) dans une disparition");
             }
@@ -1535,6 +1592,155 @@ namespace Coop.Model
             }
 
             return reason;
+        }
+    }
+
+    /// <summary>
+    /// Demande de fabrication d'une entité par un client (ReliableOrdered, v16, M4/M6).
+    ///
+    /// Pourquoi un message descendant : une entité fabriquée par un joueur n'existe que dans **son**
+    /// monde. La laisser vivre localement reviendrait à la voir seul, à la sauvegarder peut-être, et à
+    /// diverger des autres instances — le contraire du modèle de ce projet. Le client **demande** donc,
+    /// le serveur fabrique, et l'annonce existante (<see cref="EntitySpawnMessage"/>) crée la copie chez
+    /// tout le monde, demandeur compris.
+    ///
+    /// `TechType` voyage en entier : les deux côtés compilent le même jeu, donc la même énumération
+    /// (même choix que les modules de véhicule, v15). Le serveur n'accepte qu'une **liste blanche** :
+    /// une valeur reçue n'est pas une permission.
+    ///
+    /// Les nombres sont finis ou le message est refusé : une position `NaN` créerait une entité que
+    /// personne ne pourrait ni voir ni retirer.
+    /// </summary>
+    public sealed class EntitySpawnRequestMessage
+    {
+        /// <summary>Identifiant choisi par le client, rendu tel quel dans la décision.</summary>
+        public uint RequestId;
+
+        /// <summary>Entier de `TechType` demandé (`Seamoth`, `Exosuit`…), jamais 0.</summary>
+        public ushort TechType;
+
+        public float X, Y, Z;
+        public float RotX, RotY, RotZ, RotW;
+
+        public void Write(PacketWriter writer)
+        {
+            if (TechType == 0)
+            {
+                throw new ProtocolException("demande d'apparition sans TechType (0)");
+            }
+
+            PlayerPositionMessage.EnsureFinite(X, Y, Z, RotX, RotY, RotZ, RotW);
+
+            writer.WriteByte((byte)MessageType.EntitySpawnRequest);
+            writer.WriteInt((int)RequestId);
+            writer.WriteUInt16(TechType);
+            writer.WriteFloat(X);
+            writer.WriteFloat(Y);
+            writer.WriteFloat(Z);
+            writer.WriteFloat(RotX);
+            writer.WriteFloat(RotY);
+            writer.WriteFloat(RotZ);
+            writer.WriteFloat(RotW);
+        }
+
+        public static EntitySpawnRequestMessage Read(PacketReader reader)
+        {
+            var msg = new EntitySpawnRequestMessage
+            {
+                RequestId = (uint)reader.ReadInt(),
+                TechType = reader.ReadUInt16(),
+                X = reader.ReadFloat(),
+                Y = reader.ReadFloat(),
+                Z = reader.ReadFloat(),
+                RotX = reader.ReadFloat(),
+                RotY = reader.ReadFloat(),
+                RotZ = reader.ReadFloat(),
+                RotW = reader.ReadFloat(),
+            };
+
+            if (msg.TechType == 0)
+            {
+                throw new ProtocolException("demande d'apparition reçue sans TechType (0)");
+            }
+
+            PlayerPositionMessage.EnsureFinite(
+                msg.X, msg.Y, msg.Z,
+                msg.RotX, msg.RotY, msg.RotZ, msg.RotW);
+
+            return msg;
+        }
+    }
+
+    /// <summary>
+    /// Décision du serveur sur une demande de fabrication (ReliableOrdered, v16), envoyée au seul
+    /// demandeur.
+    ///
+    /// Pourquoi une décision explicite : une demande refusée sans réponse laisserait le joueur devant un
+    /// objet qui n'apparaît pas, sans savoir si c'est un bug ou un refus. Le motif est **nommé** et
+    /// transporté, comme pour le ramassage (v8) et la conduite (v9).
+    ///
+    /// Une fabrication accordée porte la clé du serveur : c'est la même que celle de l'annonce
+    /// <see cref="EntitySpawnMessage"/> qui suit, et c'est ce qui permet au demandeur de vérifier que
+    /// l'entité qu'il voit est bien celle qu'il a demandée.
+    /// </summary>
+    public sealed class EntitySpawnResultMessage
+    {
+        public uint RequestId;
+        public bool Granted;
+
+        /// <summary>Clé de l'entité fabriquée — 0 si la demande est refusée.</summary>
+        public long Key;
+
+        public string Reason = string.Empty;
+
+        public void Write(PacketWriter writer)
+        {
+            var reason = Reason ?? string.Empty;
+            if (reason.Length > Protocol.MaxSpawnReasonLength)
+            {
+                throw new ProtocolException($"motif d'apparition trop long ({reason.Length} > {Protocol.MaxSpawnReasonLength})");
+            }
+
+            // Une décision *accordée* sans clé ne désigne rien : le client ne pourrait pas relier
+            // l'annonce qui suit à sa demande. Et un refus muet n'explique rien.
+            if (Granted && Key == 0L)
+            {
+                throw new ProtocolException("apparition accordée sans clé d'entité");
+            }
+
+            if (!Granted && reason.Length == 0)
+            {
+                throw new ProtocolException("refus d'apparition sans motif");
+            }
+
+            writer.WriteByte((byte)MessageType.EntitySpawnResult);
+            writer.WriteInt((int)RequestId);
+            writer.WriteByte((byte)(Granted ? 1 : 0));
+            writer.WriteLong(Key);
+            writer.WriteString(reason);
+        }
+
+        public static EntitySpawnResultMessage Read(PacketReader reader)
+        {
+            var msg = new EntitySpawnResultMessage
+            {
+                RequestId = (uint)reader.ReadInt(),
+                Granted = reader.ReadByte() != 0,
+                Key = reader.ReadLong(),
+                Reason = reader.ReadString(),
+            };
+
+            if (msg.Reason.Length > Protocol.MaxSpawnReasonLength)
+            {
+                throw new ProtocolException($"motif d'apparition reçu trop long ({msg.Reason.Length})");
+            }
+
+            if (msg.Granted && msg.Key == 0L)
+            {
+                throw new ProtocolException("apparition accordée reçue sans clé d'entité");
+            }
+
+            return msg;
         }
     }
 

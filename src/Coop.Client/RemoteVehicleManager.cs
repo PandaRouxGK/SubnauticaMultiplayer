@@ -119,6 +119,9 @@ namespace Coop.Client
             public bool BodyWasKinematic;
             public bool BodyForcedKinematic;
 
+            /// <summary>Composant de points de vie mis en cache : cherché une fois par véhicule, pas dix fois par seconde.</summary>
+            public LiveMixin Health;
+
             public bool LocallyDrivenLogged;
         }
 
@@ -309,26 +312,27 @@ namespace Coop.Client
                 return;
             }
 
-            List<long> resolved = null;
-            foreach (var pair in _pendingUpgrades)
+            // Les clés sont **copiées** avant la boucle : `ApplyUpgrades` retire l'entrée qu'il vient de
+            // traiter, et modifier un `Dictionary` pendant son énumération lève `InvalidOperationException`.
+            // Mesuré en session (P4 du 2026-10-21) : `[net] erreur en traitant un paquet : Collection was
+            // modified` à l'adoption d'un véhicule, c'est-à-dire un paquet de véhicule perdu à chaque fois.
+            // La copie est aussi ce qui rend la boucle correcte : chaque entrée traitée sort du dictionnaire,
+            // et celles qui n'ont pas encore de véhicule suivi y restent pour la prochaine adoption.
+            var keys = new List<long>(_pendingUpgrades.Keys);
+            for (var i = 0; i < keys.Count; i++)
             {
-                if (!_tracked.TryGetValue(pair.Key, out var entry) || entry.Vehicle == null)
+                // Retirée entre-temps (autre `OnUpgrades` pendant le chargement) : rien à faire.
+                if (!_pendingUpgrades.TryGetValue(keys[i], out var serverTypes))
                 {
                     continue;
                 }
 
-                (resolved ?? (resolved = new List<long>())).Add(pair.Key);
-                ApplyUpgrades(entry, pair.Value);
-            }
+                if (!_tracked.TryGetValue(keys[i], out var entry) || entry.Vehicle == null)
+                {
+                    continue;
+                }
 
-            if (resolved == null)
-            {
-                return;
-            }
-
-            for (var i = 0; i < resolved.Count; i++)
-            {
-                _pendingUpgrades.Remove(resolved[i]);
+                ApplyUpgrades(entry, serverTypes);
             }
         }
 
@@ -456,6 +460,7 @@ namespace Coop.Client
                 }
 
                 ApplyEnergy(entry, state.Energy);
+                ApplyHealth(entry, state.Health);
 
                 entry.To = position;
                 entry.ToRotation = rotation;
@@ -629,6 +634,33 @@ namespace Coop.Client
 
         private int _energiesApplied;
 
+        // — Santé des véhicules (v16, M4) ————————————————————————————————————————————
+        //
+        // Mêmes règles que l'énergie : sentinelle `-1`, écriture seulement au-delà de 1 % d'écart. Ce qui
+        // change : on n'applique pas la santé par une méthode du jeu qui déclencherait les événements de
+        // dégâts (`onHealDamage`, clips, mort locale). Le serveur est seul juge de la destruction ; le
+        // client se contente d'afficher la fraction annoncée.
+        private const float HealthApplyThreshold = 0.01f;
+
+        private int _healthApplied;
+        private float _maxHealthDivergence;
+        private string _maxHealthDivergenceLabel = "(aucune)";
+        private float _lastAppliedHealth = -1f;
+        private string _lastAppliedHealthLabel = "(aucune)";
+
+        /// <summary>Applications de santé réellement écrites sur une copie locale.</summary>
+        internal int HealthAppliedCount => _healthApplied;
+
+        /// <summary>Écart maximal observé entre la fraction locale et celle annoncée, avant écriture.</summary>
+        internal float MaxHealthDivergence => _maxHealthDivergence;
+
+        internal string MaxHealthDivergenceLabel => _maxHealthDivergenceLabel;
+
+        /// <summary>Dernière fraction de santé appliquée (`-1` = jamais).</summary>
+        internal float LastAppliedHealth => _lastAppliedHealth;
+
+        internal string LastAppliedHealthLabel => _lastAppliedHealthLabel;
+
         /// <summary>
         /// Applique la charge annoncée (v14). `-1` veut dire « inconnue » (pas de batterie) : on ne
         /// touche à rien. L'écriture n'a lieu que si l'écart dépasse 1 %, pour ne pas réécrire la même
@@ -648,6 +680,55 @@ namespace Coop.Client
             {
                 _energiesApplied++;
             }
+        }
+
+        /// <summary>
+        /// Applique la fraction de santé annoncée (v16). `-1` = inconnue : on ne touche à rien, comme pour
+        /// l'énergie. La valeur écrite est `fraction × maxHealth` — `health` est absolu, et confondre les
+        /// deux ferait tomber un Seamoth à 0,4 point de vie au lieu de 40 %.
+        ///
+        /// Une santé à `0` **ne détruit pas** la copie locale : le serveur annonce le retrait par
+        /// `EntityDespawn`, et c'est cette annonce qui fait disparaître le véhicule. Tuer ici ferait
+        /// disparaître un véhicule que le serveur peut encore réparer.
+        /// </summary>
+        private void ApplyHealth(Tracked entry, float health)
+        {
+            if (health < 0f || entry.Vehicle == null)
+            {
+                return;
+            }
+
+            if (entry.Health == null)
+            {
+                entry.Health = entry.Vehicle.GetComponent<LiveMixin>()
+                               ?? entry.Vehicle.GetComponentInChildren<LiveMixin>();
+            }
+
+            var mixin = entry.Health;
+            if (mixin == null || mixin.maxHealth <= 0.001f)
+            {
+                return;
+            }
+
+            var localFraction = mixin.GetHealthFraction();
+            var divergence = Mathf.Abs(localFraction - health);
+            if (divergence > _maxHealthDivergence)
+            {
+                _maxHealthDivergence = divergence;
+                _maxHealthDivergenceLabel = entry.Label;
+            }
+
+            if (divergence < HealthApplyThreshold)
+            {
+                return;
+            }
+
+            // Écriture directe : `AddHealth`/`TakeDamage` déclencheraient les événements du jeu (sons,
+            // `onHealDamage`) à chaque annonce, alors que rien n'est en train de frapper ce véhicule ici.
+            mixin.health = Mathf.Clamp01(health) * mixin.maxHealth;
+            _healthApplied++;
+            _lastAppliedHealth = health;
+            _lastAppliedHealthLabel = entry.Label;
         }
 
         // — Enregistrement du flux (P3) ————————————————————————————————————————————
@@ -724,7 +805,8 @@ namespace Coop.Client
                 "relâchés={6} conduits localement={7} écart avant lissage max={8:F2}m ({9}) " +
                 "pas par image max={10:F2}m moy={11:F2}m sur {12} image(s) en mouvement (fps≈{13:F0}) " +
                 "dont ≥1m={14}, vitesse implicite≈{15:F1} m/s, énergies appliquées={16}, " +
-                "modules reçus={17} divergences={18} appliqués={19} retirés={20}",
+                "modules reçus={17} divergences={18} appliqués={19} retirés={20} " +
+                "santé appliquée={21} écart santé max={22:F2} ({23})",
                 _tracked.Count,
                 _snapshotsReceived,
                 _statesReceived,
@@ -745,7 +827,10 @@ namespace Coop.Client
                 _upgradesMessages,
                 _upgradesDivergences,
                 VehicleModuleApplier.AppliedCount,
-                VehicleModuleApplier.RemovedCount);
+                VehicleModuleApplier.RemovedCount,
+                _healthApplied,
+                _maxHealthDivergence,
+                _maxHealthDivergenceLabel);
         }
 
         /// <summary>Journalise le résumé toutes les 5 s : un run doit se lire, pas se déduire.</summary>

@@ -4370,3 +4370,243 @@ règle sans changement de calcul.
 
 Même motif que `SnapshotTickGate` (§54.5) : une règle qui décide d'une mesure doit pouvoir échouer hors du
 jeu, sinon sa seule preuve est un run de deux minutes.
+
+## 62. Kit P4 : la session longue devient une mesure rejouable (2026-10-21)
+
+**Verdict : P4 avait un critère et aucun instrument.** `0 exception`, `0 désync > 2 m`, « sauvegarde +
+rechargement + reconnexion » sont écrits dans les journaux, mais rien ne les agrègeait, et
+`run-session.sh` rendait la main dès les marqueurs atteints — un run de 2 min ne pouvait pas se
+distinguer de la session de 30 min. Trois pièces ajoutées, aucune assertion supprimée :
+
+| Brique | Fichier | Ce qu'elle fait |
+|---|---|---|
+| session longue | `tools/run-session.sh --minutes=N` (+ `--reconnect-after=S`) | tient les instances N minutes après les marqueurs, et place la reconnexion **au milieu** de la session au lieu du démarrage |
+| orchestrateur | `tools/p4-session.sh` | deux clients, hôte en `-coopdebug=save`, reconnexion au tiers, durée réelle, copie des journaux puis verdict unique |
+| graveur | `tools/session-verdict.sh` | lit les journaux et note : exceptions du mod, désync des créatures, durée, sauvegarde, reconnexion, rechargement |
+
+### 62.1 Ce que le graveur refuse de faire
+
+- **Il ne prend pas `écart avant lissage max` pour une désync.** Un run réel mesure `7,04 m` à 20 m/s :
+  c'est le mouvement légitime entre deux annonces, pas une divergence. Le seul compteur de divergence
+  **au repos** publié en session est la `dérive max` des créatures (segments terminés, IA vérifiée
+  coupée), le même que W compare à 2 m.
+- **Il ne valide pas un vert vide.** `dérive max=0.00m` avec `segments=0` est un **échec** : aucune paire
+  n'a été comparée.
+- **Il ne confond pas une erreur d'environnement avec une exception du mod.** `XR: OpenVR Error!` au
+  démarrage ([Unity Log]) est compté, nommé, et n'invalide pas le verdict ; une ligne
+  `[Error] [Coop Client]` le fait échouer.
+- **Il ne prouve pas tout.** La divergence des **véhicules** et celle de **position des avatars** ne
+  sont pas mesurées (les avatars ne publient aucun écart ; les corrections P1 ne comptent que les
+  téléports refusés). Les deux sont imprimées en `RÉSERVE`, pas passées sous silence.
+
+### 62.2 Le kit a trouvé un défaut dès son premier run
+
+Premier run de 2 min, verdict **rouge** pour une raison réelle — le critère « 0 exception » a payé
+immédiatement :
+
+```
+[Error  ] [Coop Client] [net] erreur en traitant un paquet : System.InvalidOperationException:
+Collection was modified; enumeration operation may not execute.
+  at RemoteVehicleManager.FlushPendingUpgrades ()
+  at RemoteVehicleManager.OnSnapshot (VehicleSnapshotMessage)
+```
+
+`FlushPendingUpgrades` énumérait `_pendingUpgrades` en appelant `ApplyUpgrades`, qui **retire** l'entrée
+pendant l'énumération : chaque paquet de véhicule arrivant au moment d'une adoption levait, et le paquet
+était perdu. Correctif : copie des clés avant la boucle (`new List<long>(_pendingUpgrades.Keys)`), l'entrée
+traitée sortant du dictionnaire par le même chemin qu'avant. Deux occurrences dans le premier run
+(client 2 et client 2 relancé), **zéro** dans le run de contrôle après correctif.
+
+### 62.3 Mesures du 2026-10-21
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `session-verdict.sh --self-test` | **8 cas / 0 échec** — 1 vert, 1 bruit d'environnement toléré, 6 rouges (exception, dérive 2,50 m, mesure vide, sauvegarde absente, reconnexion absente, durée courte) |
+| run de contrôle `--minutes=2` | `exceptions du mod = 0` (4 lignes [Unity Log] nommées) · dérive `1,18 m` (6 697 segments) et `1,21 m` (36 932) · durée `4 min 33 s` · sauvegarde serveur `verdict=True` · reconnexion : départ diffusé + 3 admissions · rechargement : 1 relance · **VERDICT P4 : VERT**, rc=0 |
+| run qui a trouvé le défaut | même scénario, rc=1 : 2 exceptions `InvalidOperationException` |
+
+Le second run dure 4 min 33 s pour 2 min demandées : le chargement des mondes, la reconnexion et
+l'attente de l'autotest de sauvegarde s'ajoutent à la durée tenue. Le graveur mesure donc la **durée du
+journal serveur**, pas la durée demandée — et exige `--minutes` moins 60 s de tolérance.
+
+### 62.4 Ce que ce chapitre ne prouve pas
+
+- **La session de 30 minutes n'a pas été jouée.** Le kit est prêt ; il reste à lancer
+  `tools/p4-session.sh` (30 min) avec deux instances, puis la vraie P4 — deux **humains**, installation
+  faite par le second, qui est une propriété de la session et non du code.
+- **La désync des véhicules et des avatars n'est pas mesurée** (§62.1). Un verdict vert ne dit donc pas
+  « aucune divergence nulle part » : il dit « aucune exception, aucune dérive de créature au-dessus de
+  2 m, session tenue, sauvegarde, reconnexion et rechargement prouvés ».
+- Le seuil de 2 m porte sur la **dérive cumulée maximale** de la session : un seul échantillon au-dessus
+  suffit à rougir. C'est le critère tel qu'il est écrit, pas une marge de confort.
+
+## 63. Rejoindre un serveur distant : saisir l'adresse (2026-10-21)
+
+**Verdict : le client ne pouvait pas se connecter à un serveur qui n'est pas sur sa machine sans éditer
+un fichier de configuration.** `[Reseau] Hote` valait `127.0.0.1` par défaut, était lu au chargement du
+plugin, et la connexion partait toute seule. Pour un ami derrière un autre réseau, il n'existait **aucun
+endroit** où taper une IP publique.
+
+### 63.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| règle d'adresse | `src/Coop.Model/ServerAddress.cs` | `host[:port]`, IPv4 ou nom d'hôte ; refus **nommés** (port hors 1..65535, IPv4 invalide, IPv6, schéma d'URL, hôte vide) ; lecture exacte de `-coopserver=` et `COOP_SERVER` |
+| panneau de connexion | `src/Coop.Client/JoinPanelBehaviour.cs` | au menu : champ adresse, champ port, bouton « Rejoindre », Entrée valide ; l'adresse est mémorisée dans `[Reseau] Hote`/`Port` ; le panneau se masque quand la session est acceptée et revient si elle échoue |
+| changement à chaud | `Plugin.SetEndpoint` + `CoopClientPlugin.ApplyEndpoint` | coupe la session en cours, oublie l'acceptation, reconnecte vers la nouvelle adresse — pas besoin de relancer le jeu |
+| porte de chargement | `src/Shared/AutoLoadBehaviour.cs` (`BeforeLoad`) | côté client, le monde n'est **pas** ouvert avant qu'une adresse soit connue (`-coopserver`, fichier ou saisie) ; le serveur ne pose pas la condition et charge comme avant |
+| sonde | `src/Coop.Client/JoinProbeBehaviour.cs` (`-coopdebug=join`) | remplit les **vrais** champs et appelle le **même** `Submit()` que le bouton : adresse invalide refusée **sans connexion**, puis adresse valide connectée |
+| harnais | `tools/run-session.sh` (`--server-addr=`) | chaque client lancé par le harnais reçoit `-coopserver=<adresse>` (127.0.0.1 par défaut), sinon les 24 étapes resteraient au menu à attendre une saisie |
+
+### 63.2 Mesures (2026-10-21)
+
+| Contrôle | Résultat |
+|---|---|
+| `dotnet test` | **327/327** rc=0 (13 nouveaux cas `ServerAddressTests` : hôte+port, défaut, espaces, port 0/65536/-1/abc, port manquant, octet > 255, underscore, IPv6, schéma, argument exact vs `-coopserverevil=`) |
+| build client + serveur | rc=0 |
+| en jeu, chemin **panneau** : client lancé avec `-coopserver=999.999.1.1` (refusé au démarrage) + `-coopdebug=join -coopjoin=127.0.0.1:7777` | `adresse REFUSÉE : « 999.999.1.1 » — adresse IPv4 invalide` puis `aucune adresse de serveur — en attente d'une saisie` ; panneau construit ; `adresse refusée : « 999.999.1.1:7777 »` ; `nouvelle adresse : 127.0.0.1:7777 (changement)` ; `adresse de serveur connue -> chargement du monde` ; `handshake ACCEPTÉ (id=1)` ; `panneau … masqué` ; `[sonde] join : verdict=True` |
+| non-régression | `tools/verify.sh --only=E` **verte en 102 s** (`VERDICT GLOBAL : tout est vert`) avec l'adresse injectée par le harnais |
+
+### 63.3 Ce que ce chapitre ne prouve pas
+
+- **La frappe réelle n'est pas simulée** : la sonde remplit les champs et soumet par le chemin du bouton.
+  Le clavier, le focus et le rendu uGUI sont ceux de Unity, pas couverts par une assertion.
+- **Pas de traversée de NAT, pas de lobby, pas de relais** : l'IP publique doit être saisie à la main, et
+  le port UDP 7777 redirigé chez l'hôte. Un CGNAT d'opérateur ne se contourne qu'avec un réseau privé
+  virtuel externe, que le mod n'intègre pas.
+- **IPv6 est refusé** (nommément) : LiteNetLib est utilisé en IPv4 dans ce projet.
+- **Aucune authentification ni chiffrement** : exposer le serveur sur Internet accepte quiconque connaît
+  l'adresse. C'est écrit dans le README, à côté de la marche à suivre.
+
+## 64. M4 fermé : la santé voyage, un client peut demander une fabrication (v16, 2026-10-21)
+
+Deux manques étaient nommés depuis §33 et §56 : un véhicule endommagé chez l'hôte restait intact chez les
+autres, et un `spawn` fait **chez un client** n'existait pas dans le monde du serveur — l'étape N ne prouve
+que la fabrication par l'hôte. La v16 ferme les deux, et chacun par une décision qui doit être dite.
+
+### 64.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| santé dans l'entrée de véhicule | `src/Coop.Model/Messages.cs` (`VehicleStateEntry.Health`) | fraction `0..1` (`LiveMixin.health / maxHealth`), **-1 = inconnue**, `0` = détruit ; `NaN`/∞ refusé à l'écriture **comme** à la lecture ; l'entrée passe de 36 à 44 octets |
+| lecture côté hôte | `src/Coop.Server/ServerNetwork.Vehicles.cs` | `LiveMixin` lu à chaque diffusion, comme l'énergie ; pas de message nouveau, donc même rythme de 10 Hz |
+| application côté client | `src/Coop.Client/RemoteVehicleManager.cs` (`ApplyHealth`) | écrit la fraction sur le `LiveMixin` de la copie **sans la tuer** : la mort reste une décision du serveur, annoncée par `EntityDespawn` |
+| demande de fabrication | `src/Coop.Model/Protocol.cs` (#24), `Messages.cs` | `RequestId`, `TechType` (**jamais 0**), position et quaternion **finis** ; `EntitySpawnResult` (#25) porte la décision, la **clé** (jamais 0 si accordée) et un motif (≤ 96, non vide si refusée) |
+| arbitrage | `src/Coop.Server/ServerNetwork.Spawns.cs` | liste blanche (`Seamoth`, `Exosuit`), position connue, **cadence** (5 s), **plafond** (8/session), **portée** (8 m autour de la dernière position **acceptée**) — dans cet ordre |
+| fabrique | `src/Coop.Server/ServerEntityFactory.cs` | composant (le prefab se charge en asynchrone), file + callback sur le thread principal ; `UniqueIdentifier.Id` **neuf** écrit, puis clé relue **après** position ; échec ⇒ objet partiel détruit et refus nommé |
+| sonde | `src/Coop.Client/ClientSpawnProbeBehaviour.cs` (`-coopdebug=requestspawn`) | demande légitime à ses pieds (accordée, copie créée par l'**annonce**, clé identique), puis demande à 500 m (refusée, aucune création de plus) |
+| harnais | `tools/verify.sh` (étape **Y**) | un client, hôte non `-batchmode` ; assertions sur les deux journaux, y compris le **motif** rendu au demandeur |
+
+### 64.2 Mesures du 2026-10-21
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet test` | **341/341** rc=0 — 14 nouveaux cas (`VehicleHealthTests` 5, `EntitySpawnRequestTests` 9 : aller-retour, bornes, sentinelle, `NaN`, `TechType` 0, décision sans clé, refus muet, motif trop long) |
+| builds client + serveur | rc=0 |
+| `NetProbe selftest` | **SUCCES** ; entrée de véhicule `44` octets, paquet plein mesuré à **714** octets (sous 1 023) |
+| étape **J** (santé, hôte + client) | `[sonde] véhicule : santé 1.00 -> 0.40 (max 200.0, écriture effectuée=True)` ; client `[sonde] véhicule santé : appliquée=1 dernière=0.40 locale=0.40 écart=0.00 écart max observé=0.60 … verdict=True` ; **étape J : OK (151 s)**, tout vert |
+| étape **Y** (fabrication demandée) | accordée : requête=1, `fabrication : 'Seamoth' créé à (-120.7, -13.9, -64.5) — clé=0x463a6eec6f562a50 (identifiant)` puis `ACCORDÉE (clé=0x463a6eec6f562a50 …)` ; clé identique chez le demandeur, `[spawn] entité créée : clé=0x463a6eec6f562a50 … identifiant du serveur 'aec34bd0-…' écrit (oui)` ; **étape Y : OK (61 s)** |
+| refus hors portée | client `REFUSÉE : requête=2 — hors portée : 500.8 m > 8.0 m`, serveur `REFUSÉE — hors portée : 500.8 m > 8.0 m (requête=2)`, `aucune création supplémentaire=True` |
+| non-régression (deux clients, créatures) | **étape E : OK (99 s)**, `VERDICT GLOBAL : tout est vert` |
+| `check-verify-assertions.sh` | rc=0 — **25** étapes déclarées, défaut complet, assertions satisfiables et discriminantes |
+
+### 64.3 Un défaut de **sonde** trouvé par la mesure, pas par la lecture
+
+Premier run de Y : `verdict=True`, et pourtant l'assertion serveur sur la distance échouait. Le motif rendu
+à la seconde demande était `cadence : encore 4.5 s avant la prochaine` — la cadence passe **avant** la
+portée dans la décision du serveur, et la sonde envoyait ses deux demandes à 100 ms d'intervalle. Le
+verdict était donc vrai pour une mauvaise raison : son critère « hors portée refusée » acceptait
+**n'importe quel** refus, et la garde de distance n'était pas éprouvée du tout.
+
+Deux corrections, et la seconde compte plus que la première :
+
+1. la sonde attend `EntitySpawnCooldownSeconds + 1,5 s` avant la demande lointaine (commentaire dans le
+   code : sans cette attente, la portée n'est pas mesurée) ;
+2. `assert_y` affirme désormais le **motif** (`motif=« hors portée`), pas seulement le fait du refus : un
+   refus de cadence ne peut plus passer pour un refus de portée.
+
+C'est le troisième défaut de sonde du projet (après B et L, §46) et la même leçon : un critère qui accepte
+« un refus » ne dit pas **lequel**, et une assertion qui ne nomme pas le motif laisse la garde visée non
+testée.
+
+### 64.4 Ce que ce chapitre ne prouve pas
+
+- **La santé appliquée n'a pas d'effet de jeu mesuré** : la copie porte la fraction, mais ni la profondeur
+  de destruction, ni la réparation, ni la destruction réelle ne sont observées. Un `0` **ne tue pas** la
+  copie locale — c'est un choix, pas une mesure.
+- **La liste blanche n'est éprouvée que sur `Seamoth`** : `Exosuit` est autorisé par le code et n'a pas été
+  demandé en jeu.
+- **Aucun coût de fabrication** : la sonde appelle `RequestEntitySpawn` directement ; l'intégration au
+  menu de construction du jeu (inventaire, matériaux) n'existe pas, et un client modifié peut donc demander
+  jusqu'à 8 véhicules gratuits par session. La portée et la cadence bornent le dégât, elles ne l'annulent
+  pas.
+- **Un seul client dans l'étape Y** : la copie du **demandeur** est vérifiée ; celle d'un second client ne
+  l'est pas (l'étape N prouve la création chez deux clients, mais pour une fabrication faite par l'hôte).
+- **La persistance n'est pas mesurée** : l'entité fabriquée reçoit un `UniqueIdentifier.Id` **à
+  l'exécution** ; rien ne dit qu'elle survit à une sauvegarde/rechargement du serveur.
+- **Le plafond de 8 et la cadence ne sont pas mesurés au-delà du premier refus** : Y observe un refus de
+  cadence (premier run) et un refus de portée, jamais le plafond.
+
+## 65. Les dégâts des créatures voyagent, leur mort est décidée par le serveur (v17, 2026-10-21)
+
+Premier lot du programme « tout synchroniser ». La ligne du tableau était « dégâts infligés aux créatures /
+mort : non ». Deux manques distincts : la **santé** ne voyageait pas (un poisson abattu chez l'hôte restait
+intact chez les autres), et la **mort** n'était pas une décision transmise. Une créature détruite côté
+serveur cessait simplement d'être annoncée ; au bout de `2 s`, le client la **relâchait** et rétablissait
+son IA locale — un mort qui nage.
+
+### 65.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| santé dans l'entrée de créature | `src/Coop.Model/Messages.cs` (`CreatureStateEntry.Health`) | fraction `0..1` (`LiveMixin.health / maxHealth`), **-1 = inconnue**, `0` = morte ; `NaN`/∞ refusé à l'écriture comme à la lecture ; entrée 36 → **40 octets** |
+| lecture côté hôte | `src/Coop.Server/ServerNetwork.Creatures.cs` | `LiveMixin` résolu au (re)chargement du cache, fraction relue à chaque diffusion ; une créature morte sort du flux |
+| décision de mort | `ServerNetwork.Entities.cs` (`BroadcastDespawn`) + `ServerNetwork.Creatures.cs` | `EntityDespawn` d'espèce **`Creature`** (Kind 3), **une fois** par clé (registre borné à 512), jamais rediffusé |
+| application côté client | `src/Coop.Client/RemoteCreatureManager.cs` (`ApplyHealth`) | écrit la fraction sur le `LiveMixin` de la copie **sans la tuer** (pas de `TakeDamage`) |
+| retrait côté client | `RemoteCreatureManager.Despawn` / `Forget` + `EntityDespawner` | détruit la copie **sans rendre l'IA**, garde la clé retirée ; si le gestionnaire ne connaît pas la clé (retrait reçu avant chargement), **balayage du monde local** par clé |
+| sonde serveur | `src/Coop.Server/CreatureDamageProbeBehaviour.cs` (`-coopdebug=creaturehit`) | attend un client **dans le monde**, blesse une créature réelle à 40 %, puis écrit la mort |
+| sonde cliente | `src/Coop.Client/CreatureHealthProbeBehaviour.cs` (`-coopdebug=creaturehealth`) | applique + retrait + clé plus connue → verdict |
+| harnais | `tools/verify.sh` (**étape Z**) | six assertions sur les deux journaux, dont le retrait effectif et l'absence de fantôme |
+
+### 65.2 Mesures du 2026-10-21
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet test` | **348/348** rc=0 — 7 nouveaux cas `CreatureHealthTests` (aller-retour, sentinelle, non fini, bornes, taille 40 o, retrait d'espèce créature, espèce inconnue refusée) |
+| `NetProbe selftest` | **SUCCES** ; entrée de créature `40` octets, paquet plein mesuré à **651** octets (sous 1 023) |
+| étape **Z** (santé + mort) | serveur `créature santé : clé=0x… 'Peeper(Clone)' 20.00 -> 8.00 (max 20.0, écriture effectuée=True)` puis `-> 0.00 (mort écrite=True)` ; `[net] disparition : clé=0x… (créature)` ; client `[créature] retirée : clé=0x…` et `[sonde] créature santé : appliquée=1 dernière=0.40 clé=0x…, retirée=True (… encore connue=False, absente à l'arrivée=0) … verdict=True` ; **étape Z : OK (50 s)** |
+| non-régression (créatures, deux clients) | **étape E : OK (98 s)**, `VERDICT GLOBAL : tout est vert` |
+| `check-verify-assertions.sh` | rc=0 — **26** étapes déclarées (A..Z), défaut complet, assertions satisfiables et discriminantes |
+
+### 65.3 Deux défauts trouvés par le run, pas par la lecture
+
+**Premier run de Z : `verdict=False`, et pour deux raisons distinctes.**
+
+1. **La sonde tuait trop tôt.** L'hôte blessait puis tuait `12 s` après son propre chargement, alors que le
+   client chargeait encore sa scène (`client prêt en 113 s`). Le client a reçu le retrait **avant** de
+   connaître la créature : `EntityDespawner` l'a mis en attente, puis l'a appliqué à un registre vide
+   (`absente à l'arrivée=1`). La créature a ensuite été chargée **vivante**, et son IA rétablie.
+   Correction de mesure : la sonde attend `ServerNetwork.ClientsInWorld > 0` (un client qui a annoncé une
+   position, donc qui a chargé) avant de blesser.
+2. **Un retrait en attente ne retirait rien** pour une créature. Les objets et les véhicules sont retrouvés
+   par balayage après chargement ; les créatures, non — leur registre est construit au premier état.
+   Correction de comportement : `EntityDespawner` balaye le monde local par clé quand le gestionnaire ne
+   connaît pas la clé, et `RemoteCreatureManager.Despawn` détruit aussi une copie **connue sans être
+   adoptée**. La clé reste bloquée pour `TryAdopt` : un état en retard ne ramène pas la créature.
+
+Le second point est un défaut **de produit**, pas de sonde : sans lui, toute créature tuée pendant qu'un
+joueur charge son monde restait vivante chez lui, avec son IA. Le premier run de Z est la mesure qui l'a
+trouvé ; il est cité ici pour que la correction ne se perde pas.
+
+### 65.4 Ce que ce chapitre ne prouve pas
+
+- **La source du dégât n'est pas exercée** : la sonde écrit la fraction sur `LiveMixin`, elle ne fait pas
+  mordre une créature ni ne tire dessus. Le transport et la décision de mort sont mesurés, pas le système de
+  dégâts du jeu.
+- **Aucune preuve visuelle** : la copie est détruite (clé plus connue), mais aucune capture ne montre le
+  cadavre disparaître à l'écran.
+- **Une seule espèce** est exercée (`Peeper`), et **un seul client** (l'étape Z ne mesure pas deux clients
+  simultanés).
+- **La santé des créatures n'est pas visible dans une interface** : elle est appliquée à la copie, pas
+  affichée.
+- **Les dégâts des joueurs** ne sont pas traités : cette v17 ne concerne que les créatures.

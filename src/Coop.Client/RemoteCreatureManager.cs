@@ -179,6 +179,13 @@ namespace Coop.Client
             public bool AiVerified;
 
             public bool AiFailureLogged;
+
+            /// <summary>`LiveMixin` de la copie, résolu une fois (v17) : sans lui, la santé reçue n'a nulle part où aller.</summary>
+            public LiveMixin Health;
+
+            /// <summary>Dernière fraction écrite sur la copie (`-1` = jamais), pour la sonde.</summary>
+            public float LastAppliedHealth = -1f;
+
             public float AdoptionRealtime;
             public int IndexBefore;
             public int IndexAfter;
@@ -209,6 +216,22 @@ namespace Coop.Client
         private readonly Dictionary<long, Adopted> _adopted = new Dictionary<long, Adopted>();
         private readonly Dictionary<long, Creature> _registry = new Dictionary<long, Creature>();
         private readonly ManualLogSource _log;
+
+        /// <summary>
+        /// Clés dont la mort a été annoncée par le serveur (v17). Une entrée encore présente dans la
+        /// scène locale au moment du retrait ne doit pas être ré-adoptée par un état arrivé juste après :
+        /// elle serait ramenée à la vie chez ce client.
+        /// </summary>
+        private readonly HashSet<long> _removedCreatureKeys = new HashSet<long>();
+
+        private readonly Queue<long> _removedCreatureOrder = new Queue<long>();
+
+        private const int MaxRememberedCreatureRemovals = 256;
+
+        private long _healthApplied;
+        private long _creatureDespawns;
+        private long _creatureDespawnAbsent;
+        private long _statesDeadKey;
 
         private float _registryRealtime = float.NegativeInfinity;
         private float _nextForcedRebuildRealtime = float.NegativeInfinity;
@@ -285,10 +308,46 @@ namespace Coop.Client
         /// </summary>
         private bool _registrySettled;
 
+        /// <summary>
+        /// Dernier gestionnaire construit. `EntityDespawner` est statique et doit pouvoir retirer une
+        /// créature à la réception d'un `EntityDespawn` : il n'a pas d'autre chemin vers l'instance.
+        /// </summary>
+        internal static RemoteCreatureManager Active { get; private set; }
+
         public RemoteCreatureManager(ManualLogSource log)
         {
             _log = log;
+            Active = this;
         }
+
+        /// <summary>Applications de santé réellement écrites sur une copie (v17).</summary>
+        public long HealthApplied => _healthApplied;
+
+        /// <summary>Dernière fraction écrite, et la clé qui la portait (`-1`/`0` = jamais).</summary>
+        public float LastAppliedHealth { get; private set; } = -1f;
+
+        public long LastHealthKey { get; private set; }
+
+        /// <summary>Créatures retirées sur annonce du serveur, et clés déjà absentes à l'arrivée.</summary>
+        public long CreatureDespawns => _creatureDespawns;
+
+        /// <summary>Dernière clé retirée sur annonce du serveur (`0` = aucune) — pour la sonde.</summary>
+        public long LastDespawnKey { get; private set; }
+
+        public long CreatureDespawnAbsent => _creatureDespawnAbsent;
+
+        /// <summary>États reçus pour une clé déjà annoncée morte : ils ne doivent pas ré-adopter.</summary>
+        public long StatesDeadKey => _statesDeadKey;
+
+        /// <summary>Vrai si cette clé est encore adoptée ici — pour les sondes.</summary>
+        public bool IsAdopted(long key) => _adopted.ContainsKey(key);
+
+        /// <summary>
+        /// Vrai si cette clé désigne encore une créature connue de ce client (registre ou adoption).
+        /// Sert à constater un retrait : le registre est construit sur le monde local, donc après un
+        /// `Despawn` la clé n'y est plus. Pas de balayage de scène pour une question déjà tranchée.
+        /// </summary>
+        public bool IsKnown(long key) => _adopted.ContainsKey(key) || _registry.ContainsKey(key);
 
         public int AdoptedCount => _adopted.Count;
 
@@ -694,6 +753,11 @@ namespace Coop.Client
                     continue;
                 }
 
+                // Health, v17 : la fraction voyage avec la position. Elle s'applique **sans tuer** —
+                // la mort est une décision du serveur, annoncée par `EntityDespawn` — et c'est ce qui
+                // permet de voir un poisson blessé sans que le client puisse le tuer.
+                ApplyHealth(state, entry);
+
                 var position = new Vector3(state.X, state.Y, state.Z);
                 var rotation = new Quaternion(state.RotX, state.RotY, state.RotZ, state.RotW);
 
@@ -946,6 +1010,129 @@ namespace Coop.Client
         }
 
         /// <summary>
+        /// Écrit la fraction de santé annoncée sur la copie (v17).
+        ///
+        /// Écrit le champ plutôt que d'appeler une méthode du jeu : `LiveMixin` a des chemins de mort
+        /// (`TakeDamage`, `Kill`) qui déclencheraient la destruction locale de la copie, alors que la mort
+        /// est une décision du serveur. Une fraction `0` est appliquée telle quelle et **ne tue pas**.
+        /// </summary>
+        private void ApplyHealth(CreatureStateEntry state, Adopted entry)
+        {
+            if (state.Health < 0f || entry == null)
+            {
+                return;
+            }
+
+            if (entry.Health == null)
+            {
+                entry.Health = entry.Creature != null
+                    ? (entry.Creature.GetComponent<LiveMixin>() ?? entry.Creature.GetComponentInChildren<LiveMixin>())
+                    : null;
+
+                if (entry.Health == null)
+                {
+                    return;
+                }
+            }
+
+            var max = entry.Health.maxHealth;
+            if (max <= 0f)
+            {
+                return;
+            }
+
+            var target = state.Health * max;
+            if (Mathf.Approximately(entry.Health.health, target))
+            {
+                return;
+            }
+
+            entry.Health.health = target;
+            entry.LastAppliedHealth = state.Health;
+            LastAppliedHealth = state.Health;
+            LastHealthKey = state.Key;
+            _healthApplied++;
+        }
+
+        /// <summary>
+        /// Retire la copie locale d'une créature que le serveur déclare morte (v17).
+        ///
+        /// La clé est gardée même si la créature était déjà absente : un état arrivé juste après ne doit
+        /// pas la ramener (même raison que le registre de `EntityDespawner`).
+        /// </summary>
+        public void Despawn(long key, string reason)
+        {
+            if (key == 0L)
+            {
+                return;
+            }
+
+            RememberRemoval(key);
+            LastDespawnKey = key;
+
+            _adopted.TryGetValue(key, out var entry);
+            var creature = entry != null ? entry.Creature : null;
+            if (creature == null)
+            {
+                _registry.TryGetValue(key, out creature);
+            }
+
+            _adopted.Remove(key);
+            _registry.Remove(key);
+
+            if (creature == null || creature.gameObject == null)
+            {
+                _creatureDespawnAbsent++;
+                _log.LogInfo(
+                    $"[créature] retrait 0x{key:x16} : copie absente ou déjà détruite — rien à retirer " +
+                    $"(motif serveur « {reason} »).");
+                return;
+            }
+
+            // La copie peut être **connue sans être adoptée** (hors rayon de pertinence au moment du
+            // retrait, ou registre construit avant le premier état) : elle doit disparaître quand même,
+            // sinon un poisson tué chez l'hôte reste vivant ici.
+            var label = entry != null ? entry.Label : CreatureIdentity.Describe(creature);
+            UnityEngine.Object.Destroy(creature.gameObject);
+            _creatureDespawns++;
+
+            _log.LogInfo(
+                $"[créature] retirée : clé=0x{key:x16} {label} — {_creatureDespawns} retrait(s), " +
+                $"(motif serveur « {reason} »).");
+        }
+
+        /// <summary>
+        /// Oublie une clé déclarée morte sans détruire d'objet (le retrait a déjà été fait ailleurs, ou
+        /// l'objet n'existe pas ici). La clé reste bloquée pour `TryAdopt` : un état arrivé après coup ne
+        /// doit pas ramener la créature.
+        /// </summary>
+        public void Forget(long key)
+        {
+            if (key == 0L)
+            {
+                return;
+            }
+
+            RememberRemoval(key);
+            _adopted.Remove(key);
+            _registry.Remove(key);
+        }
+
+        private void RememberRemoval(long key)
+        {
+            if (!_removedCreatureKeys.Add(key))
+            {
+                return;
+            }
+
+            _removedCreatureOrder.Enqueue(key);
+            while (_removedCreatureOrder.Count > MaxRememberedCreatureRemovals)
+            {
+                _removedCreatureKeys.Remove(_removedCreatureOrder.Dequeue());
+            }
+        }
+
+        /// <summary>
         /// Rend toutes les créatures adoptées à leur IA. Appelé à la déconnexion : c'est la seule
         /// façon de ne pas laisser le monde du client à moitié figé après un serveur disparu.
         /// </summary>
@@ -1128,6 +1315,12 @@ namespace Coop.Client
         {
             entry = null;
 
+            if (_removedCreatureKeys.Contains(state.Key))
+            {
+                _statesDeadKey++;
+                return false;
+            }
+
             if (!_registry.TryGetValue(state.Key, out var creature) || creature == null)
             {
                 // Le registre est rafraîchi à la demande : une créature qui vient d'apparaître (ou de
@@ -1206,6 +1399,7 @@ namespace Coop.Client
                 IndexAfter = indexAfter,
                 LastStateRealtime = now,
                 FirstDistanceMeters = distance,
+                Health = creature.GetComponent<LiveMixin>() ?? creature.GetComponentInChildren<LiveMixin>(),
             };
 
             _adopted[state.Key] = entry;

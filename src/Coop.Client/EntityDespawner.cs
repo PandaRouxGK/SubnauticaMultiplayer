@@ -144,6 +144,65 @@ namespace Coop.Client
             if (msg.Kind == EntityKind.Item)
             {
                 RemoveItem(msg);
+                return;
+            }
+
+            if (msg.Kind == EntityKind.Creature)
+            {
+                RemoveCreature(msg);
+            }
+        }
+
+        /// <summary>
+        /// Retire la copie d'une créature morte (v17). Le retrait lui-même vit dans
+        /// <c>RemoteCreatureManager</c>, qui seul connaît ses adoptions et ses clés retirées ; ici on ne
+        /// fait que router le message et garder la clé pour les sondes.
+        /// </summary>
+        private static void RemoveCreature(EntityDespawnMessage msg)
+        {
+            var manager = RemoteCreatureManager.Active;
+            if (manager != null && manager.IsKnown(msg.Key))
+            {
+                manager.Despawn(msg.Key, msg.Reason);
+                _lastRemovedKey = msg.Key;
+                return;
+            }
+
+            // Le gestionnaire ne connaît pas encore la clé : retrait reçu pendant le chargement du monde
+            // (appliqué ici au premier `Update`, avant que le registre des créatures ne soit construit),
+            // ou créature hors du registre local. Sans ce balayage, le poisson tué chez l'hôte restait
+            // vivant ici — et son IA locale reprenait, mesuré au premier run de l'étape Z (2026-10-21).
+            var found = 0;
+            foreach (var creature in Object.FindObjectsOfType<Creature>())
+            {
+                if (creature == null || creature.gameObject == null)
+                {
+                    continue;
+                }
+
+                if (CreatureIdentity.KeyOf(creature, out _) != msg.Key)
+                {
+                    continue;
+                }
+
+                Object.Destroy(creature.gameObject);
+                found++;
+            }
+
+            manager?.Forget(msg.Key);
+            _lastRemovedKey = msg.Key;
+
+            if (found > 0)
+            {
+                Log.LogInfo(
+                    $"[disparition] créature 0x{msg.Key:x16} retirée par balayage ({found} trouvée(s)) — " +
+                    $"le gestionnaire ne la connaissait pas encore, motif serveur « {msg.Reason} ».");
+            }
+            else
+            {
+                Log.LogInfo(
+                    $"[disparition] créature 0x{msg.Key:x16} absente du monde local — rien à retirer " +
+                    $"(motif serveur « {msg.Reason} »).");
             }
         }
 
@@ -248,7 +307,21 @@ namespace Coop.Client
         /// <summary>Vrai si l'entité annoncée existe encore localement — pour la sonde.</summary>
         internal static bool StillPresent(long key, byte kind)
         {
-            return kind == EntityKind.Vehicle ? FindVehicle(key) != null : FindItem(key) != null;
+            if (kind == EntityKind.Vehicle)
+            {
+                return FindVehicle(key) != null;
+            }
+
+            if (kind == EntityKind.Creature)
+            {
+                // « Présente » veut dire connue de ce client : le registre est construit sur le monde
+                // local, et le retrait l'en retire. Un `FindObjectsOfType<Creature>` par sonde serait
+                // un balayage de scène pour une question que le gestionnaire sait déjà.
+                var manager = RemoteCreatureManager.Active;
+                return manager != null && manager.IsKnown(key);
+            }
+
+            return FindItem(key) != null;
         }
 
         internal static string Summary()

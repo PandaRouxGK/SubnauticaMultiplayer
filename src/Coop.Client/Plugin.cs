@@ -26,9 +26,21 @@ namespace Coop.Client
         internal static ManualLogSource Log;
         internal static InstanceLogFile InstanceLog;
 
+        /// <summary>
+        /// Instance du plugin, pour écrire le fichier de configuration depuis le panneau de connexion.
+        /// </summary>
+        internal static CoopClientPlugin Instance;
+
+        /// <summary>Entrée `[Reseau] Hote` : le panneau y écrit l'adresse saisie.</summary>
+        internal static ConfigEntry<string> HostEntry;
+
+        /// <summary>Entrée `[Reseau] Port`.</summary>
+        internal static ConfigEntry<int> PortEntry;
+
         private void Awake()
         {
             Log = Logger;
+            Instance = this;
 
             var mode = LaunchModeParser.Current;
             Log.LogInfo($"[boot] CoopClient chargé — mode={mode} (attendu: {LaunchModeParser.ArgumentName}=client)");
@@ -59,15 +71,58 @@ namespace Coop.Client
             // journal le dit — un ramassage non arbitré n'abîme rien.
             var pickupGuardInstalled = PickupGuard.Install(Log);
 
-            var host = Config.Bind("Reseau", "Hote", "127.0.0.1", "Adresse du serveur.");
+            // Plus de défaut `127.0.0.1` : deux joueurs séparés par Internet ne sont pas sur la même
+            // boucle locale, et un client qui se connecte silencieusement à lui-même donnerait une panne
+            // incompréhensible. Vide = pas d'adresse, donc **pas de connexion** tant que le joueur n'a pas
+            // saisi la sienne (`-coopserver`, `COOP_SERVER`, panneau du menu, ou fichier d'une session
+            // précédente).
+            var host = Config.Bind("Reseau", "Hote", string.Empty,
+                "Adresse du serveur (IP ou nom d'hôte), port facultatif. Vide = saisie dans le panneau du menu.");
             var port = Config.Bind("Reseau", "Port", Protocol.DefaultPort, "Port UDP du serveur.");
             var username = Config.Bind("Joueur", "Pseudo", Environment.UserName, "Pseudo envoyé au serveur.");
+            HostEntry = host;
+            PortEntry = port;
+
+            var startHost = host.Value?.Trim() ?? string.Empty;
+            var startPort = (ushort)Mathf.Clamp(port.Value, ServerAddressPreference.MinPort, ServerAddressPreference.MaxPort);
+
+            // Argument / environnement prioritaire : c'est ce qui rend un client lançable et vérifiable
+            // sans passer par le menu (harnais, serveur dédié, raccourci Windows). Une valeur explicite
+            // mais invalide est un **refus nommé**, jamais un repli.
+            var requestedAddress = ServerAddressPreference.Raw(Environment.GetCommandLineArgs());
+            if (requestedAddress != null)
+            {
+                if (ServerAddressPreference.TryParse(requestedAddress, Protocol.DefaultPort, out var parsedAddress, out var addressError))
+                {
+                    startHost = parsedAddress.Host;
+                    startPort = parsedAddress.Port;
+                    Log.LogInfo(
+                        $"[net] adresse imposée : {parsedAddress} ({ServerAddressPreference.ArgumentName} / " +
+                        $"{ServerAddressPreference.EnvironmentVariableName}).");
+                }
+                else
+                {
+                    startHost = string.Empty;
+                    Log.LogError(
+                        $"[net] adresse REFUSÉE : « {ServerAddressPreference.Describe(requestedAddress)} » — {addressError}. " +
+                        "Aucune connexion ; une saisie est attendue dans le panneau du menu.");
+                }
+            }
 
             var go = new GameObject("Coop.Client.Bootstrap");
             UnityEngine.Object.DontDestroyOnLoad(go);
             go.hideFlags = HideFlags.HideAndDontSave;
             var behaviour = go.AddComponent<ClientNetworkBehaviour>();
-            behaviour.Configure(host.Value, port.Value, username.Value);
+            behaviour.Configure(startHost, startPort, username.Value);
+
+            // Le monde n'est chargé qu'une fois une adresse connue : sans cette porte, `AutoLoadBehaviour`
+            // ouvre la partie au bout de trois secondes, bien avant qu'un joueur ait pu taper une IP.
+            AutoLoadBehaviour.BeforeLoad = () =>
+                ClientNetworkBehaviour.Current != null && ClientNetworkBehaviour.Current.HasEndpoint;
+
+            // Panneau de connexion du menu : saisie de l'adresse, validation, mémorisation. Toujours
+            // présent, il se masque dès que le serveur a accepté la session.
+            go.AddComponent<JoinPanelBehaviour>();
 
             // Conduite autoritaire (v9) : la boucle qui envoie l'état du véhicule piloté. Elle ne fait
             // rien tant que le joueur ne pilote pas, donc elle vit avec le client et pas avec une sonde.
@@ -95,6 +150,12 @@ namespace Coop.Client
                 Log.LogError(
                     "[boot] garde de sauvegarde NON installée -> chargement du monde annulé : " +
                     "ce client écrirait dans la sauvegarde du serveur.");
+            }
+
+            if (IsDebugFlagSet("join"))
+            {
+                Log.LogWarning("[boot] sonde de connexion activée (-coopdebug=join).");
+                go.AddComponent<JoinProbeBehaviour>();
             }
 
             if (IsDebugFlagSet("saveguard"))
@@ -147,6 +208,21 @@ namespace Coop.Client
                 go.AddComponent<EntitySpawnProbeBehaviour>();
             }
 
+            if (IsDebugFlagSet("creaturehealth"))
+            {
+                // v17 : constate la fraction de vie reçue sur une copie, puis le retrait décidé par le
+                // serveur quand l'hôte tue la créature.
+                Log.LogWarning("[boot] sonde de santé de créature activée (-coopdebug=creaturehealth).");
+                go.AddComponent<CreatureHealthProbeBehaviour>();
+            }
+
+            if (IsDebugFlagSet("requestspawn"))
+            {
+                // v16 : le **client** demande une fabrication, le serveur décide et annonce.
+                Log.LogWarning("[boot] sonde de demande d'apparition activée (-coopdebug=requestspawn).");
+                go.AddComponent<ClientSpawnProbeBehaviour>();
+            }
+
             if (IsDebugFlagSet("despawn"))
             {
                 // M6 / v11 : attend qu'un véhicule annoncé par l'hôte soit **retiré** localement.
@@ -182,6 +258,39 @@ namespace Coop.Client
                 $"[boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde={saveGuardInstalled}, " +
                 $"pauseCliente={(pauseGuardInstalled ? "désactivée" : "NON patchée")}, " +
                 $"ramassage={(pickupGuardInstalled ? "arbitré" : "NON patché")}).");
+        }
+
+        /// <summary>
+        /// Applique une adresse saisie dans le panneau : écriture dans le fichier de configuration (pour
+        /// la session suivante) puis bascule immédiatement la connexion.
+        ///
+        /// L'écriture est **non bloquante** pour la connexion : un fichier de configuration en lecture seule
+        /// ne doit pas empêcher de jouer, il doit seulement être signalé.
+        /// </summary>
+        internal static void ApplyEndpoint(string host, ushort port)
+        {
+            if (HostEntry != null)
+            {
+                HostEntry.Value = host;
+            }
+
+            if (PortEntry != null)
+            {
+                PortEntry.Value = port;
+            }
+
+            try
+            {
+                Instance?.Config.Save();
+            }
+            catch (Exception exception)
+            {
+                Log.LogWarning(
+                    $"[menu] adresse non enregistrée dans le fichier de configuration ({exception.Message}) — " +
+                    "elle vaut pour cette session.");
+            }
+
+            ClientNetworkBehaviour.Current?.SetEndpoint(host, port);
         }
 
         /// <summary>
@@ -368,6 +477,76 @@ namespace Coop.Client
             return true;
         }
 
+        // — Demandes de fabrication (v16, M4/M6) ——————————————————————————————————————
+        //
+        // Le client ne fabrique **rien** : il demande. L'entité apparaîtra quand le serveur l'annoncera
+        // (`EntitySpawn`), demandeur compris — c'est ce qui évite un doublon entre la copie locale et
+        // l'annonce.
+        private uint _entitySpawnRequestId;
+        private int _entitySpawnsGranted;
+        private int _entitySpawnsRefused;
+        private long _lastSpawnKey;
+        private string _lastSpawnReason = string.Empty;
+
+        internal int EntitySpawnsGranted => _entitySpawnsGranted;
+        internal int EntitySpawnsRefused => _entitySpawnsRefused;
+        internal long LastSpawnGrantedKey => _lastSpawnKey;
+        internal string LastSpawnRefusal => _lastSpawnReason;
+
+        /// <summary>
+        /// Envoie une demande de fabrication au serveur (ReliableOrdered). Rend l'identifiant de requête,
+        /// ou 0 si rien n'est parti (pas de session acceptée).
+        /// </summary>
+        internal uint RequestEntitySpawn(TechType tech, Vector3 position, Quaternion rotation)
+        {
+            if (_server == null || _server.ConnectionState != ConnectionState.Connected || !_accepted)
+            {
+                CoopClientPlugin.Log.LogWarning(
+                    $"[apparition] demande non envoyée : session non acceptée (état={_server?.ConnectionState.ToString() ?? "aucun peer"}).");
+                return 0u;
+            }
+
+            var requestId = ++_entitySpawnRequestId;
+            _writer.Reset();
+            new EntitySpawnRequestMessage
+            {
+                RequestId = requestId,
+                TechType = (ushort)tech,
+                X = position.x,
+                Y = position.y,
+                Z = position.z,
+                RotX = rotation.x,
+                RotY = rotation.y,
+                RotZ = rotation.z,
+                RotW = rotation.w,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+
+            CoopClientPlugin.Log.LogInfo(
+                $"[apparition] demande envoyée : requête={requestId}, espèce={tech}, " +
+                $"pos=({position.x:F1}, {position.y:F1}, {position.z:F1}) — le serveur décide.");
+            return requestId;
+        }
+
+        private void HandleEntitySpawnResult(EntitySpawnResultMessage result)
+        {
+            if (result.Granted)
+            {
+                _entitySpawnsGranted++;
+                _lastSpawnKey = result.Key;
+                CoopClientPlugin.Log.LogInfo(
+                    $"[apparition] demande ACCORDÉE : requête={result.RequestId}, clé=0x{result.Key:x16} — " +
+                    "la copie sera créée par l'annonce du serveur (pas par le client).");
+                return;
+            }
+
+            _entitySpawnsRefused++;
+            _lastSpawnReason = result.Reason ?? string.Empty;
+            CoopClientPlugin.Log.LogWarning(
+                $"[apparition] demande REFUSÉE : requête={result.RequestId} — {_lastSpawnReason}");
+        }
+
         /// <summary>Id que le serveur a assigné à ce joueur (0 avant le handshake) — pour les sondes.</summary>
         internal ushort AssignedPlayerIdForProbe => _assignedPlayerId;
 
@@ -514,9 +693,64 @@ namespace Coop.Client
 
         public void Configure(string host, int port, string username)
         {
-            _host = host;
+            // Une adresse absente est une situation **normale** (le joueur ne l'a pas encore saisie) :
+            // elle n'est ni remplacée par la boucle locale, ni traitée comme une erreur ici.
+            _host = host ?? string.Empty;
             _port = port;
             _username = NormalizeUsername(username);
+        }
+
+        /// <summary>
+        /// Vrai une fois qu'une adresse est connue (argument, fichier ou saisie). Tant qu'elle est fausse,
+        /// le client ne tente rien et le monde n'est pas chargé.
+        /// </summary>
+        internal bool HasEndpoint => !string.IsNullOrEmpty(_host);
+
+        /// <summary>Adresse en cours, pour le panneau et pour la sonde `-coopdebug=join`.</summary>
+        internal string EndpointHost => _host;
+
+        internal int EndpointPort => _port;
+
+        /// <summary>
+        /// Change d'adresse **à chaud** : coupe la session en cours, oublie l'acceptation, et relance la
+        /// connexion vers la nouvelle adresse. C'est le chemin du bouton « Rejoindre » — sans lui, saisir
+        /// une IP après un échec obligerait à relancer le jeu.
+        /// </summary>
+        internal void SetEndpoint(string host, ushort port)
+        {
+            if (string.IsNullOrEmpty(host))
+            {
+                return;
+            }
+
+            var changed = !string.Equals(_host, host, StringComparison.Ordinal) || _port != port;
+            _host = host;
+            _port = port;
+
+            CoopClientPlugin.Log.LogInfo($"[net] nouvelle adresse : {_host}:{_port}" + (changed ? " (changement)" : ""));
+
+            if (_server != null)
+            {
+                try
+                {
+                    _server.Disconnect();
+                }
+                catch (Exception exception)
+                {
+                    // Une session déjà fermée n'est pas une panne : la relance juste après la remplace.
+                    CoopClientPlugin.Log.LogDebug($"[net] déconnexion avant changement d'adresse : {exception.Message}");
+                }
+
+                _server = null;
+            }
+
+            _accepted = false;
+            _assignedPlayerId = 0;
+            _saveWaitStarted = -1.0;
+            _loggedSaveWait = false;
+            _loggedSaveTimeout = false;
+            _nextReconnectTime = 0;
+            Connect();
         }
 
         /// <summary>
@@ -562,6 +796,15 @@ namespace Coop.Client
             if (!_net.Start())
             {
                 CoopClientPlugin.Log.LogError("[net] impossible de démarrer le client LiteNetLib.");
+                return;
+            }
+
+            if (!HasEndpoint)
+            {
+                CoopClientPlugin.Log.LogInfo(
+                    "[net] aucune adresse de serveur — en attente d'une saisie (panneau du menu, " +
+                    $"{ServerAddressPreference.ArgumentName}=IP:port, ou {ServerAddressPreference.EnvironmentVariableName}). " +
+                    "Le monde ne sera pas chargé avant.");
                 return;
             }
 
@@ -623,6 +866,13 @@ namespace Coop.Client
             }
 
             _net.PollEvents();
+
+            // Sans adresse, il n'y a rien à tenter : la boucle de reconnexion resterait sinon à écrire
+            // un échec toutes les 500 ms en accusant le réseau alors que l'adresse manque.
+            if (!HasEndpoint)
+            {
+                return;
+            }
 
             var now = _clock.Elapsed.TotalSeconds;
 
@@ -1285,6 +1535,12 @@ namespace Coop.Client
                     break;
                 }
 
+                case MessageType.EntitySpawnResult:
+                {
+                    HandleEntitySpawnResult(EntitySpawnResultMessage.Read(reader));
+                    break;
+                }
+
                 case MessageType.EntitySpawn:
                 {
                     var spawn = EntitySpawnMessage.Read(reader);
@@ -1298,7 +1554,11 @@ namespace Coop.Client
                 case MessageType.EntityDespawn:
                 {
                     var despawn = EntityDespawnMessage.Read(reader);
-                    var kind = despawn.Kind == EntityKind.Vehicle ? "véhicule" : "objet";
+                    var kind = despawn.Kind == EntityKind.Vehicle
+                        ? "véhicule"
+                        : despawn.Kind == EntityKind.Creature
+                            ? "créature"
+                            : "objet";
                     CoopClientPlugin.Log.LogInfo(
                         $"[net] disparition reçue : clé=0x{despawn.Key:x16} ({kind}) — motif « {despawn.Reason} »");
                     EntityDespawner.Handle(despawn);

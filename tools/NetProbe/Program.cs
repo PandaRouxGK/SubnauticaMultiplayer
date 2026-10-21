@@ -629,6 +629,8 @@ namespace NetProbe
                     Key = i + 1,
                     X = i, Y = -i, Z = i * 2f,
                     RotX = 0f, RotY = 0f, RotZ = 0f, RotW = 1f,
+                    Energy = 0.5f,
+                    Health = 0.75f,
                 };
             }
 
@@ -639,8 +641,8 @@ namespace NetProbe
                 $"({fullVehicleBytes.Length} <= {Protocol.MaxUnreliablePayloadBytes} octets)");
 
             Check(
-                Protocol.VehicleStateEntryBytes == 8 + 7 * 4,
-                "taille d'une entrée de véhicule : clé 64 bits + position + quaternion");
+                Protocol.VehicleStateEntryBytes == 8 + 9 * 4,
+                "taille d'une entrée de véhicule : clé 64 bits + position + quaternion + énergie (v14) + santé (v16)");
 
             // Un paquet tronqué doit lever, pas renvoyer des valeurs inventées.
             // Le plafond de créatures doit tenir dans un paquet non fiable : c'est cette contrainte
@@ -659,6 +661,7 @@ namespace NetProbe
                     Key = i + 1,
                     X = i, Y = -i, Z = i * 2f,
                     RotX = 0f, RotY = 0f, RotZ = 0f, RotW = 1f,
+                    Health = 0.75f,
                 };
             }
 
@@ -667,6 +670,10 @@ namespace NetProbe
                 fullSnapshotBytes.Length <= Protocol.MaxUnreliablePayloadBytes,
                 $"CreatureSnapshot plein tient dans un paquet non fiable " +
                 $"({fullSnapshotBytes.Length} <= {Protocol.MaxUnreliablePayloadBytes} octets)");
+
+            Check(
+                Protocol.CreatureStateEntryBytes == 8 + 8 * 4,
+                "taille d'une entrée de créature : clé 64 bits + position + quaternion + santé (v17)");
 
             var truncated = new byte[] { (byte)MessageType.Ping, 0x01, 0x02 };
             var threw = false;

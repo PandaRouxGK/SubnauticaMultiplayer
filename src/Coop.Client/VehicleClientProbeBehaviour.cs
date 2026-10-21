@@ -308,6 +308,30 @@ namespace Coop.Client
                 $"charges appliquées={vehicles.EnergiesApplied} — transport={transportVerdict} " +
                 $"application={applicationVerdict} (le premier est la réception, le second l'état de la copie).");
 
+            // — Santé (v16, M4) ————————————————————————————————————————————————
+            //
+            // La santé que la copie porte **maintenant**, relue sur le composant : comparer la dernière
+            // valeur appliquée au compteur ne dirait rien (un compteur peut avancer sans que la valeur
+            // change). Le seuil est large (5 %) parce que la mesure n'est pas une horloge.
+            var healthMixin = vehicle.GetComponent<LiveMixin>() ?? vehicle.GetComponentInChildren<LiveMixin>();
+            var healthLocal = healthMixin != null && healthMixin.maxHealth > 0.001f
+                ? healthMixin.GetHealthFraction()
+                : -1f;
+            var healthApplied = vehicles.HealthAppliedCount;
+            var healthTarget = vehicles.LastAppliedHealth;
+            var healthDelta = healthLocal >= 0f && healthTarget >= 0f
+                ? Mathf.Abs(healthLocal - healthTarget)
+                : -1f;
+            var healthVerdict = healthApplied >= 1 && healthLocal >= 0f && healthTarget >= 0f && healthDelta <= 0.05f;
+
+            Log.LogInfo(
+                $"[sonde] véhicule santé : appliquée={healthApplied} dernière={healthTarget.ToString("F2", CultureInfo.InvariantCulture)} " +
+                $"locale={healthLocal.ToString("F2", CultureInfo.InvariantCulture)} " +
+                $"écart={healthDelta.ToString("F2", CultureInfo.InvariantCulture)} " +
+                $"écart max observé={vehicles.MaxHealthDivergence.ToString("F2", CultureInfo.InvariantCulture)} " +
+                $"({vehicles.MaxHealthDivergenceLabel}) — verdict={healthVerdict} " +
+                "(seuils : au moins une application, écart final ≤0.05)");
+
             Log.LogInfo(
                 $"[sonde] véhicule client : verdict={verdict} — '{vehicle.name}' suivi sur {samples} image(s) en " +
                 $"{elapsed.ToString("F2", CultureInfo.InvariantCulture)}s (fps≈{fps:F0}), déplacement=" +

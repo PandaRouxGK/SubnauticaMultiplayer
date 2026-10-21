@@ -73,6 +73,26 @@
       <HintPath>$(SubnauticaManaged)\UnityEngine.ImageConversionModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- uGUI : le panneau de connexion (Canvas, InputField, Button). `UnityEngine.UI.dll` porte aussi
+         UnityEngine.EventSystems ; UIModule porte Canvas/CanvasRenderer, TextRenderingModule porte Font
+         (le `Text` legacy des champs n'utilise pas TextMeshPro). -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- InputLegacyModule : `Input.GetKeyDown` (valider l'adresse avec Entrée). -->
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(SubnauticaManaged)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

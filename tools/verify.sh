@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les vingt-trois étapes, et ce que chacune prouve :
+# Les vingt-six étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -86,13 +86,17 @@
 #      qu'il conduit : le serveur libère le volant au départ (`volant(s) libéré(s) par la déconnexion`),
 #      admet le revenu sous un nouvel id, et celui-ci recharge le monde. C'est la moitié de P2 que l'étape
 #      U ne mesurait pas (aucun volant n'était tenu pendant le kill, §52.3).
+#   Y  un client **demande** au serveur de fabriquer un Seamoth -> la demande légitime est accordée (le
+#      serveur répond avec une clé, l'annonce crée la copie chez le demandeur avec **la même** clé), et une
+#      demande à 500 m est **refusée** avec sa distance, sans créer d'entité. C'est la moitié « spawn
+#      initié par un client » de M4 (v16), par le chemin autoritaire et non par une fabrication locale.
 #   U  deux clients, client 2 **tué puis relancé** -> le serveur diffuse `PlayerLeft`, libère les
 #      réclamations du parti (`réclamation(s) libérée(s)`), admet le revenu sous un nouvel id, lui rejoue
 #      les retraits ; le survivant finit avec `joueursDistants=1 avatarsActifs=1` (aucun fantôme) et
 #      aucune clé n'est refusée au nom du mort. C'est P2, rejoué à chaque batterie.
 #
 # Usage :
-#   tools/verify.sh                    # les vingt-quatre étapes
+#   tools/verify.sh                    # les vingt-six étapes
 #   tools/verify.sh --only=B           # une seule étape (A..X, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
@@ -140,7 +144,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W  étapes à lancer (défaut : les vingt-trois)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z  étapes à lancer (défaut : les vingt-six)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -160,9 +164,9 @@ done
 
 # Une étape inconnue doit se dire tout de suite : sinon le script « réussit » en ne lançant rien.
 case ",$ONLY," in
-    *[!ABCDEFGHIJKLMNOPQRSTUVWX,]*)
+    *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A..X, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A..Z, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -525,6 +529,54 @@ assert_w() {
     expect W "$c3" '\[sonde\] créatures : verdict=True' "client 3 : le suivi des créatures rend True à trois clients"
 }
 
+assert_y() {
+    local server="$WORK_DIR/Y/coop-server.log"
+    local client="$WORK_DIR/Y/coop-client.log"
+
+    # La sonde conclut sur le **couple** : une demande accordée et une demande refusée. Un serveur qui
+    # accorderait tout échouerait sur la seconde, un serveur qui refuserait tout sur la première.
+    expect Y "$client" '\[sonde\] demandes d.apparition : verdict=True' \
+        "la sonde conclut True : demande légitime accordée et hors-portée refusée"
+
+    expect Y "$server" "\[net\] apparition demandée : '[^']+'#[0-9]+ -> 'Seamoth' ACCORDÉE" \
+        "le serveur accorde la demande légitime, et le dit"
+    expect Y "$server" '.* REFUSÉE — hors portée : [0-9]+\.[0-9]+ m > 8\.0 m' \
+        "le serveur refuse la demande à 500 m en nommant la distance et le seuil"
+    expect Y "$server" '\[net\] fabrication : .* clé=0x[0-9a-f]{16}' \
+        "la fabrique du serveur dit ce qu'elle a créé, clé comprise"
+
+    expect Y "$client" 'clé identique=True' \
+        "la copie locale porte la clé de la décision du serveur (pas une clé inventée)"
+    expect Y "$client" 'aucune création supplémentaire=True' \
+        "le refus n'a créé aucune entité"
+    # Le **motif** rendu au demandeur doit être celui de la portée : un refus de cadence passerait la
+    # ligne ci-dessus en laissant la garde de distance non éprouvée (mesuré au run du 2026-10-21).
+    expect Y "$client" 'hors portée refusée=True \(motif=« hors portée' \
+        "le demandeur reçoit bien le motif de portée, pas un autre refus"
+}
+
+assert_z() {
+    local server="$WORK_DIR/Z/coop-server.log"
+    local client="$WORK_DIR/Z/coop-client.log"
+
+    # M3/M4, v17 : la santé d'une créature est **changée** chez l'hôte, transportée, appliquée chez le
+    # client, puis sa mort est décidée par le serveur et le retrait constaté. Les trois premières lignes
+    # prouvent l'écriture, la décision et l'annonce ; les trois suivantes le retrait **effectif** côté
+    # client, pas seulement la réception d'un message.
+    expect Z "$server" '\[sonde\] créature santé : clé=0x[0-9a-f]{16} .* [0-9]+\.[0-9]+ -> [0-9]+\.[0-9]+ \(max [0-9]+\.[0-9]+, écriture effectuée=True\)' \
+        "le serveur blesse une créature réelle, et l'écriture a eu lieu"
+    expect Z "$server" '\[sonde\] créature santé : .* -> 0\.00 \(mort écrite=True\)' \
+        "le serveur écrit la mort de la créature"
+    expect Z "$server" '\[net\] disparition : clé=0x[0-9a-f]{16} \(créature\)' \
+        "le serveur annonce le retrait d'une créature, espèce nommée"
+    expect Z "$client" '\[créature\] retirée : clé=0x[0-9a-f]{16}' \
+        "le client retire réellement sa copie"
+    expect Z "$client" '\[sonde\] créature santé : appliquée=[1-9][0-9]* .*retirée=True' \
+        "le client a appliqué une santé reçue ET constaté un retrait"
+    expect Z "$client" '\[sonde\] créature santé : .*encore connue=False.*verdict=True' \
+        "la clé retirée n'est plus connue de ce client (pas un fantôme)"
+}
+
 assert_d() {
     local log="$WORK_DIR/D/coop-client.log"
 
@@ -823,6 +875,15 @@ assert_j() {
     expect J "$client" 'application=True' "la copie locale du client porte le même ensemble de modules"
     expect J "$client" 'charges appliquées=[1-9][0-9]*' \
         "le client a réellement écrit une charge reçue, et pas seulement lu la sienne"
+    # M4, v16 : la santé. Même structure que l'énergie — une valeur **changée** côté hôte, et une écriture
+    # réellement faite sur la copie. Un véhicule sans `LiveMixin` produirait `écriture effectuée=False` et
+    # l'assertion échouerait : c'est voulu, un véhicule du jeu en a un.
+    expect J "$server" '\[sonde\] véhicule : santé [0-9]\.[0-9]+ -> [0-9]\.[0-9]+ \(max [0-9]+\.[0-9]+, écriture effectuée=True\)' \
+        "le serveur abaisse la santé du véhicule, et l'écriture a réellement eu lieu"
+    expect J "$client" '\[sonde\] véhicule santé : appliquée=[1-9][0-9]*' \
+        "le client a appliqué au moins une santé reçue"
+    expect J "$client" '\[sonde\] véhicule santé :.*verdict=True' \
+        "la fraction de santé de la copie locale est celle annoncée (écart final ≤0,05)"
 }
 
 assert_i() {
@@ -921,9 +982,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1357,6 +1418,32 @@ if wanted W "$ONLY"; then
         args+=(--no-build)
     fi
     step W "créatures à trois clients : les trois suivent le même monde" assert_w "${args[@]}"
+fi
+
+if wanted Y "$ONLY"; then
+    # v16 / M4 : une entité **demandée par un client**. L'hôte n'est pas en `-batchmode` : la fabrique
+    # instancie un prefab du jeu et laisse le balayage des véhicules l'annoncer — même chemin que N et O.
+    args=(--clients=1 --timeout=300
+        "--host-args=-coopmode=server -coopsave=slot0000"
+        "--client-args=-coopmode=client -coopsave=slot0000 -coopdebug=requestspawn"
+        "--client-marker=\\[sonde\\] demandes d.apparition : verdict=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step Y "fabrication demandée par un client : accordée à portée, refusée hors portée" assert_y "${args[@]}"
+fi
+
+if wanted Z "$ONLY"; then
+    # v17 : l'hôte blesse puis tue une créature réelle ; le client doit porter la fraction **et** retirer
+    # sa copie. L'hôte n'est pas en `-batchmode` : il faut un monde simulé avec des créatures.
+    args=(--clients=1 --timeout=360
+        "--host-args=-coopmode=server -coopsave=slot0000 -coopdebug=creaturehit"
+        "--client-args=-coopmode=client -coopsave=slot0000 -coopdebug=creaturehealth"
+        "--client-marker=\[sonde\] créature santé : appliquée=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step Z "santé et mort d'une créature : appliquées chez le client, retrait décidé par le serveur" assert_z "${args[@]}"
 fi
 
 if wanted D "$ONLY"; then

@@ -88,6 +88,10 @@ namespace Coop.Server
             go.hideFlags = HideFlags.HideAndDontSave;
             go.AddComponent<ServerTickBehaviour>();
 
+            // Fabrique d'entités (v16) : honore les demandes de fabrication émises par un client. Elle
+            // vit avec le serveur, pas avec une sonde : c'est un chemin du jeu, pas un autotest.
+            go.AddComponent<ServerEntityFactory>();
+
             // AutoLoadBehaviour vit dans src/Shared : c'est exactement le même code qui amène le
             // client dans le monde. Le serveur reste seul propriétaire de la partie ; le client
             // voit sa sauvegarde protégée par SaveGuard.
@@ -118,6 +122,14 @@ namespace Coop.Server
             {
                 Log.LogWarning("[boot] sonde de véhicule activée (-coopdebug=vehicle).");
                 go.AddComponent<VehicleProbeBehaviour>();
+            }
+
+            // v17 : blesser puis tuer une créature réelle, pour que la santé et la mort aient quelque
+            // chose à transporter (l'étape Z : fraction appliquée chez le client, puis retrait).
+            if (IsDebugFlagSet("creaturehit"))
+            {
+                Log.LogWarning("[boot] sonde de dégâts de créature activée (-coopdebug=creaturehit).");
+                go.AddComponent<CreatureDamageProbeBehaviour>();
             }
 
             // M6 : fabrication d'une entité qui n'existe pas dans la sauvegarde, pour que l'annonce

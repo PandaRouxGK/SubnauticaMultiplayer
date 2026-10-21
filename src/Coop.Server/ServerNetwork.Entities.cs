@@ -117,7 +117,11 @@ namespace Coop.Server
 
             _entityDespawnsSent++;
 
-            var what = kind == EntityKind.Vehicle ? "véhicule" : "objet";
+            var what = kind == EntityKind.Vehicle
+                ? "véhicule"
+                : kind == EntityKind.Creature
+                    ? "créature"
+                    : "objet";
             _log.LogInfo(
                 $"[net] disparition : clé=0x{key:x16} ({what}) — annoncée à {sent} client(s), motif « {reason} »" +
                 (exceptPlayerId != 0 ? $", sauf au détenteur (id {exceptPlayerId})" : string.Empty) + ".");

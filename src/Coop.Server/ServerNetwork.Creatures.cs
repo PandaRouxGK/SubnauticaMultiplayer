@@ -21,6 +21,29 @@ namespace Coop.Server
     /// </summary>
     public sealed partial class ServerNetwork
     {
+        /// <summary>
+        /// `LiveMixin` de chaque créature mise en cache, et sa fraction de vie relue à chaque diffusion
+        /// (v17). Les deux tableaux suivent <see cref="ServerNetwork._creatureCache"/> : un `GetComponent`
+        /// par créature et par tick serait payé pour rien, et une créature sans `LiveMixin` serait
+        /// recherchée indéfiniment.
+        /// </summary>
+        private LiveMixin[] _creatureMixins;
+
+        private float[] _creatureHealth;
+
+        private bool[] _creatureHealthProbed;
+
+        /// <summary>
+        /// Clés dont la mort a déjà été annoncée. Sans ce registre, un cadavre encore présent dans la
+        /// scène serait annoncé à chaque diffusion (dix fois par seconde).
+        /// </summary>
+        private readonly HashSet<long> _announcedCreatureDeaths = new HashSet<long>();
+
+        private readonly Queue<long> _announcedCreatureDeathOrder = new Queue<long>();
+
+        private const int MaxRememberedCreatureDeaths = 512;
+
+        private long _creatureDeathsAnnounced;
 
         private void BroadcastCreatureSnapshots(long serverTick, Player hostPlayer)
         {
@@ -29,8 +52,17 @@ namespace Coop.Server
             {
                 _creatureCache = UnityEngine.Object.FindObjectsOfType<Creature>();
                 _creatureCacheRealtime = now;
+                RefreshCreatureHealth();
                 ReportCreatureIdentities();
             }
+            else
+            {
+                // La santé change sans que la liste des créatures change : elle se relit donc à chaque
+                // diffusion, alors que les `LiveMixin` sont résolus une seule fois par cache.
+                ReadCreatureHealth();
+            }
+
+            AnnounceCreatureDeaths();
 
             if (_creatureCache == null || _creatureCache.Length == 0)
             {
@@ -95,6 +127,14 @@ namespace Coop.Server
                 {
                     var creature = _creatureCache[i];
                     if (creature == null || creature.transform == null)
+                    {
+                        continue;
+                    }
+
+                    // Une créature morte n'est plus diffusée : sa disparition a été annoncée, et
+                    // continuer à envoyer sa position ferait réapparaître le cadavre chez un client
+                    // qui l'a déjà retiré.
+                    if (IsCreatureDead(i))
                     {
                         continue;
                     }
@@ -209,6 +249,9 @@ namespace Coop.Server
                             RotY = rotation.y,
                             RotZ = rotation.z,
                             RotW = rotation.w,
+                            Health = _creatureHealth != null && _creatureHealth.Length == _creatureCache.Length
+                                ? _creatureHealth[_creatureCandidates[i].Value]
+                                : -1f,
                         });
                     }
 
@@ -347,6 +390,125 @@ namespace Coop.Server
                 recipientSession.CreaturePacketsSent = 0;
             }
         }
+        /// <summary>
+        /// Résout les `LiveMixin` des créatures mises en cache et lit leur première fraction de vie.
+        /// Appelé au (re)chargement du cache, pas à chaque tick : un `GetComponent` par créature et par
+        /// diffusion serait payé dix fois par seconde pour un composant qui ne change pas.
+        /// </summary>
+        private void RefreshCreatureHealth()
+        {
+            var count = _creatureCache != null ? _creatureCache.Length : 0;
+            if (_creatureMixins == null || _creatureMixins.Length != count)
+            {
+                _creatureMixins = new LiveMixin[count];
+                _creatureHealth = new float[count];
+                _creatureHealthProbed = new bool[count];
+            }
+
+            for (var i = 0; i < count; i++)
+            {
+                _creatureMixins[i] = null;
+                _creatureHealthProbed[i] = false;
+            }
+
+            ReadCreatureHealth();
+        }
+
+        /// <summary>Relit la fraction de vie de chaque créature du cache (`-1` = pas de `LiveMixin`).</summary>
+        private void ReadCreatureHealth()
+        {
+            if (_creatureCache == null || _creatureHealth == null || _creatureHealth.Length != _creatureCache.Length)
+            {
+                return;
+            }
+
+            for (var i = 0; i < _creatureCache.Length; i++)
+            {
+                var creature = _creatureCache[i];
+                if (creature == null)
+                {
+                    _creatureHealth[i] = -1f;
+                    continue;
+                }
+
+                if (!_creatureHealthProbed[i])
+                {
+                    _creatureMixins[i] = creature.GetComponent<LiveMixin>()
+                                        ?? creature.GetComponentInChildren<LiveMixin>();
+                    _creatureHealthProbed[i] = true;
+                }
+
+                var mixin = _creatureMixins[i];
+                if (mixin == null || mixin.maxHealth <= 0f)
+                {
+                    _creatureHealth[i] = -1f;
+                    continue;
+                }
+
+                var fraction = mixin.health / mixin.maxHealth;
+                _creatureHealth[i] = fraction < 0f ? 0f : (fraction > 1f ? 1f : fraction);
+            }
+        }
+
+        private bool IsCreatureDead(int index)
+        {
+            return _creatureHealth != null
+                   && index >= 0
+                   && index < _creatureHealth.Length
+                   && _creatureHealth[index] == 0f;
+        }
+
+        /// <summary>
+        /// Annonce une seule fois la mort de chaque créature dont la santé est tombée à zéro (v17).
+        ///
+        /// Pourquoi le serveur seul : le client applique la fraction **sans tuer** sa copie, donc sans
+        /// cette annonce une créature morte resterait debout chez tout le monde, et une créature détruite
+        /// par le jeu serait « relâchée » puis reprise par son IA locale — un mort qui nage.
+        /// </summary>
+        private void AnnounceCreatureDeaths()
+        {
+            if (_creatureCache == null || _creatureHealth == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < _creatureCache.Length; i++)
+            {
+                if (!IsCreatureDead(i))
+                {
+                    continue;
+                }
+
+                var creature = _creatureCache[i];
+                if (creature == null)
+                {
+                    continue;
+                }
+
+                var key = CreatureIdentity.KeyOf(creature, out _);
+                if (key == 0L || !_announcedCreatureDeaths.Add(key))
+                {
+                    continue;
+                }
+
+                _announcedCreatureDeathOrder.Enqueue(key);
+                while (_announcedCreatureDeathOrder.Count > MaxRememberedCreatureDeaths)
+                {
+                    _announcedCreatureDeaths.Remove(_announcedCreatureDeathOrder.Dequeue());
+                }
+
+                _creatureDeathsAnnounced++;
+                BroadcastDespawn(key, EntityKind.Creature, "créature morte (santé 0)");
+
+                if (_creatureDeathsAnnounced <= 10)
+                {
+                    _log.LogInfo(
+                        $"[net] créature morte : clé=0x{key:x16} '{creature.gameObject?.name}' — " +
+                        $"{_creatureDeathsAnnounced} mort(s) annoncée(s) depuis le démarrage.");
+                }
+            }
+        }
+
         private void ReportCreatureIdentities()
         {
             var cached = _creatureCache ?? Array.Empty<Creature>();

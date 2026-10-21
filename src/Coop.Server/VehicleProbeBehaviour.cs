@@ -237,6 +237,33 @@ namespace Coop.Server
                 $"{chargeAfter.ToString("F2", CultureInfo.InvariantCulture)} (drain 50 %, écriture " +
                 $"effectuée={drained}) — le client doit afficher la même charge, pas celle de sa sauvegarde.");
 
+            // — Santé (v16, M4) ————————————————————————————————————————————————
+            //
+            // Même exigence que l'énergie : la sonde **change** la valeur, sinon le client la lirait
+            // déjà dans la sauvegarde et ne prouverait rien. Un Seamoth neuf est à 100 % ; on le met à
+            // 40 %, puis on restaure. La fraction est celle que le client doit appliquer — `health` est
+            // absolu, et confondre les deux ferait tomber un Seamoth à 0,4 point de vie.
+            var liveMixin = vehicle.GetComponent<LiveMixin>() ?? vehicle.GetComponentInChildren<LiveMixin>();
+            var healthMax = 0f;
+            var healthBefore = -1f;
+            var healthAfter = -1f;
+            var healthDamaged = false;
+
+            if (liveMixin != null && liveMixin.maxHealth > 0.001f)
+            {
+                healthMax = liveMixin.maxHealth;
+                healthBefore = liveMixin.GetHealthFraction();
+                liveMixin.health = Mathf.Max(1f, liveMixin.maxHealth * 0.4f);
+                healthAfter = liveMixin.GetHealthFraction();
+                healthDamaged = healthAfter <= 0.45f;
+            }
+
+            Log.LogInfo(
+                $"[sonde] véhicule : santé {healthBefore.ToString("F2", CultureInfo.InvariantCulture)} -> " +
+                $"{healthAfter.ToString("F2", CultureInfo.InvariantCulture)} (max " +
+                $"{healthMax.ToString("F1", CultureInfo.InvariantCulture)}, écriture effectuée={healthDamaged}) " +
+                "— le client doit appliquer la même fraction, pas celle de sa sauvegarde.");
+
             var moduleTech = TechType.VehicleHullModule1;
             var moduleInstalled = false;
             string moduleSlot = null;
@@ -392,6 +419,12 @@ namespace Coop.Server
             if (hasEnergy && !spawned)
             {
                 VehicleModules.WriteNormalized(vehicle, normalizedBefore);
+            }
+
+            if (liveMixin != null && healthBefore >= 0f && !spawned)
+            {
+                // Restauration : la mesure ne doit pas laisser un véhicule de la sauvegarde endommagé.
+                liveMixin.health = Mathf.Clamp01(healthBefore) * liveMixin.maxHealth;
             }
 
             var enoughMoved = travelled >= 0.9f * SpeedMetersPerSecond * MotionSeconds;

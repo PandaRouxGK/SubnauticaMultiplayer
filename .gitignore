@@ -14,8 +14,9 @@ obj/
 # Ces contenus n'ont rien à faire dans un dépôt de code source.
 _backup_nitrox/
 
-# Journaux copiés par `tools/verify.sh --keep-logs` (sortie de run, pas source)
+# Journaux copiés par `tools/verify.sh --keep-logs` et par `tools/p4-session.sh` (sortie de run, pas source)
 verify-logs/
+p4-logs/
 
 # Métadonnées d'outillage et exports de conversation
 .freebuff/

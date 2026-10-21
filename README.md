@@ -2,7 +2,7 @@
 
 Coopération pour Subnautica (2019.4.36f1, Mono) : une instance de jeu sert de **serveur
 autoritaire** (BepInEx 5 + HarmonyX), les autres instances sont des clients. Transport UDP
-LiteNetLib, protocole binaire maison **v13**, tick serveur à **20 Hz**.
+LiteNetLib, protocole binaire maison **v17**, tick serveur à **20 Hz**.
 
 L'architecture et l'historique des mesures vivent dans `PLAN.md`. La politique d'autorité système
 par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai aujourd'hui.
@@ -14,9 +14,12 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
 - serveur headless (`-batchmode -nographics`) : monde chargé sans intervention, tick 20 Hz tenu ;
 - présence : avatars distants (tenue, objet tenu, PDA, animation, couleur), interpolation 20 Hz ;
 - créatures : IA locale **coupée**, position serveur à 10 Hz, interpolation cliente mesurée image
-  par image ;
+  par image, **santé transportée** et **mort décidée par le serveur** (le client retire sa copie) ;
 - véhicules : position à 10 Hz + interpolation, conduite **arbitrée** (un conducteur, libération),
-  création et retrait d'entité avec l'identité du serveur ;
+  création et retrait d'entité avec l'identité du serveur, **énergie**, **modules** et **santé**
+  transportés et appliqués sur la copie locale ;
+- **fabrication demandée par un client** : le client ne fabrique rien, le serveur arbitre (espèce,
+  portée de 8 m, cadence, plafond) puis annonce l'entité à tout le monde — demandeur compris ;
 - ramassage : première réclamation accordée, suivantes refusées avec le détenteur nommé, `PlayerId`
   falsifié réattribué à la session ; l'objet disparaît chez les autres ;
 - sauvegarde : le client n'écrit pas (garde sur deux remparts), l'hôte écrit toujours ;
@@ -29,22 +32,23 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`entités créées ici=0`) ;
 - **contrat de contenu (P1bis)** : étape N verte — `définition vérifiée=True (hash=0x3da1f4bf782becdf)`
   et `définition falsifiée refusée=True` chez **les deux** clients, `définitions refusées=0` ;
-- **batterie des vingt-trois étapes (A–W)** : les dix-sept premières ont un verdict vert le 2026-10-19
+- **batterie des vingt-six étapes (A–Z)** : les dix-sept premières ont un verdict vert le 2026-10-19
   (`PLAN.md` §46) ; `R`, `S` et `T` prouvent les refus P0 en jeu (slot, session, mode — client divergent
   refusé nommément, l'autre admis), `U` la reconnexion (départ diffusé, réclamations libérées, retour admis, aucun avatar fantôme),
   `V` la présence à **trois** clients et `W` les créatures à trois clients, avec les états périmés
-  écartés (`PLAN.md` §49.5, §52 et §53). `tools/verify.sh` sans `--only` lance bien les
-  vingt-trois.
+  écartés (`PLAN.md` §49.5, §52 et §53) ; `X` la libération du volant par une déconnexion, `Y` la
+  fabrication demandée par un client (`PLAN.md` §64) et `Z` la santé et la mort d'une créature
+  (`PLAN.md` §65). `tools/verify.sh` sans `--only` lance bien les vingt-six.
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
   de l'avatar du pair).
 
-**Reste non mesuré en jeu :** le refus d'une sauvegarde **différente** (26 cas hors jeu) et la
-**reconnexion complète** — claims, conducteurs, resynchronisation de base.
+**Reste non mesuré en jeu :** la **session de 30 min** (P4), la marche (pas de terre ferme près de la
+capsule de test), plus de 8 joueurs, et des sauvegardes ou zones différentes ; la désynchronisation des
+véhicules et des avatars n'est pas mesurée non plus (`PLAN.md` §62.4).
 
-**Ce qui n'existe pas encore :** inventaire, craft, dégâts, oxygène et bases partagés ; énergie,
-modules et dégâts de véhicule ; reconnexion d'un client tué puis relancé ; contenu custom livré au
+**Ce qui n'existe pas encore :** inventaire, craft, oxygène et bases partagés ; contenu custom livré au
 client ; authentification ou chiffrement.
 
 ## Prérequis
@@ -88,8 +92,15 @@ cd "/c/Program Files (x86)/Steam/steamapps/common/Subnautica"
 ```
 
 - port UDP **7777** ;
-- client : adresse du serveur dans `BepInEx/config/coop.subnautica.client.cfg`, sections
-  `[Reseau] Hote` / `Port` et `[Joueur] Pseudo` (créé au premier lancement) ;
+- client : l'adresse du serveur se **saisit dans le menu** — panneau « Coop — rejoindre un serveur »
+  (champ adresse, champ port, bouton « Rejoindre ») — puis elle est mémorisée dans
+  `BepInEx/config/coop.subnautica.client.cfg`, section `[Reseau] Hote` / `Port` ; le pseudo vit dans
+  `[Joueur] Pseudo` (créé au premier lancement) ;
+- **sans adresse, le client reste au menu** : il ne charge aucune partie et ne tente aucune connexion.
+  Deux façons de la fournir sans passer par le panneau : `-coopserver=203.0.113.10:7777` (ou
+  `COOP_SERVER`), ou le fichier de configuration. Une adresse invalide est **refusée avec sa raison**
+  (`port invalide`, `adresse IPv4 invalide`, `IPv6 non pris en charge`…) et ne retombe jamais sur
+  `127.0.0.1` ;
 - serveur : `BepInEx/config/coop.subnautica.server.cfg`, section `[Reseau] Port` ;
 - variable d'environnement équivalente : `COOP_MODE=server|client` ;
 - sauvegarde imposée (utile pour le harnais, et pour deux parties différentes côte à côte) :
@@ -103,6 +114,23 @@ cd "/c/Program Files (x86)/Steam/steamapps/common/Subnautica"
 Le serveur est une instance complète du jeu : il consomme ~2 Go et garde un device graphique même
 avec `-nographics`. Ce n'est pas un binaire serveur.
 
+## Jouer à distance (deux réseaux différents)
+
+Le serveur écoute sur **toutes** les interfaces (`UDP 0.0.0.0:7777`) : rien à changer du côté du code.
+Ce qui reste à faire est du réseau, chez l'hôte :
+
+1. **Rediriger le port UDP 7777** vers la machine qui héberge le serveur (box/routeur), et autoriser
+   l'application dans le pare-feu Windows (profil privé **et** public) ;
+2. **Communiquer son IP publique** aux autres joueurs — chaque client la tape dans le panneau, avec
+   `:7777` si le port redirigé n'est pas celui par défaut ;
+3. si la connexion échoue alors que le port est bien redirigé, le cas le plus courant est un partage
+d'adresse par l'opérateur (CGNAT) : un réseau privé virtuel entre les joueurs contourne le problème,
+mais **rien de tel n'est intégré au mod**. Il n'y a ni lobby, ni relais, ni traversée de NAT : l'IP
+publique (ou l'adresse du réseau privé) doit être saisie à la main.
+
+Limite de sécurité, inchangée : ni authentification ni chiffrement. Un serveur exposé sur Internet
+accepte n'importe qui connaissant l'IP, la clé LiteNetLib ne filtrant que les paquets malformés.
+
 ## Vérifier
 
 | Commande | Durée | Ce qu'elle couvre |
@@ -111,8 +139,10 @@ avec `-nographics`. Ce n'est pas un binaire serveur.
 | `dotnet run --project tools/NetProbe -- selftest` | secondes | aller-retour de chaque message, refus des paquets tronqués et des `NaN` |
 | `tools/deploy.sh --verify` | secondes | binaires installés = manifeste |
 | `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only` **et** lancées par le défaut, et les assertions P/Q/N/B/R acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
+| `tools/session-verdict.sh --self-test` | secondes | le graveur de session longue accepte un journal vert **et** échoue sur les six cas rouges (exception, dérive > 2 m, mesure vide, sauvegarde absente, reconnexion absente, durée courte) |
 | `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–W) |
 | `tools/verify.sh` | long (~45 min) | les vingt-trois étapes, un seul verdict |
+| `tools/p4-session.sh --minutes=30` | 30 min + chargement | une session longue à deux clients (reconnexion au tiers, sauvegarde de l'hôte) et **un** verdict P4 (`PLAN.md` §62) |
 
 `verify.sh` et `run-session.sh` lancent de vraies instances : ils exigent le jeu, une sauvegarde
 `slot0000` et Git Bash. Les tests hors jeu ne remplacent pas ces runs — ils les rendent moins
