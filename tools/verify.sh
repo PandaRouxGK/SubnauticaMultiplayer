@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les vingt-six étapes, et ce que chacune prouve :
+# Les vingt-sept étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -96,8 +96,8 @@
 #      aucune clé n'est refusée au nom du mort. C'est P2, rejoué à chaque batterie.
 #
 # Usage :
-#   tools/verify.sh                    # les vingt-six étapes
-#   tools/verify.sh --only=B           # une seule étape (A..X, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les vingt-sept étapes
+#   tools/verify.sh --only=B           # une seule étape (A..AA, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -144,7 +144,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z  étapes à lancer (défaut : les vingt-six)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA  étapes à lancer (défaut : les vingt-sept)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -166,7 +166,7 @@ done
 case ",$ONLY," in
     *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A..Z, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A..AA, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -577,6 +577,28 @@ assert_z() {
         "la clé retirée n'est plus connue de ce client (pas un fantôme)"
 }
 
+assert_aa() {
+    local server="$WORK_DIR/AA/coop-server.log"
+    local client="$WORK_DIR/AA/coop-client.log"
+
+    # v18 : l'hôte décale son horloge d'une heure, et le client doit **recevoir** l'heure puis **écrire**
+    # le recalage. Le critère de grandeur compte : un écart d'une demi-seconde serait du bruit, seul un
+    # saut d'environ 3600 s prouve que c'est bien le décalage du serveur qui a été appliqué.
+    expect AA "$server" '\[sonde\] temps : décalage \+3600 s \([0-9]+\.[0-9]+ -> [0-9]+\.[0-9]+, écriture effectuée=True\)' \
+        "le serveur décale réellement son heure d'une heure"
+    expect AA "$server" '\[net\] heure du monde : [0-9]+\.[0-9]+ s diffusée à 1 client\(s\)' \
+        "le serveur diffuse son heure au client admis"
+    # L'écart doit être du **même ordre que le décalage** : attendre seulement « un recalage » laissait
+    # passer un recalage de 0,6 s (mesuré le 2026-10-21, verdict False alors que le saut de 3 600 s avait
+    # bien été appliqué). `3[0-9]{3}` échoue si le client n'a vu qu'un écart de quelques secondes.
+    expect AA "$client" '\[sonde\] temps : messages=[1-9][0-9]* appliqués=[1-9][0-9]* écart corrigé max=3[0-9]{3}\.[0-9]+s' \
+        "le client reçoit l'heure et corrige un écart du même ordre que le saut serveur"
+    expect AA "$client" '\[sonde\] temps : .*verdict=True' \
+        "la sonde cliente conclut True sur le transport et l'application"
+    expect AA "$client" '\[temps\] recalé sur le serveur : écart de [0-9]+\.[0-9]+ s corrigé' \
+        "le recalage est journalisé au moment où il est écrit"
+}
+
 assert_d() {
     local log="$WORK_DIR/D/coop-client.log"
 
@@ -982,9 +1004,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1444,6 +1466,20 @@ if wanted Z "$ONLY"; then
         args+=(--no-build)
     fi
     step Z "santé et mort d'une créature : appliquées chez le client, retrait décidé par le serveur" assert_z "${args[@]}"
+fi
+
+if wanted AA "$ONLY"; then
+    # v18 : l'hôte décale son heure d'une heure ; le client doit recevoir et appliquer. Le décalage est
+    # ce qui rend la mesure possible : sans lui, les deux horloges avanceraient ensemble et le seuil ne
+    # serait jamais franchi.
+    args=(--clients=1 --timeout=360
+        "--host-args=-coopmode=server -coopsave=slot0000 -coopdebug=timeshift"
+        "--client-args=-coopmode=client -coopsave=slot0000 -coopdebug=time"
+        "--client-marker=\[sonde\] temps : messages=")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step AA "heure du monde : décalage serveur reçu et appliqué chez le client" assert_aa "${args[@]}"
 fi
 
 if wanted D "$ONLY"; then

@@ -39,8 +39,9 @@ mkdir -p "$WORK_DIR/P" "$WORK_DIR/Q" "$WORK_DIR/N" "$WORK_DIR/B" "$WORK_DIR/R"
 #    s'arrêtait à `O` alors que P et Q existaient : les deux étapes répondaient « étape inconnue », donc
 #    elles n'auraient jamais pu tourner. Ce contrôle compare la liste des `if wanted X` à la classe de
 #    caractères qui les autorise.
-declared=$(grep -oE '^if wanted [A-Z] ' "$VERIFY" | awk '{print $3}' | sort -u | tr -d '\n')
-allowed=$(grep -oE '\*\[\![A-Z]+,?\]\*\)' "$VERIFY" | head -1 | sed -e 's/^.*\[!//' -e 's/,\].*$//')
+declared=$(grep -oE '^if wanted [A-Z]+ ' "$VERIFY" | awk '{print $3}' | sort -u | tr -d '\n')
+declared_count=$(grep -cE '^if wanted [A-Z]+ ' "$VERIFY")
+allowed=$(grep -oE '\*\[\![A-Z,]+,?\]\*\)' "$VERIFY" | head -1 | sed -e 's/^.*\[!//' -e 's/,\].*$//')
 if [ -z "$declared" ] || [ -z "$allowed" ]; then
     echo "ECHEC : impossible de lire les étapes déclarées ('$declared') ou la classe autorisée ('$allowed')" >&2
     exit 1
@@ -57,12 +58,12 @@ if [ -n "$missing" ]; then
     echo "ECHEC : étapes déclarées mais refusées par --only : $missing (autorisées : $allowed)" >&2
     exit 1
 fi
-echo "OK   les ${#declared} étapes déclarées ($declared) sont toutes acceptées par --only"
+echo "OK   les ${declared_count} étapes déclarées ($declared) sont toutes acceptées par --only"
 
 # 0 bis. Le **défaut** doit lancer les mêmes étapes. Le 2026-10-20, `--only` acceptait R mais la liste
 #    par défaut (`${ONLY:-…}`) s'arrêtait à Q : un run sans `--only` — le cas normal — sautait R en
 #    silence, alors que le script annonçait « les dix-huit étapes ». Ce contrôle-là l'aurait vu.
-defaults=$(grep -oE 'ONLY:-[A-Z](,[A-Z])*' "$VERIFY" | sed 's/^ONLY:-//' | tr -d ',' | sort -u)
+defaults=$(grep -oE 'ONLY:-[A-Z]+(,[A-Z]+)*' "$VERIFY" | sed 's/^ONLY:-//' | tr ',' '\n' | sort -u | tr -d '\n')
 if [ -z "$defaults" ]; then
     echo "ECHEC : aucune liste par défaut (\${ONLY:-…}) trouvée dans $VERIFY" >&2
     exit 1
@@ -74,7 +75,7 @@ while read -r defaultSteps; do
         exit 1
     fi
 done <<< "$defaults"
-echo "OK   le défaut de verify.sh lance les ${#declared} étapes déclarées"
+echo "OK   le défaut de verify.sh lance les ${declared_count} étapes déclarées"
 
 write_fixtures() {
     cat > "$WORK_DIR/P/coop-client.log" <<'LOG'

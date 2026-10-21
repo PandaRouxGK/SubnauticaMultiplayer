@@ -2,12 +2,12 @@
 
 Coopération pour Subnautica (2019.4.36f1, Mono) : une instance de jeu sert de **serveur
 autoritaire** (BepInEx 5 + HarmonyX), les autres instances sont des clients. Transport UDP
-LiteNetLib, protocole binaire maison **v17**, tick serveur à **20 Hz**.
+LiteNetLib, protocole binaire maison **v18**, tick serveur à **20 Hz**.
 
 L'architecture et l'historique des mesures vivent dans `PLAN.md`. La politique d'autorité système
 par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai aujourd'hui.
 
-## État au 2026-10-19
+## État au 2026-10-21
 
 **Mesuré en jeu, avec instrument :**
 
@@ -22,6 +22,8 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   portée de 8 m, cadence, plafond) puis annonce l'entité à tout le monde — demandeur compris ;
 - ramassage : première réclamation accordée, suivantes refusées avec le détenteur nommé, `PlayerId`
   falsifié réattribué à la session ; l'objet disparaît chez les autres ;
+- **heure du monde** : le serveur diffuse son `DayNightCycle` à 1 Hz, le client se recale au-delà de
+  5 s d'écart — un client qui charge pendant que l'hôte avance ne démarre plus de nuit quand il fait jour ;
 - sauvegarde : le client n'écrit pas (garde sur deux remparts), l'hôte écrit toujours ;
 - hôte dédié : aucun personnage joueur exposé aux clients ;
 - **empreinte de sauvegarde (P0)** : handshake v13 accepté avec `save=slot=…` ; étape P verte ;
@@ -32,13 +34,14 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`entités créées ici=0`) ;
 - **contrat de contenu (P1bis)** : étape N verte — `définition vérifiée=True (hash=0x3da1f4bf782becdf)`
   et `définition falsifiée refusée=True` chez **les deux** clients, `définitions refusées=0` ;
-- **batterie des vingt-six étapes (A–Z)** : les dix-sept premières ont un verdict vert le 2026-10-19
+- **batterie des vingt-sept étapes (A–Z, AA)** : les dix-sept premières ont un verdict vert le 2026-10-19
   (`PLAN.md` §46) ; `R`, `S` et `T` prouvent les refus P0 en jeu (slot, session, mode — client divergent
   refusé nommément, l'autre admis), `U` la reconnexion (départ diffusé, réclamations libérées, retour admis, aucun avatar fantôme),
   `V` la présence à **trois** clients et `W` les créatures à trois clients, avec les états périmés
   écartés (`PLAN.md` §49.5, §52 et §53) ; `X` la libération du volant par une déconnexion, `Y` la
-  fabrication demandée par un client (`PLAN.md` §64) et `Z` la santé et la mort d'une créature
-  (`PLAN.md` §65). `tools/verify.sh` sans `--only` lance bien les vingt-six.
+  fabrication demandée par un client (`PLAN.md` §64), `Z` la santé et la mort d'une créature
+  (`PLAN.md` §65) et `AA` l'heure du monde diffusée puis appliquée (`PLAN.md` §66). `tools/verify.sh`
+  sans `--only` lance bien les vingt-sept.
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
@@ -140,8 +143,8 @@ accepte n'importe qui connaissant l'IP, la clé LiteNetLib ne filtrant que les p
 | `tools/deploy.sh --verify` | secondes | binaires installés = manifeste |
 | `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only` **et** lancées par le défaut, et les assertions P/Q/N/B/R acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
 | `tools/session-verdict.sh --self-test` | secondes | le graveur de session longue accepte un journal vert **et** échoue sur les six cas rouges (exception, dérive > 2 m, mesure vide, sauvegarde absente, reconnexion absente, durée courte) |
-| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–W) |
-| `tools/verify.sh` | long (~45 min) | les vingt-trois étapes, un seul verdict |
+| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–AA) |
+| `tools/verify.sh` | long (~45 min) | les vingt-sept étapes, un seul verdict |
 | `tools/p4-session.sh --minutes=30` | 30 min + chargement | une session longue à deux clients (reconnexion au tiers, sauvegarde de l'hôte) et **un** verdict P4 (`PLAN.md` §62) |
 
 `verify.sh` et `run-session.sh` lancent de vraies instances : ils exigent le jeu, une sauvegarde
@@ -168,6 +171,9 @@ docs/              protocole, politique d'autorité, table des preuves, comptes 
 - **La partie doit être la même.** L'empreinte au handshake refuse une sauvegarde différente, plus
   ancienne ou altérée, avec un motif lisible. Elle ne garantit pas que deux fichiers soient
   identiques octet par octet.
+- **L'heure est partagée, pas le ciel.** Le serveur diffuse l'heure (`WorldTime`, v18) ; la météo, les
+  aurores et les événements de Radiations ne voyagent pas — deux joueurs peuvent voir le même soleil et
+  un temps différent.
 - **L'économie n'est pas partagée.** Deux joueurs peuvent encore avoir chacun leur copie d'un objet
   fabriqué ou consommé ; seul le ramassage d'un objet du monde est arbitré.
 - **Une seule sauvegarde et un seul biome ont servi de preuve.** Les identités de créatures reposent

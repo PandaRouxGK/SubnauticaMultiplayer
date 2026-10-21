@@ -1146,6 +1146,29 @@ namespace NetProbe
 
             Check(zeroDespawnReadThrew, "EntityDespawn (clé 0 forgée) -> ProtocolException à la lecture");
 
+            // Heure du monde (v18) : un float nu, et un refus net de ce qui n'est pas une heure.
+            var worldTime = new WorldTimeMessage { TimePassed = 1234.5f };
+            var worldTimeReader = new PacketReader(MessageCodec.Encode(worldTime.Write));
+            Check(worldTimeReader.ReadByte() == (byte)MessageType.WorldTime, "opcode WorldTime");
+            Check(
+                WorldTimeMessage.Read(worldTimeReader).TimePassed == worldTime.TimePassed,
+                "round-trip WorldTime (heure exacte)");
+
+            var badWorldTimeThrew = 0;
+            foreach (var bad in new[] { -1f, float.NaN, float.PositiveInfinity })
+            {
+                try
+                {
+                    MessageCodec.Encode(new WorldTimeMessage { TimePassed = bad }.Write);
+                }
+                catch (ProtocolException)
+                {
+                    badWorldTimeThrew++;
+                }
+            }
+
+            Check(badWorldTimeThrew == 3, "WorldTime (négatif, NaN, ∞) -> ProtocolException à l'écriture");
+
             // Décodage UTF-8 strict : un paquet malformé est refusé, un emoji valide passe.
             var invalidUtf8Threw = false;
             try

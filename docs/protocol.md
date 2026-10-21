@@ -12,8 +12,8 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `17` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v17` | `Protocol.ConnectionKey` |
+| Version du protocole | `18` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v18` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
 | Encodage | little-endian, tampons réutilisables, chaînes UTF-8 **strictes en lecture**, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
@@ -67,6 +67,7 @@ et encodé en UTF-8.
 | 23 | `VehicleUpgrades` | serveur → client | ReliableOrdered | `VehicleKey` long (**jamais 0**, refusé à l'écriture comme à la lecture), compte octet (**≤ `MaxVehicleUpgrades` = 8**, refusé au-delà), puis les entiers `TechType` (ushort), **triés et dédupliqués** à la lecture comme à l'écriture |
 | 24 | `EntitySpawnRequest` | client → serveur | ReliableOrdered | `RequestId` int, `TechType` ushort (**jamais 0**, refusé à l'écriture comme à la lecture), position (3 floats), quaternion (4 floats) — chaque nombre doit être **fini** |
 | 25 | `EntitySpawnResult` | serveur → demandeur | ReliableOrdered | `RequestId` int, `Granted` bool, `Key` long (**jamais 0 si accordée**, refusé à l'écriture comme à la lecture), `Reason` string (≤ 96, **non vide si refusée**) |
+| 26 | `WorldTime` | serveur → client | Unreliable (1 Hz) | `TimePassed` float (secondes écoulées, `DayNightCycle.timePassedAsFloat`) — **négatif, `NaN` ou ∞ refusé** à l'écriture comme à la lecture |
 
 Les points de contrat que ces messages portent :
 
@@ -141,6 +142,8 @@ doit pas coûter un aller-retour.
 | `EquipmentCheckIntervalMs` | `250` | l'équipement change rarement ; on vérifie sans inonder |
 | `HeldItemCheckIntervalMs` | `250` | idem pour l'objet tenu |
 | `CreatureStreamIntervalTicks` | `2` | les créatures bougent plus lentement qu'un joueur ; 20 Hz doublerait la bande passante pour rien (`Protocol.cs`) |
+| `WorldTimeIntervalTicks` | `20` | 1 Hz d'heure du monde : elle avance lentement, et le client ne se recale qu'au-delà de `0.5 s` d'écart — vingt envois par seconde n'auraient rien corrigé de plus |
+| `WorldTimeApplyThresholdSeconds` | `5` | en dessous, le client **n'écrit pas**. **Mesuré** à l'étape AA le 2026-10-21 : deux instances du même monde gardent un écart **stable** de `0,6 à 1,1 s` ; avec un seuil de `0,5 s` le client réécrivait l'heure à chaque message (une fois par seconde) pour courir après ce bruit |
 
 ### Limites de taille
 
@@ -450,6 +453,33 @@ au bout de `2 s` et **rétablissait son IA locale** — un mort qui nage).
 
 ---
 
+## 4 octies. Heure du monde (v18)
+
+Chaque instance simule son propre `DayNightCycle` : les deux chargent la même sauvegarde, donc la même
+heure de départ, mais **avancent chacune de leur côté**. Un client qui met deux minutes à charger démarre
+avec l'heure **de la sauvegarde**, pas celle du serveur qui a continué de tourner. Résultat : deux joueurs
+pouvaient vivre l'un en plein jour et l'autre de nuit, sans qu'aucun message ne le dise.
+
+1. **Le serveur diffuse son heure à 1 Hz** (#26, `Unreliable`, `WorldTimeIntervalTicks = 20` à 20 Hz).
+   Une seconde de retard sur une horloge qui avance lentement ne se voit pas ; vingt envois par seconde
+   seraient payés pour rien.
+2. **La valeur est refusée plutôt qu'envoyée si elle n'est pas une heure** (négative, `NaN`, ∞) :
+   `WorldTimeMessage.Write` lève, donc le serveur vérifie **avant** de diffuser — une exception dans la
+   boucle de tick ferait tomber l'instance pour une horloge.
+3. **Le client n'écrit que si l'écart dépasse `5 s`** (`WorldTimeApplyThresholdSeconds`). L'heure avance
+   des deux côtés : réécrire à chaque paquet ferait sauter le soleil de la valeur d'un aller-retour sans
+   rien corriger. L'écart est lu **avant** l'écriture (après, il vaudrait zéro par construction). Le seuil
+   de `0,5 s` du premier jet a été **mesuré trop bas** : deux instances gardent un écart stable de `0,6 à
+   1,1 s`, donc le client réécrivait à chaque seconde pour rien (voir §3, `WorldTimeApplyThresholdSeconds`).
+4. **L'écriture passe par le champ public** `DayNightCycle.timePassedAsDouble`, la même donnée que
+   `SetTimePassed` — méthode que le jeu déconseille explicitement (« Do not mess with timePassed! »).
+   Utiliser le champ évite de dépendre d'une méthode obsolète et de laisser un avertissement au build.
+
+Ce qui **n'est pas** transporté : la météo (`WeatherManager`), les événements de Radiations et les
+projecteurs d'aurore. Le ciel des deux instances peut donc encore différer ; seule l'heure est commune.
+
+---
+
 ## 5. Admission et refus
 
 `ServerNetwork.Validate` (`src/Coop.Server/ServerNetwork.cs`) refuse un handshake, **en donnant la raison en
@@ -475,7 +505,9 @@ chargement** : tri `StringComparer.Ordinal` des identifiants bruts, échappement
 et conservation des **8 premiers octets** en 16 caractères hexadécimaux minuscules. La liste vide vaut
 `da39a3ee5e6b4b0d`. Les identifiants usuels (noms de DLL) ne contiennent aucun caractère échappé : leur
 empreinte est donc identique à celle de l'algorithme précédent. Le `NetProbe selftest` couvre désormais un
-aller-retour pour **chacun** des 22 messages, y compris les refus (troncature, `NaN`, clé nulle, plafonds).
+aller-retour pour **23 des 26 messages**, y compris les refus (troncature, `NaN`, clé nulle, plafonds) ;
+`VehicleUpgrades`, `EntitySpawnRequest` et `EntitySpawnResult` (v15/v16) ne sont couverts que par les tests
+xunit de `tests/Coop.Model.Tests` — leurs bornes y sont vérifiées, mais pas l'aller-retour par l'outil.
 
 À l'acceptation, le serveur : attribue un `PlayerId`, assigne la couleur, envoie au nouvel arrivant un
 `PlayerJoined` + sa couleur + l'équipement et l'objet tenu des joueurs déjà présents, annonce son arrivée

@@ -1744,6 +1744,61 @@ namespace Coop.Model
         }
     }
 
+    /// <summary>
+    /// Heure du monde (Unreliable, 1 Hz, v18) : « il est <c>TimePassed</c> secondes dans le monde du
+    /// serveur ».
+    ///
+    /// Pourquoi un message : chaque instance simule sa propre horloge, et un client qui rejoint charge
+    /// l'heure **de la sauvegarde** — pas celle du serveur, qui a continué d'avancer pendant le
+    /// chargement. Deux joueurs pouvaient donc vivre deux moments de la journée, l'un en plein jour et
+    /// l'autre de nuit.
+    ///
+    /// Le client ne s'aligne que si l'écart dépasse
+    /// <see cref="Protocol.WorldTimeApplyThresholdSeconds"/> : l'heure avance toute seule des deux côtés,
+    /// et réécrire à chaque paquet ferait sauter le soleil sans rien corriger.
+    /// </summary>
+    public sealed class WorldTimeMessage
+    {
+        /// <summary>Secondes écoulées dans le monde du serveur (`DayNightCycle.timePassedAsFloat`).</summary>
+        public float TimePassed;
+
+        public void Write(PacketWriter writer)
+        {
+            if (float.IsNaN(TimePassed) || float.IsInfinity(TimePassed))
+            {
+                throw new ProtocolException($"heure du monde non finie ({TimePassed})");
+            }
+
+            if (TimePassed < 0f)
+            {
+                throw new ProtocolException($"heure du monde négative ({TimePassed})");
+            }
+
+            writer.WriteByte((byte)MessageType.WorldTime);
+            writer.WriteFloat(TimePassed);
+        }
+
+        public static WorldTimeMessage Read(PacketReader reader)
+        {
+            var message = new WorldTimeMessage
+            {
+                TimePassed = reader.ReadFloat(),
+            };
+
+            if (float.IsNaN(message.TimePassed) || float.IsInfinity(message.TimePassed))
+            {
+                throw new ProtocolException($"heure du monde reçue non finie ({message.TimePassed})");
+            }
+
+            if (message.TimePassed < 0f)
+            {
+                throw new ProtocolException($"heure du monde reçue négative ({message.TimePassed})");
+            }
+
+            return message;
+        }
+    }
+
     public static class MessageCodec
     {
         public static byte[] Encode(Action<PacketWriter> write, PacketWriter reusable = null)

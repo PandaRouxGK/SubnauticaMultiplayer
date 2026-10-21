@@ -875,6 +875,59 @@ namespace Coop.Server
             holding.Sort(StringComparer.Ordinal);
             return holding.ToArray();
         }
+        /// <summary>Envois d'heure du monde depuis le démarrage — pour le journal et les compteurs.</summary>
+        private long _worldTimeSent;
+
+        /// <summary>
+        /// Diffuse l'heure du monde du serveur (v18, 1 Hz).
+        ///
+        /// Pourquoi le serveur : les deux instances chargent la même sauvegarde, donc la même heure de
+        /// départ, mais elles avancent chacune de leur côté — et un client qui charge pendant deux minutes
+        /// démarre avec l'heure **de la sauvegarde**, pas celle du serveur. Sans ce message, deux joueurs
+        /// pouvaient vivre l'un en plein jour et l'autre de nuit.
+        ///
+        /// Une valeur illisible est **refusée** plutôt qu'envoyée : `WorldTimeMessage.Write` lèverait, et
+        /// une exception dans la boucle de tick ferait tomber le serveur pour une horloge.
+        /// </summary>
+        private void BroadcastWorldTime()
+        {
+            var cycle = DayNightCycle.main;
+            if (cycle == null)
+            {
+                return;
+            }
+
+            var timePassed = cycle.timePassedAsFloat;
+            if (float.IsNaN(timePassed) || float.IsInfinity(timePassed) || timePassed < 0f)
+            {
+                _log.LogWarning($"[net] heure du monde ignorée : valeur illisible ({timePassed}).");
+                return;
+            }
+
+            var message = new WorldTimeMessage { TimePassed = timePassed };
+            var sent = 0;
+
+            foreach (var pair in _sessions)
+            {
+                if (!pair.Value.Accepted)
+                {
+                    continue;
+                }
+
+                Send(pair.Key, message.Write, DeliveryMethod.Unreliable);
+                sent++;
+            }
+
+            _worldTimeSent++;
+
+            if (_worldTimeSent <= 3 || _worldTimeSent % 60 == 0)
+            {
+                _log.LogInfo(
+                    $"[net] heure du monde : {timePassed:F1} s diffusée à {sent} client(s) " +
+                    $"({_worldTimeSent} envoi(s) depuis le démarrage).");
+            }
+        }
+
         /// <summary>
         /// Diffuse à chaque tick (20 Hz) l'état de position de tous les autres joueurs connectés
         /// à chaque client accepté.
@@ -921,6 +974,13 @@ namespace Coop.Server
             if (serverTick % Protocol.VehicleStreamIntervalTicks == 0)
             {
                 BroadcastVehicleSnapshots(serverTick, hostPlayer);
+            }
+
+            // L'heure du monde (v18) : 1 Hz suffit, elle avance lentement et le client ne se recale que
+            // si l'écart dépasse un demi-seconde.
+            if (serverTick % Protocol.WorldTimeIntervalTicks == 0)
+            {
+                BroadcastWorldTime();
             }
 
             foreach (var recipientPair in _sessions)

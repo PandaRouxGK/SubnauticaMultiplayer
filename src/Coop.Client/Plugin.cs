@@ -208,6 +208,13 @@ namespace Coop.Client
                 go.AddComponent<EntitySpawnProbeBehaviour>();
             }
 
+            if (IsDebugFlagSet("time"))
+            {
+                // v18 : constate la réception de l'heure du serveur et le recalage effectivement écrit.
+                Log.LogWarning("[boot] sonde d'heure du monde activée (-coopdebug=time).");
+                go.AddComponent<TimeSyncProbeBehaviour>();
+            }
+
             if (IsDebugFlagSet("creaturehealth"))
             {
                 // v17 : constate la fraction de vie reçue sur une copie, puis le retrait décidé par le
@@ -487,6 +494,35 @@ namespace Coop.Client
         private int _entitySpawnsRefused;
         private long _lastSpawnKey;
         private string _lastSpawnReason = string.Empty;
+
+        // — Heure du monde (v18) ————————————————————————————————————————————————————
+        // Compteurs lus par la sonde `-coopdebug=time` : ce que la boucle réseau a reçu, ce qu'elle a
+        // réellement écrit, et l'écart mesuré **avant** écriture (pas après, qui vaudrait toujours 0).
+        private int _worldTimeMessages;
+        private int _worldTimeApplied;
+        private float _lastWorldTimeError;
+        private float _lastWorldTimeAppliedError;
+        private float _maxWorldTimeAppliedError;
+        private float _lastWorldTimeServer;
+
+        internal int WorldTimeMessages => _worldTimeMessages;
+        internal int WorldTimeApplied => _worldTimeApplied;
+        internal float LastWorldTimeError => _lastWorldTimeError;
+
+        /// <summary>
+        /// Écart mesuré lors du **dernier recalage écrit** — et non l'écart du dernier message reçu, qui
+        /// vaut quelques millisecondes une seconde plus tard.
+        /// </summary>
+        internal float LastWorldTimeAppliedError => _lastWorldTimeAppliedError;
+
+        /// <summary>
+        /// Plus grand écart **effectivement corrigé** depuis le démarrage. La sonde doit lire celui-ci et
+        /// non le dernier : mesuré à l'étape AA, le client se recale aussi plusieurs fois de quelques
+        /// secondes pendant son chargement, et un saut de 3 600 s corrigé une fois serait masqué par le
+        /// recalage suivant.
+        /// </summary>
+        internal float MaxWorldTimeAppliedError => _maxWorldTimeAppliedError;
+        internal float LastWorldTimeServer => _lastWorldTimeServer;
 
         internal int EntitySpawnsGranted => _entitySpawnsGranted;
         internal int EntitySpawnsRefused => _entitySpawnsRefused;
@@ -1562,6 +1598,42 @@ namespace Coop.Client
                     CoopClientPlugin.Log.LogInfo(
                         $"[net] disparition reçue : clé=0x{despawn.Key:x16} ({kind}) — motif « {despawn.Reason} »");
                     EntityDespawner.Handle(despawn);
+                    break;
+                }
+
+                case MessageType.WorldTime:
+                {
+                    var worldTime = WorldTimeMessage.Read(reader);
+                    _worldTimeMessages++;
+                    _lastWorldTimeServer = worldTime.TimePassed;
+
+                    var cycle = DayNightCycle.main;
+                    if (cycle != null)
+                    {
+                        // L'écart est lu **avant** d'écrire : après, il vaudrait zéro par construction et
+                        // la sonde ne mesurerait plus rien. En dessous du seuil, on laisse l'horloge locale
+                        // avancer : la réécrire chaque seconde ferait sauter le soleil pour un aller-retour.
+                        var error = Mathf.Abs(cycle.timePassedAsFloat - worldTime.TimePassed);
+                        _lastWorldTimeError = error;
+                        if (error > Protocol.WorldTimeApplyThresholdSeconds)
+                        {
+                            // `SetTimePassed` existe mais est marquée obsolète dans le jeu (« Do not mess
+                            // with timePassed! ») : on écrit le champ public qu'elle écrit elle-même,
+                            // pour ne pas dépendre d'une méthode que le jeu déconseille (et pour ne pas
+                            // laisser un avertissement de compilation dans le build).
+                            cycle.timePassedAsDouble = worldTime.TimePassed;
+                            _worldTimeApplied++;
+                            _lastWorldTimeAppliedError = error;
+                            if (error > _maxWorldTimeAppliedError)
+                            {
+                                _maxWorldTimeAppliedError = error;
+                            }
+                            CoopClientPlugin.Log.LogInfo(
+                                $"[temps] recalé sur le serveur : écart de {error:F1} s corrigé " +
+                                $"({_worldTimeApplied} application(s) sur {_worldTimeMessages} message(s)).");
+                        }
+                    }
+
                     break;
                 }
 

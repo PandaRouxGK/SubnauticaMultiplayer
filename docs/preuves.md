@@ -64,6 +64,17 @@ dans la colonne de droite et n'invalident pas le critère.
 | Un retrait reçu **avant le chargement** du monde ne laisse pas un poisson vivant | premier run Z : `absente à l'arrivée=1` puis créature chargée **vivante** (IA rétablie) | journal du 2026-10-21 (premier run Z), `PLAN.md` §65.3 | corrigé (2026-10-21) : balayage du monde local par clé + attente d'un client dans le monde côté sonde |
 | La v16 ne décidait pas la mort d'une créature | une créature tuée côté serveur cessait d'être annoncée ; le client la relâchait après `2 s` et **rétablissait son IA** | `RemoteCreatureManager` (`relâchée … plus d'état depuis`) | corrigé (2026-10-21, v17) |
 
+### Monde : l'heure du serveur est diffusée et appliquée (v18, 2026-10-21)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| Le serveur **décale réellement** son heure, et relit ce qu'il a écrit | `[sonde] temps : décalage +3600 s (900.6 -> 4500.6, écriture effectuée=True)` | `src/Coop.Server/TimeShiftProbeBehaviour.cs` (`-coopdebug=timeshift`) ; étape AA | prouvé (2026-10-21, étape AA, 107 s) |
+| L'heure **voyage** jusqu'au client admis | `[net] heure du monde : 900.6 s diffusée à 1 client(s)` (1 Hz) | `src/Coop.Server/ServerNetwork.cs` (`BroadcastWorldTime`) ; `Coop.Model/Messages.cs` (`WorldTimeMessage`, v18) | prouvé (2026-10-21, étape AA) |
+| Le client **écrit** le recalage, et l'écart corrigé est du même ordre que le saut | `[sonde] temps : messages=25 appliqués=5 écart corrigé max=3622.9s (attendu ≈3600s), heure locale=4516.1s dernière heure serveur=4517.4s — verdict=True` | `Coop.Client/TimeSyncProbeBehaviour.cs` ; `Coop.Client/Plugin.cs` (`MaxWorldTimeAppliedError`) ; étape AA | prouvé (2026-10-21, étape AA) |
+| Deux instances **divergent** vraiment quand l'une charge plus tard | premier run AA : premier recalage de `414.3 s`, puis `3601.0 s` après le saut, puis `3627.8 s` quand le client finit de charger et repart de l'heure de la sauvegarde | journal du 2026-10-21 (premier run AA), `PLAN.md` §66.3 | observé (2026-10-21) |
+| Un seuil de `0.5 s` faisait réécrire l'heure à **chaque message** | `39 application(s) sur 40 message(s)` en 40 s, pour un écart stable de `0.6 à 1.1 s` | journal du 2026-10-21 (premier run AA), `PLAN.md` §66.3 | corrigé (2026-10-21) : seuil à `5 s` |
+| La sonde lisait l'écart du **dernier** recalage, pas le saut | `verdict=False … écart corrigé=0.6s (attendu ≈3600s)` alors que `écart de 3601.0 s corrigé` était journalisé | `TimeSyncProbeBehaviour` du premier jet ; `PLAN.md` §66.3 | corrigé (2026-10-21) : écart **maximal** |
+| La **météo** n'est pas transportée | aucune ligne de journal, aucun message : `Protocol.cs` n'a pas de type météo | `docs/protocol.md` §4 octies | non implémenté (assumé) |
 
 
 ### P2 : reconnexion, mesurée avec un volant tenu (2026-10-20)
@@ -269,10 +280,10 @@ aucune n'est inventée, chacune vient d'une limite déjà écrite dans les sourc
 ## Ce que cette page ne prétend pas
 
 - **Cette page n'est pas une suite de tests à elle seule.** Les instruments qu'elle cite s'exécutent dans
-le jeu ; les **348 tests purs** de `tests/` couvrent le modèle (protocole, empreintes, bornes), mais **pas** la
+le jeu ; les **353 tests purs** de `tests/` couvrent le modèle (protocole, empreintes, bornes), mais **pas** la
 couleur, l'objet tenu ni l'animation (cf. `docs/authority.md` §3). Un `prouvé` ici veut dire « une ligne de
 journal a été relevée une fois », pas « rejoué à chaque run ».
-- **Ce qui se rapproche d'une suite, c'est `tools/verify.sh`** : il rejoue **vingt-six** runs (avatar +
+- **Ce qui se rapproche d'une suite, c'est `tools/verify.sh`** : il rejoue **vingt-sept** runs (avatar +
 créatures ; deux clients avec la sonde de présence — équipement, `PlayerId` falsifié, outil tenu, nage ;
 plafond abaissé ; autotest de la garde de sauvegarde ; créatures seules à deux clients ; sauvegarde de
 l'hôte ; Seamoth en mouvement ; serveur dédié sans personnage ; menu Échap du client sans gel ; diffusion et
@@ -280,11 +291,12 @@ interpolation du véhicule ; les **deux** runs de la clé nominale — préparat
 d'un objet réel, clé falsifiée, geste bloqué et objet retiré chez l'autre ; la conduite arbitrée à deux
 clients, **libération et reprise** ; la création d'entité et son rejeu à un client tardif ; la disparition
 d'un véhicule chez les deux clients ; la position autoritaire et l'empreinte de sauvegarde — nage normale
-non corrigée, téléport refusé et appliqué ; le rejeu d'un retrait à un client arrivé après coup) dans une
-seule commande, affirme les lignes attendues et rend un verdict unique. **Les vingt-six étapes ont un verdict
-vert au 2026-10-21** (`PLAN.md` §46, §47.3, §49.5 et §64) ; P et Q ont été rejouées seules après les
-correctifs du modèle, R après le tri déterministe des slots, S/T/U le 2026-10-20 (`PLAN.md` §52), et X/Y le
-2026-10-21 (`PLAN.md` §62 et §64).
+non corrigée, téléport refusé et appliqué ; le rejeu d'un retrait à un client arrivé après coup ; l'heure
+du monde, décalée de 3 600 s par l'hôte puis recalée chez le client) dans une
+seule commande, affirme les lignes attendues et rend un verdict unique. **Les vingt-sept étapes ont un verdict
+vert au 2026-10-21** (`PLAN.md` §46, §47.3, §49.5, §64, §65 et §66) ; P et Q ont été rejouées seules après
+les correctifs du modèle, R après le tri déterministe des slots, S/T/U le 2026-10-20 (`PLAN.md` §52), X/Y le
+2026-10-21 (`PLAN.md` §62 et §64), Z et AA le 2026-10-21 (`PLAN.md` §65 et §66).
 Une affirmation de cette page marquée `prouvé` et couverte par l'une de ses étapes est donc rejouable —
 les autres (marche, zones et sauvegardes différentes, plus de 8 joueurs) ne le sont pas encore.
 - **Un compteur absent n'est pas une preuve d'absence.** Chaque ligne doit être lue avec son périmètre : par

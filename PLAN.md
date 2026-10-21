@@ -4610,3 +4610,87 @@ trouvé ; il est cité ici pour que la correction ne se perde pas.
 - **La santé des créatures n'est pas visible dans une interface** : elle est appliquée à la copie, pas
   affichée.
 - **Les dégâts des joueurs** ne sont pas traités : cette v17 ne concerne que les créatures.
+
+## 66. L'heure du monde voyage : les clients se recalent sur le serveur (v18, 2026-10-21)
+
+Deux instances chargent la même sauvegarde, donc la même heure de départ — puis **avancent chacune de leur
+côté**. Un client qui met deux minutes à charger démarre avec l'heure **de la sauvegarde**, pas celle du
+serveur qui a continué de tourner : les deux joueurs pouvaient vivre l'un en plein jour et l'autre de nuit,
+sans qu'aucun message ne le dise. La v18 transporte l'heure ; la météo, elle, ne voyage toujours pas.
+
+### 66.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| message | `src/Coop.Model/Protocol.cs` (`MessageType.WorldTime` = 26), `Messages.cs` (`WorldTimeMessage`) | `TimePassed` float ; **négatif, `NaN` ou ∞ refusé** à l'écriture comme à la lecture |
+| rythme | `Protocol.WorldTimeIntervalTicks = 20` | 1 Hz à un tick de 20 Hz : l'heure avance lentement, vingt envois par seconde n'auraient rien corrigé de plus |
+| seuil | `Protocol.WorldTimeApplyThresholdSeconds = 5` | en dessous, le client **n'écrit pas** — voir §66.3, le premier jet à `0,5 s` était mesuré trop bas |
+| diffusion | `src/Coop.Server/ServerNetwork.cs` (`BroadcastWorldTime`) | lit `DayNightCycle.timePassedAsFloat`, **vérifie** qu'elle est finie et positive avant d'envoyer (une exception dans la boucle de tick ferait tomber l'instance pour une horloge), puis `Unreliable` à chaque client admis |
+| application | `src/Coop.Client/Plugin.cs` (`case MessageType.WorldTime`) | lit l'écart **avant** d'écrire, écrit `DayNightCycle.timePassedAsDouble` au-delà du seuil ; compteurs `messages`, `appliqués`, écart du dernier recalage et **écart maximal corrigé** |
+| sonde serveur | `src/Coop.Server/TimeShiftProbeBehaviour.cs` (`-coopdebug=timeshift`) | attend un client **dans le monde**, puis décale l'heure de **+3 600 s** et relit ce qui a été écrit |
+| sonde cliente | `src/Coop.Client/TimeSyncProbeBehaviour.cs` (`-coopdebug=time`) | attend un recalage **du même ordre que le saut** (≥ 3 570 s), puis conclut sur le transport **et** sur l'application |
+| harnais | `tools/verify.sh` (**étape AA**), `tools/check-verify-assertions.sh` | cinq assertions sur les deux journaux ; l'écart affirmé doit être de l'ordre du saut (`3[0-9]{3}`), pas un recalage de bruit |
+
+### 66.2 Mesures du 2026-10-21
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet test` | **353/353** rc=0 — 5 nouveaux cas `WorldTimeTests` (aller-retour, `NaN`/∞ refusés à l'écriture, négatif refusé à l'écriture **et** à la lecture d'un paquet forgé, rythme et seuil figés) |
+| `NetProbe selftest` | **SUCCES** — aller-retour `WorldTime` et trois refus (négatif, `NaN`, ∞) |
+| étape **AA** (premier run) | **ÉCHEC** — `verdict=False … écart corrigé=0.6s (attendu ≈3600s)` : le saut **avait** été appliqué (`[temps] recalé … écart de 3601.0 s corrigé`), mais la sonde lisait le **dernier** écart, écrasé par un recalage de bruit arrivé après. Correction de mesure : compteur d'écart **maximal** |
+| étape **AA** (second run) | **OK (107 s)** — serveur `[sonde] temps : décalage +3600 s (…, écriture effectuée=True)`, `[net] heure du monde : … s diffusée à 1 client(s)` ; client `[sonde] temps : messages=25 appliqués=5 écart corrigé max=3622.9s (attendu ≈3600s), heure locale=4516.1s dernière heure serveur=4517.4s — verdict=True` |
+| non-régression (créatures, deux clients) | étape **E** : voir §66.5 |
+| `check-verify-assertions.sh` | rc=0 — **27** étapes déclarées (A..Z, AA), défaut complet, assertions satisfaisantes et discriminantes |
+
+### 66.3 Un seuil mesuré trop bas, et une divergence réelle observée
+
+**Le premier run AA a montré les deux, dans le même journal.**
+
+1. **La divergence existe bel et bien.** Au moment du saut, le serveur était à `900,6 s` de jeu et le client
+   — encore au menu, horloge gelée — à `900,6 s` de sauvegarde : le premier recalage vaut `414,3 s`, puis
+   `3 601,0 s` après le décalage de la sonde, puis `3 627,8 s` quand le client finit de charger son monde et
+   repart de l'heure de la sauvegarde. C'est exactement le défaut visé : un client tardif vit un autre
+   moment de la journée. Après le dernier recalage, `heure locale` et `dernière heure serveur` ne diffèrent
+   plus que de `1,3 s`.
+2. **`0,5 s` était trop bas.** Deux instances du même monde gardent un écart **stable** de `0,6 à 1,1 s`
+   (leur horloge n'avance pas exactement au même rythme). Avec un seuil de `0,5 s`, le client réécrivait
+   l'heure **à chaque message, une fois par seconde** : `39 application(s) sur 40 message(s)` en 40 s. Un
+   soleil qui saute d'une seconde chaque seconde pour courir après un écart constant, invisible autrement.
+   Le seuil passe à **5 s** — en dessous du visible (un jour dure 1 200 s), au-dessus du bruit mesuré.
+3. **La sonde mesurait le mauvais écart.** Elle lisait l'écart du **dernier** recalage ; le saut de 3 600 s
+   était pourtant écrit et journalisé. Le client expose désormais l'écart **maximal** corrigé, et l'étape AA
+   affirme sa grandeur (`3[0-9]{3}`), pas seulement l'existence d'un recalage.
+
+Sans le run, les trois points seraient restés invisibles : le code « marchait » — il réécrivait simplement
+l'heure en boucle, et la sonde se serait satisfaite d'un écart de `0,6 s`.
+
+### 66.4 Ce que ce chapitre ne prouve pas
+
+- **La météo n'est pas transportée** (`WeatherManager`, aurores, événements de Radiations) : deux clients
+  peuvent encore avoir le même soleil et un ciel différent.
+- **Aucune preuve visuelle** : le décalage de 3 600 s est mesuré sur les champs, pas sur une capture du
+  soleil ni sur un changement de luminosité perçu.
+- **Deux instances seulement** : l'étape AA ne mesure pas un troisième client ni une reconnexion ; le
+  comportement d'un client qui rejoint alors que le serveur est à mi-journée n'est prouvé que par le
+  premier run (client encore au menu), pas par une arrivée tardive volontaire.
+- **Le décalage vient de la sonde**, pas d'une horloge qui dérive naturellement de 3 600 s : le transport et
+  l'application sont mesurés, pas la dérive réelle sur une session longue (P4).
+- **Le seuil de 5 s n'est pas exercé à sa frontière** en jeu : les tests hors jeu figent la constante, aucune
+  étape ne mesure un écart de 4,9 s (ignoré) puis 5,1 s (écrit).
+
+### 66.5 Non-régression, et un run E tombé pour la raison déjà connue
+
+L'heure du monde touche la boucle de tick du serveur et la boucle réseau du client : le premier réflexe est
+de vérifier que les flux rapides n'ont pas bougé. L'étape **E** (créatures, deux clients) a été rejouée
+avec les binaires v18.
+
+| Run | Résultat |
+|---|---|
+| E, premier essai (2026-10-21, après AA) | **ÉCHEC (230 s)** — `verdict=False` chez le client : `écart de 7.04m entre deux états consécutifs ('Boomerang(Clone)')`, `pas par image de 1.90m en 47ms (40.4 m/s)`, `images longues=2033`, `interruption max=2.2s` avec `écart 17.92m`. Le pas par image dépasse le plafond de `40 m/s` de `0.4 m/s` — c'est le défaut de **mesure sous à-coup** décrit au §60, pas un écart de protocole |
+| E, rejeu seul, binaires identiques (2026-10-21) | **OK (97 s)** — aucun `verdict=False`, aucun `verdict=True` manquant |
+
+Le second run est identique au premier **au binaire près** : rien n'a été corrigé entre les deux. C'est donc
+un run tombé pour une raison **déjà connue** (la dérive mesurée pendant les images longues, §60), pas une
+régression de la v18 — et c'est écrit ici plutôt que masqué. Ce que cela ne prouve pas : que la v18 n'a
+**aucun** effet sur la charge du client ; l'étape E ne mesure pas le coût du message d'heure (1 Hz, 5 octets
+utiles) et aucun profil n'a été pris.

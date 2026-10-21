@@ -8,6 +8,9 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **18** : l'**heure du monde** (`WorldTime`, #26) : le serveur diffuse son `DayNightCycle` à
+        /// 1 Hz, et un client qui rejoint (ou dont l'horloge a dérivé) se recale. Sans ce message, deux
+        /// instances du même monde pouvaient vivre deux moments différents de la journée.
         /// **17** : les **dégâts des créatures** (M3/M4) : la fraction de vie voyage dans l'entrée de
         /// créature (#13), et la mort est une **décision du serveur** annoncée par `EntityDespawn` avec
         /// `EntityKind.Creature` — un client ne peut pas tuer une créature que le serveur simule encore.
@@ -56,13 +59,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 17;
+        public const int Version = 18;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v17";
+        public const string ConnectionKey = "coop-subnautica-v18";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -296,6 +299,27 @@ namespace Coop.Model
         public const int MaxVehicleUpgrades = 8;
 
         /// <summary>
+        /// Un envoi d'heure du monde tous les <c>n</c> ticks, soit **1 Hz**. L'heure avance lentement à
+        /// l'échelle d'une session : vingt envois par seconde seraient du gaspillage, un par seconde suffit
+        /// à recaler un client dont l'horloge a dérivé de quelques secondes.
+        /// </summary>
+        public const int WorldTimeIntervalTicks = 20;
+
+        /// <summary>
+        /// Écart (s) au-delà duquel le client écrit l'heure du serveur. En dessous, il laisse son horloge
+        /// locale avancer : réécrire à chaque paquet ferait sauter le soleil de la même quantité, et
+        /// l'écart infime d'un aller-retour n'a aucune valeur de jeu.
+        ///
+        /// **5 s, pas 0,5 s** : mesuré à l'étape AA le 2026-10-21, deux instances du même monde gardent
+        /// un écart **stable** de `0,6 à 1,1 s` (leur horloge n'avance pas exactement au même rythme).
+        /// Avec un seuil de `0,5 s`, le client réécrivait l'heure **à chaque message, une fois par
+        /// seconde**, pour courir après cet écart constant — un soleil qui saute d'une seconde chaque
+        /// seconde, pour rien. Cinq secondes est en dessous du visible (un jour dure 1 200 s) et au-dessus
+        /// du bruit mesuré.
+        /// </summary>
+        public const float WorldTimeApplyThresholdSeconds = 5f;
+
+        /// <summary>
         /// Distance (m) maximale entre le joueur demandeur et la position où il demande une fabrication.
         ///
         /// Ce n'est pas une règle de confort : sans elle, un client pourrait demander un Seamoth à l'autre
@@ -440,6 +464,12 @@ namespace Coop.Model
 
         /// <summary>Décision du serveur sur une demande de fabrication, au seul demandeur (v16).</summary>
         EntitySpawnResult = 25,
+
+        /// <summary>
+        /// Heure du monde (Unreliable, 1 Hz, v18). Le serveur envoie son `DayNightCycle` ; le client se
+        /// recale quand l'écart dépasse un seuil, plutôt que d'écrire l'heure à chaque paquet.
+        /// </summary>
+        WorldTime = 26,
     }
 
     /// <summary>

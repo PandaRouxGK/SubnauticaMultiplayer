@@ -124,6 +124,14 @@ namespace Coop.Server
                 go.AddComponent<VehicleProbeBehaviour>();
             }
 
+            // v18 : décaler l'heure du monde côté serveur, pour que le recalage client ait un saut
+            // observable à corriger (l'étape AA).
+            if (IsDebugFlagSet("timeshift"))
+            {
+                Log.LogWarning("[boot] sonde de décalage d'heure activée (-coopdebug=timeshift).");
+                go.AddComponent<TimeShiftProbeBehaviour>();
+            }
+
             // v17 : blesser puis tuer une créature réelle, pour que la santé et la mort aient quelque
             // chose à transporter (l'étape Z : fraction appliquée chez le client, puis retrait).
             if (IsDebugFlagSet("creaturehit"))
