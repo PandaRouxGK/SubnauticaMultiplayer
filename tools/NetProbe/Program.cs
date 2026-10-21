@@ -1169,6 +1169,71 @@ namespace NetProbe
 
             Check(badWorldTimeThrew == 3, "WorldTime (négatif, NaN, ∞) -> ProtocolException à l'écriture");
 
+            // Inventaire (v19) : instantané trié, et refus net d'un contenu ambigu (doublon, ordre faux).
+            var inventory = new PlayerInventory();
+            inventory.Add("Titanium", 2);
+            inventory.Add("Copper", 1);
+
+            var inventorySnapshot = new InventorySnapshotMessage
+            {
+                Revision = inventory.Revision,
+                Entries = inventory.Snapshot(),
+            };
+            var inventoryReader = new PacketReader(MessageCodec.Encode(inventorySnapshot.Write));
+            Check(
+                inventoryReader.ReadByte() == (byte)MessageType.InventorySnapshot,
+                "opcode InventorySnapshot");
+            var inventoryRt = InventorySnapshotMessage.Read(inventoryReader);
+            Check(
+                inventoryRt.Revision == inventorySnapshot.Revision
+                && inventoryRt.Entries.Length == 2
+                && inventoryRt.Entries[0].TechTypeName == "Copper"
+                && inventoryRt.Entries[1].TechTypeName == "Titanium"
+                && inventoryRt.Entries[1].Count == 2,
+                "round-trip InventorySnapshot (trié, quantités conservées)");
+
+            var unorderedInventoryThrew = false;
+            try
+            {
+                MessageCodec.Encode(new InventorySnapshotMessage
+                {
+                    Revision = 1,
+                    Entries = new[]
+                    {
+                        new InventoryEntry("Titanium", 1),
+                        new InventoryEntry("Copper", 1),
+                    },
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                unorderedInventoryThrew = true;
+            }
+
+            Check(unorderedInventoryThrew, "InventorySnapshot (non trié) -> ProtocolException à l'écriture");
+
+            var duplicateInventoryReadThrew = false;
+            try
+            {
+                var forged = new PacketWriter();
+                forged.WriteByte((byte)MessageType.InventorySnapshot);
+                forged.WriteInt(1);
+                forged.WriteByte(2);
+                forged.WriteString("Copper");
+                forged.WriteUInt16(1);
+                forged.WriteString("Copper");
+                forged.WriteUInt16(2);
+                var forgedReader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+                forgedReader.ReadByte();
+                InventorySnapshotMessage.Read(forgedReader);
+            }
+            catch (ProtocolException)
+            {
+                duplicateInventoryReadThrew = true;
+            }
+
+            Check(duplicateInventoryReadThrew, "InventorySnapshot (doublon forgé) -> ProtocolException à la lecture");
+
             // Décodage UTF-8 strict : un paquet malformé est refusé, un emoji valide passe.
             var invalidUtf8Threw = false;
             try

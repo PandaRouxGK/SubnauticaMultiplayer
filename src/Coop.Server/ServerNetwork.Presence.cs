@@ -360,6 +360,11 @@ namespace Coop.Server
             // 3. Ce qui a été fabriqué avant son arrivée. Après les joueurs : un client qui reçoit l'annonce
             //    d'une entité doit déjà connaître l'état du monde auquel elle se rattache.
             SendSpawnedEntities(peer, session);
+
+            // 4. Son inventaire, **à lui seul** (v19). Envoyé à l'admission même vide : le client sait
+            //    ainsi à quelle révision il en est avant le premier ramassage, au lieu de deviner s'il a
+            //    manqué un instantané pendant son chargement.
+            SendInventorySnapshot(peer, session, "admission");
         }
         private byte AllocateColorIndex(bool hostInWorld)
         {

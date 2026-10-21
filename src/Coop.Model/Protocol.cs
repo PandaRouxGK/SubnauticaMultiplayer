@@ -8,6 +8,10 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **19** : l'**inventaire du joueur** côté serveur (`InventorySnapshot`, #27) : le serveur tient le
+        /// registre de ce que chaque joueur possède et l'annonce à son propriétaire après chaque ramassage
+        /// accordé — c'est le socle du coût de fabrication. Aucun message ne permet à un client d'**ajouter**
+        /// un objet à ce registre : un ajout ne vient que d'une décision du serveur.
         /// **18** : l'**heure du monde** (`WorldTime`, #26) : le serveur diffuse son `DayNightCycle` à
         /// 1 Hz, et un client qui rejoint (ou dont l'horloge a dérivé) se recale. Sans ce message, deux
         /// instances du même monde pouvaient vivre deux moments différents de la journée.
@@ -59,13 +63,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 18;
+        public const int Version = 19;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v18";
+        public const string ConnectionKey = "coop-subnautica-v19";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -299,6 +303,22 @@ namespace Coop.Model
         public const int MaxVehicleUpgrades = 8;
 
         /// <summary>
+        /// Nombre maximal d'**objets distincts** dans l'inventaire serveur d'un joueur.
+        ///
+        /// Ce n'est pas la taille de l'inventaire du jeu (24 emplacements) : c'est la borne du conteneur qui
+        /// décide, pour qu'un client ne puisse pas faire grossir un dictionnaire sans limite. La valeur est
+        /// le double de la place réelle, donc elle ne bloque aucun joueur légitime.
+        /// </summary>
+        public const int MaxInventoryEntries = 48;
+
+        /// <summary>
+        /// Quantité maximale d'un même objet dans le registre serveur. Au-delà, l'ajout est refusé
+        /// (`InventoryFull`) plutôt que tronqué : une quantité tronquée silencieusement serait un objet
+        /// perdu sans que personne ne le voie.
+        /// </summary>
+        public const int MaxInventoryStack = 9999;
+
+        /// <summary>
         /// Un envoi d'heure du monde tous les <c>n</c> ticks, soit **1 Hz**. L'heure avance lentement à
         /// l'échelle d'une session : vingt envois par seconde seraient du gaspillage, un par seconde suffit
         /// à recaler un client dont l'horloge a dérivé de quelques secondes.
@@ -470,6 +490,15 @@ namespace Coop.Model
         /// recale quand l'écart dépasse un seuil, plutôt que d'écrire l'heure à chaque paquet.
         /// </summary>
         WorldTime = 26,
+
+        /// <summary>
+        /// Inventaire du joueur, poussé par le serveur à son propriétaire (ReliableOrdered, v19).
+        ///
+        /// Le serveur en tient le registre autoritaire : il l'annonce à l'admission (vide) puis après
+        /// chaque **ramassage accordé**. Aucun message client ne peut y ajouter un objet — c'est ce qui
+        /// distingue un registre d'une déclaration.
+        /// </summary>
+        InventorySnapshot = 27,
     }
 
     /// <summary>

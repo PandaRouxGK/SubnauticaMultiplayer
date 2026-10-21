@@ -47,6 +47,13 @@ namespace Coop.Server
             // Paramètres d'animation `holding_*` que l'émetteur a annoncés comme actifs.
             public string[] HoldingParams;
 
+            /// <summary>
+            /// Inventaire **serveur** du joueur (v19). Il vit avec la session : un joueur qui part emporte
+            /// son registre, et un nouveau joueur démarre vide — on ne réinjecte pas l'inventaire du prédécesseur
+            /// sous le même id.
+            /// </summary>
+            public readonly PlayerInventory Inventory = new PlayerInventory();
+
             // Dernier état de position reçu du joueur (ou position de spawn initiale).
             public uint LastPositionSequence;
             public float X;
@@ -608,6 +615,10 @@ namespace Coop.Server
                 case MessageType.EntitySpawnRequest:
                     HandleEntitySpawnRequest(peer, session, EntitySpawnRequestMessage.Read(reader));
                     break;
+
+                // Aucun `case` pour `InventorySnapshot` : c'est un message **serveur → client**. Un client
+                // qui en enverrait un tombe donc dans le `default`, qui le nomme — plutôt que d'être
+                // interprété comme une mutation d'inventaire, ce que le protocole ne permet pas.
 
                 default:
                     _log.LogWarning($"[net] message inattendu {type} de {peer} (handshake accepté={session.Accepted})");

@@ -4694,3 +4694,62 @@ un run tombé pour une raison **déjà connue** (la dérive mesurée pendant les
 régression de la v18 — et c'est écrit ici plutôt que masqué. Ce que cela ne prouve pas : que la v18 n'a
 **aucun** effet sur la charge du client ; l'étape E ne mesure pas le coût du message d'heure (1 Hz, 5 octets
 utiles) et aucun profil n'a été pris.
+
+## 67. Première tranche de l'inventaire : un registre serveur, pas une déclaration (v19, 2026-10-21)
+
+Le lot « inventaire » commence par une question de propriété : **qui tient la liste de ce qu'un joueur
+possède ?** Si c'est le client, il peut annoncer n'importe quoi, et le coût de fabrication qui s'appuiera
+dessus n'aura aucune valeur opposable. La v19 installe donc le registre sur le serveur, et ne l'expose qu'en
+lecture au propriétaire. Rien n'est encore débité : c'est le socle du lot suivant.
+
+### 67.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| registre | `src/Coop.Model/PlayerInventory.cs` | quantités par nom de `TechType`, bornées (`MaxInventoryEntries = 48`, `MaxInventoryStack = 9999`) ; refus **nommés** (`Invalid`, `UnknownItem`, `NotEnough`, `InventoryFull`) ; une ligne à zéro est supprimée ; `Snapshot()` trié par nom ordinal |
+| message | `src/Coop.Model/Protocol.cs` (`InventorySnapshot` = 27), `Messages.cs` | révision int ≥ 0, compte ≤ 48, noms ≤ 64, quantités `1..9999` ; **tri et unicité vérifiés** à l'écriture comme à la lecture |
+| registre par session | `src/Coop.Server/ServerNetwork.cs` (`ClientSession.Inventory`) | un registre par joueur, détruit avec la session : un nouveau joueur démarre vide, il n'hérite pas du prédécesseur |
+| alimentation | `src/Coop.Server/ServerNetwork.Pickup.cs` → `RecordGrantedPickup` | **seul** chemin qui ajoute : un ramassage **nouveau et accordé**. Une réclamation répétée du même joueur est idempotente et n'ajoute pas |
+| annonce | `src/Coop.Server/ServerNetwork.Inventory.cs` | instantané à l'admission (révision 0, vide) puis après chaque ajout ; **au propriétaire seul** |
+| réception | `src/Coop.Client/Plugin.cs` | applique l'instantané, **écarte et compte** une révision plus ancienne que l'état courant |
+| sonde cliente | `src/Coop.Client/InventoryProbeBehaviour.cs` (`-coopdebug=inventory`) | attend l'instantané d'admission, puis un ramassage réel (`-coopdebug=pickup`), puis compare la quantité du serveur à `Inventory.main` |
+| harnais | `tools/verify.sh` (**étape AB**) | cinq assertions : admission vide, ajout après ramassage, réception chez le client, **égalité serveur/local**, aucun instantané périmé |
+
+### 67.2 Mesures du 2026-10-21
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet test` | **366/366** rc=0 — 13 nouveaux cas (`PlayerInventoryTests` : retrait trop gros, objet inconnu, bornes de nom/quantité, plafond de pile, plafond d'objets, tri, instantané forgé, révision négative, doublon, ordre faux, trop de lignes) et `MessageFuzzTests` passe à **27** lecteurs |
+| `NetProbe selftest` | **SUCCES** — aller-retour `InventorySnapshot` trié + non trié refusé à l'écriture + doublon forgé refusé à la lecture |
+| étape **AB** (premier run) | **ÉCHEC** — sonde `verdict=False`, `'PowerCell' serveur=1 local=0` : le registre était juste, la **mesure** lisait trop tôt (voir §67.3) |
+| étape **AB** (deuxième run) | sonde `verdict=True` — `messages=2, révision 0 -> 1, 'PowerCell' serveur=1 local=1` — mais l'étape **échoue** sur une assertion mal échappée (§67.3) |
+| étape **AB** (troisième run) | **OK (149 s)** — `VERDICT GLOBAL : tout est vert` ; serveur `révision 0, 0 objet(s) (0 unité(s)) — admission` puis `révision 1, 1 objet(s) (1 unité(s)) — ramassage accordé de 'PowerCell'` |
+| `check-verify-assertions.sh` | rc=0 — **28** étapes déclarées (A..Z, AA, AB), défaut complet |
+
+### 67.3 Deux défauts trouvés par le run, aucun par la lecture
+
+1. **La sonde lisait avant que le monde n'ait changé.** `serveur=1 local=0` : la décision du serveur arrive
+   **dans le préfixe** de `Pickupable.OnHandClick`, alors que `Inventory.Pickup` n'a lieu qu'après. La sonde
+   comparait donc un registre déjà à jour à un inventaire de jeu pas encore modifié. Correction de mesure :
+   elle attend (jusqu'à 30 s) que les deux quantités se rejoignent au lieu de lire une seule fois. C'est un
+   défaut de sonde, pas de produit — mais il aurait pu faire conclure à une divergence inexistante.
+2. **Une assertion mal échappée fait tomber une étape verte.** Le journal disait `verdict=True` et
+   `serveur=1 local=1` ; l'assertion cherchait `serveur=\[1-9\]`, c'est-à-dire le texte littéral `[1-9]`.
+   L'étape a échoué **après** un run réussi. Correction : `serveur=[1-9][0-9]*`, et vérification du motif
+   contre le journal conservé avant de relancer. Le run de confirmation est le troisième.
+
+### 67.4 Ce que cette tranche ne fait pas — et qui reste à faire
+
+- **Aucune réconciliation** : le client reçoit et journalise l'instantané, il n'écrit rien dans
+  `Inventory.main`. Un objet retiré du registre serveur resterait donc dans l'inventaire du jeu.
+- **Aucun débit** : rien ne retire du registre (craft, dépôt, consommation, mort). Le registre ne fait que
+  grossir, et un joueur qui consomme un objet rendrait le registre faux dès la première utilisation.
+- **La récolte n'est pas arbitrée** : plantes, veines et conteneurs ne passent pas par `Pickupable.OnHandClick`
+  de la même façon ; ils restent locaux.
+- **Un seul objet, un seul client** mesurés : l'étape AB ne prouve ni un ramassage en rafale, ni deux joueurs
+  simultanés, ni le comportement d'un objet empilé.
+- **Le rapprochement de noms est celui du jeu** : la sonde compare `TechType.ToString()` au nom transporté ;
+  un `TechType` dont le nom d'énumération diffère du nom `AsString` ne serait pas compté (aucun cas observé
+  sur `PowerCell`, mais ce n'est pas prouvé pour les 400 objets).
+- **Persistance** : le registre vit avec la session. Une reconnexion repart à zéro, même si le joueur a
+  toujours les objets dans sa sauvegarde.

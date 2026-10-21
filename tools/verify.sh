@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les vingt-sept étapes, et ce que chacune prouve :
+# Les vingt-huit étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -94,10 +94,15 @@
 #      réclamations du parti (`réclamation(s) libérée(s)`), admet le revenu sous un nouvel id, lui rejoue
 #      les retraits ; le survivant finit avec `joueursDistants=1 avatarsActifs=1` (aucun fantôme) et
 #      aucune clé n'est refusée au nom du mort. C'est P2, rejoué à chaque batterie.
+#   AB un client ramasse un objet réel -> le serveur l'enregistre dans **son** registre d'inventaire
+#      (instantané de révision supérieure, objet ×1), le client reçoit l'instantané d'admission puis celui
+#      du ramassage, et la quantité annoncée par le serveur **égale** celle que `Inventory.main` contient
+#      réellement. C'est la première tranche de l'inventaire (v19) : un registre, pas encore une
+#      réconciliation avec l'inventaire du jeu.
 #
 # Usage :
-#   tools/verify.sh                    # les vingt-sept étapes
-#   tools/verify.sh --only=B           # une seule étape (A..AA, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les vingt-huit étapes
+#   tools/verify.sh --only=B           # une seule étape (A..AB, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -144,7 +149,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA  étapes à lancer (défaut : les vingt-sept)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB  étapes à lancer (défaut : les vingt-huit)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -166,7 +171,7 @@ done
 case ",$ONLY," in
     *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A..AA, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A..AB, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -599,6 +604,25 @@ assert_aa() {
         "le recalage est journalisé au moment où il est écrit"
 }
 
+assert_ab() {
+    local server="$WORK_DIR/AB/coop-server.log"
+    local client="$WORK_DIR/AB/coop-client.log"
+
+    # v19 : l'instantané d'admission (révision 0, vide) prouve que le client sait où il en est ; celui qui
+    # suit le ramassage porte l'objet **×1** ; et la sonde compare la quantité du serveur à l'inventaire
+    # réellement modifié par le jeu — c'est ce dernier point qui fait du registre autre chose qu'un écho.
+    expect AB "$server" "\\[net\\] inventaire de '[^']+'#[0-9]+ : révision 0, 0 objet\\(s\\) \\(0 unité\\(s\\)\\) — admission" \
+        "le serveur annonce un inventaire vide à l'admission"
+    expect AB "$server" "\\[net\\] inventaire de '[^']+'#[0-9]+ : révision [1-9][0-9]*, 1 objet\\(s\\) \\([1-9][0-9]* unité\\(s\\)\\) — ramassage accordé" \
+        "un ramassage accordé est enregistré dans le registre du joueur"
+    expect AB "$client" "\\[inventaire\\] instantané du serveur : révision 0, 0 objet\\(s\\)" \
+        "le client reçoit l'instantané d'admission"
+    expect AB "$client" "serveur=[1-9][0-9]* local=[1-9][0-9]*.*verdict=True" \
+        "la quantité du serveur égale celle du monde chez le client, et la sonde conclut True"
+    expect AB "$client" "périmés écartés=0" \
+        "aucun instantané n'a été écarté comme périmé"
+}
+
 assert_d() {
     local log="$WORK_DIR/D/coop-client.log"
 
@@ -1004,9 +1028,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1480,6 +1504,19 @@ if wanted AA "$ONLY"; then
         args+=(--no-build)
     fi
     step AA "heure du monde : décalage serveur reçu et appliqué chez le client" assert_aa "${args[@]}"
+fi
+
+if wanted AB "$ONLY"; then
+    # v19 : le ramassage est fait par la sonde de ramassage (elle seule a un objet du monde et un geste),
+    # et la sonde d'inventaire vérifie que le registre du serveur correspond à ce que le jeu contient.
+    args=(--clients=1 --timeout=420
+        "--host-args=-coopmode=server"
+        "--client-args=-coopmode=client -coopdebug=pickup -coopdebug=inventory"
+        "--client-marker=\\[sonde\\] inventaire :")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step AB "inventaire : le registre du serveur est annoncé et correspond au ramassage réel" assert_ab "${args[@]}"
 fi
 
 if wanted D "$ONLY"; then

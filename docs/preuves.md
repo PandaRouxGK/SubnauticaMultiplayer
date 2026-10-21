@@ -77,6 +77,17 @@ dans la colonne de droite et n'invalident pas le critère.
 | La **météo** n'est pas transportée | aucune ligne de journal, aucun message : `Protocol.cs` n'a pas de type météo | `docs/protocol.md` §4 octies | non implémenté (assumé) |
 
 
+### Inventaire serveur : un registre, pas une déclaration (v19, 2026-10-21)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| Le serveur **annonce** un inventaire vide à l'admission, avec sa révision | `[net] inventaire de 'killi'#1 : révision 0, 0 objet(s) (0 unité(s)) — admission` et `[inventaire] instantané du serveur : révision 0, 0 objet(s), 0 unité(s) [vide]` | `ServerNetwork.Inventory.cs` (`SendInventorySnapshot`) ; `Coop.Model/Messages.cs` (`InventorySnapshot`, v19) | prouvé (2026-10-21, étape AB) |
+| Un **ramassage accordé** ajoute l'objet au registre, et la révision avance | `[net] inventaire de 'killi'#1 : révision 1, 1 objet(s) (1 unité(s)) — ramassage accordé de 'PowerCell'` | `ServerNetwork.Pickup.cs` → `RecordGrantedPickup` | prouvé (2026-10-21, étape AB) |
+| Le registre **dit la vérité sur le monde** : la quantité annoncée égale celle de `Inventory.main` | `[sonde] inventaire : messages=2, révision 0 -> 1, 'PowerCell' serveur=1 local=1 … verdict=True` | `Coop.Client/InventoryProbeBehaviour.cs` ; étape AB | prouvé (2026-10-21, étape AB) |
+| Le premier run mesurait `local=0` : la décision serveur arrive **avant** que le geste n'ait fini d'ajouter l'objet | `serveur=1 local=0 … verdict=False` (premier run AB) | journal du 2026-10-21, `PLAN.md` §67.3 | corrigé (2026-10-21) : la sonde attend que les deux quantités se rejoignent |
+| Une assertion mal échappée peut faire tomber une étape **verte** | `verdict=True` dans le journal, échec sur `serveur=\[1-9\]…` | `tools/verify.sh` (`assert_ab`), `PLAN.md` §67.3 | corrigé (2026-10-21) : classe de chiffres non échappée |
+| Le client **n'applique pas** l'instantané à `Inventory.main`, et rien ne **débite** le registre | aucune ligne de code ne le fait : `InventoryProbeBehaviour` ne fait que comparer | `docs/protocol.md` §4 nonies | non implémenté (assumé, lot suivant) |
+
 ### P2 : reconnexion, mesurée avec un volant tenu (2026-10-20)
 
 | Affirmation | Instrument | Source | Statut |
@@ -280,10 +291,10 @@ aucune n'est inventée, chacune vient d'une limite déjà écrite dans les sourc
 ## Ce que cette page ne prétend pas
 
 - **Cette page n'est pas une suite de tests à elle seule.** Les instruments qu'elle cite s'exécutent dans
-le jeu ; les **353 tests purs** de `tests/` couvrent le modèle (protocole, empreintes, bornes), mais **pas** la
+le jeu ; les **366 tests purs** de `tests/` couvrent le modèle (protocole, empreintes, bornes), mais **pas** la
 couleur, l'objet tenu ni l'animation (cf. `docs/authority.md` §3). Un `prouvé` ici veut dire « une ligne de
 journal a été relevée une fois », pas « rejoué à chaque run ».
-- **Ce qui se rapproche d'une suite, c'est `tools/verify.sh`** : il rejoue **vingt-sept** runs (avatar +
+- **Ce qui se rapproche d'une suite, c'est `tools/verify.sh`** : il rejoue **vingt-huit** runs (avatar +
 créatures ; deux clients avec la sonde de présence — équipement, `PlayerId` falsifié, outil tenu, nage ;
 plafond abaissé ; autotest de la garde de sauvegarde ; créatures seules à deux clients ; sauvegarde de
 l'hôte ; Seamoth en mouvement ; serveur dédié sans personnage ; menu Échap du client sans gel ; diffusion et
@@ -292,11 +303,12 @@ d'un objet réel, clé falsifiée, geste bloqué et objet retiré chez l'autre ;
 clients, **libération et reprise** ; la création d'entité et son rejeu à un client tardif ; la disparition
 d'un véhicule chez les deux clients ; la position autoritaire et l'empreinte de sauvegarde — nage normale
 non corrigée, téléport refusé et appliqué ; le rejeu d'un retrait à un client arrivé après coup ; l'heure
-du monde, décalée de 3 600 s par l'hôte puis recalée chez le client) dans une
-seule commande, affirme les lignes attendues et rend un verdict unique. **Les vingt-sept étapes ont un verdict
+du monde, décalée de 3 600 s par l'hôte puis recalée chez le client ; le registre d'inventaire du serveur
+confronté à un ramassage réel) dans une
+seule commande, affirme les lignes attendues et rend un verdict unique. **Les vingt-huit étapes ont un verdict
 vert au 2026-10-21** (`PLAN.md` §46, §47.3, §49.5, §64, §65 et §66) ; P et Q ont été rejouées seules après
 les correctifs du modèle, R après le tri déterministe des slots, S/T/U le 2026-10-20 (`PLAN.md` §52), X/Y le
-2026-10-21 (`PLAN.md` §62 et §64), Z et AA le 2026-10-21 (`PLAN.md` §65 et §66).
+2026-10-21 (`PLAN.md` §62 et §64), Z, AA et AB le 2026-10-21 (`PLAN.md` §65 à §67).
 Une affirmation de cette page marquée `prouvé` et couverte par l'une de ses étapes est donc rejouable —
 les autres (marche, zones et sauvegardes différentes, plus de 8 joueurs) ne le sont pas encore.
 - **Un compteur absent n'est pas une preuve d'absence.** Chaque ligne doit être lue avec son périmètre : par

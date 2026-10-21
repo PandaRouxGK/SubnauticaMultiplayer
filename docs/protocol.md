@@ -12,8 +12,8 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `18` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v18` | `Protocol.ConnectionKey` |
+| Version du protocole | `19` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v19` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
 | Encodage | little-endian, tampons réutilisables, chaînes UTF-8 **strictes en lecture**, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
@@ -68,6 +68,7 @@ et encodé en UTF-8.
 | 24 | `EntitySpawnRequest` | client → serveur | ReliableOrdered | `RequestId` int, `TechType` ushort (**jamais 0**, refusé à l'écriture comme à la lecture), position (3 floats), quaternion (4 floats) — chaque nombre doit être **fini** |
 | 25 | `EntitySpawnResult` | serveur → demandeur | ReliableOrdered | `RequestId` int, `Granted` bool, `Key` long (**jamais 0 si accordée**, refusé à l'écriture comme à la lecture), `Reason` string (≤ 96, **non vide si refusée**) |
 | 26 | `WorldTime` | serveur → client | Unreliable (1 Hz) | `TimePassed` float (secondes écoulées, `DayNightCycle.timePassedAsFloat`) — **négatif, `NaN` ou ∞ refusé** à l'écriture comme à la lecture |
+| 27 | `InventorySnapshot` | serveur → propriétaire | ReliableOrdered | `Revision` int (≥ 0), compte octet (**≤ `MaxInventoryEntries`** = 48), puis par objet : nom de `TechType` (≤ 64) et quantité ushort (`1..MaxInventoryStack`) ; **trié par nom et sans doublon**, refusé sinon à l'écriture comme à la lecture |
 
 Les points de contrat que ces messages portent :
 
@@ -155,6 +156,8 @@ doit pas coûter un aller-retour.
 | `MaxTechTypeNameLength` | `64` | borne des noms de `TechType` et de paramètres |
 | `MaxActionParams` | `8` | paramètres `holding_*` d'un objet tenu |
 | `MaxUsernameLength` | `32` | borne du pseudo au handshake |
+| `MaxInventoryEntries` | `48` | objets **distincts** dans le registre serveur : le double des 24 emplacements du jeu, pour ne bloquer aucun joueur légitime tout en bornant le dictionnaire |
+| `MaxInventoryStack` | `9999` | quantité maximale d'un même objet ; au-delà l'ajout est **refusé** (`InventoryFull`), jamais tronqué en silence |
 
 ### Créatures
 
@@ -480,6 +483,32 @@ projecteurs d'aurore. Le ciel des deux instances peut donc encore différer ; se
 
 ---
 
+## 4 nonies. Inventaire serveur (v19)
+
+Le lot « inventaire » commence par une décision : **le registre vit sur le serveur**, pas dans une déclaration
+du client. Un client qui annonce son contenu peut annoncer n'importe quoi ; le coût de fabrication qui
+s'appuierait dessus n'aurait aucune valeur opposable.
+
+1. **Le serveur tient un registre par joueur** (`Coop.Model/PlayerInventory`) : quantités par nom de
+   `TechType`, bornées (`MaxInventoryEntries` objets distincts, `MaxInventoryStack` par objet). Un dépassement
+   est **refusé** — `InventoryFull` — jamais tronqué : une unité perdue en silence est un objet que personne
+   ne peut expliquer.
+2. **Un seul chemin ajoute** : un ramassage **nouveau et accordé** (#15/#16). Une réclamation répétée du
+   même joueur est idempotente et n'ajoute pas une seconde fois. Il n'existe **aucun message** qui demande un
+   ajout — c'est la forme la plus simple de l'autorité : ne pas exposer l'opération.
+3. **Le registre est annoncé à son propriétaire seul** (#27), en entier, à l'admission (révision `0`, vide)
+   puis après chaque ajout. Un instantané plutôt qu'un delta : il tient dans un paquet, et un delta perdu
+   laisserait le client faux jusqu'à la déconnexion.
+4. **La révision avance par changement appliqué**, jamais sur un refus. Un client peut donc voir qu'un refus
+   n'a rien changé, et deux instantanés décrire le même état se comparent par leur numéro.
+
+Ce qui **n'est pas** fait dans cette tranche : le client n'écrit pas l'instantané dans `Inventory.main`
+(aucune réconciliation), rien ne **retire** du registre (consommation, dépôt, craft), et le registre ne
+connaît ni les emplacements ni les tailles de pile du jeu. L'étape AB mesure seulement que le registre **dit
+la vérité sur le ramassage** : la quantité annoncée égale celle que le jeu contient.
+
+---
+
 ## 5. Admission et refus
 
 `ServerNetwork.Validate` (`src/Coop.Server/ServerNetwork.cs`) refuse un handshake, **en donnant la raison en
@@ -505,7 +534,7 @@ chargement** : tri `StringComparer.Ordinal` des identifiants bruts, échappement
 et conservation des **8 premiers octets** en 16 caractères hexadécimaux minuscules. La liste vide vaut
 `da39a3ee5e6b4b0d`. Les identifiants usuels (noms de DLL) ne contiennent aucun caractère échappé : leur
 empreinte est donc identique à celle de l'algorithme précédent. Le `NetProbe selftest` couvre désormais un
-aller-retour pour **23 des 26 messages**, y compris les refus (troncature, `NaN`, clé nulle, plafonds) ;
+aller-retour pour **24 des 27 messages**, y compris les refus (troncature, `NaN`, clé nulle, plafonds) ;
 `VehicleUpgrades`, `EntitySpawnRequest` et `EntitySpawnResult` (v15/v16) ne sont couverts que par les tests
 xunit de `tests/Coop.Model.Tests` — leurs bornes y sont vérifiées, mais pas l'aller-retour par l'outil.
 
@@ -534,8 +563,9 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   la création (#19, v10) et le retrait (#20, v11) existent, et depuis la v16 un client peut **demander**
   une fabrication (#24) que le serveur arbitre (liste blanche, portée de `8 m`, cadence de `5 s`, plafond de
   `8` par session) puis fabrique dans **son** monde avant de l'annoncer à tous. Ce qui n'existe pas : un
-  **coût** de fabrication (inventaire, matériaux), un effet de jeu mesuré de la santé (destruction,
-  réparation), et la persistance d'une entité fabriquée à l'exécution.
+  une **consommation** de matériaux (le registre d'inventaire existe depuis la v19, mais le craft ne le
+  débite pas encore), un effet de jeu mesuré de la santé (destruction, réparation), et la persistance d'une
+  entité fabriquée à l'exécution.
 - **Le volant se libère (v12, #21)** : le conducteur qui descend le rend immédiatement, et un silence de
   `VehicleSilenceReleaseSeconds` (3 s) le libère aussi. Le véhicule n'est donc plus perdu jusqu'à la
   déconnexion de son dernier conducteur.
@@ -546,8 +576,11 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   (`Pickupable.OnHandClick`) quand la réponse est un refus, avec retour arrière si le refus arrive après un
   ramassage optimiste (`PLAN.md` §39). Ce qui manque : les objets **mobiles** peuvent être jugés hors
   portée à tort, les objets **sans clé** ne sont pas arbitrés, et le **retour arrière** n'est exercé par
-  aucune mesure. Les collisions de clé sont comptées, pas résolues. Aucun autre arbitrage de ressource
-  (récolte, craft, dégâts) n'existe.
+  aucune mesure. Les collisions de clé sont comptées, pas résolues. Depuis la **v19**, le serveur tient un
+  registre d'inventaire par joueur et il l'annonce (#27) : un ramassage accordé y ajoute l'objet, et la
+  quantité annoncée est comparée à `Inventory.main` chez le client (étape AB). Ce qui manque encore : le
+  client **n'applique pas** l'instantané à son inventaire de jeu (aucune réconciliation), aucun retrait
+  n'est débité du registre, et la récolte (plantes, veines, conteneurs) n'est pas arbitrée.
 - **Aucun transport d'AssetBundle** (M6) : le client ne reçoit pas de prefab, seulement la définition d'une
   entité qu'il sait **déjà** résoudre. Le contrat v13 (`DefinitionHash`) vérifie cette définition ; il ne
   permet pas d'en livrer une nouvelle.
@@ -555,5 +588,5 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   reçoit le rejeu des **apparitions et des retraits** ; il ne récupère ni ses réclamations de ramassage, ni
   un volant, ni une resynchronisation de baseline. Les réclamations du joueur **parti** sont libérées (pas
   transmises) et un client relancé est un nouveau joueur, avec un nouvel id. Mesuré le 2026-10-20 :
-  `PlayerLeft`, `handshake ACCEPTÉ … id=3`, retraits rejoués, `avatarsActifs=1` (aucun fantôme).- **Version 16** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
+  `PlayerLeft`, `handshake ACCEPTÉ … id=3`, retraits rejoués, `avatarsActifs=1` (aucun fantôme).- **Version 19** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
 tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

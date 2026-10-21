@@ -1799,6 +1799,124 @@ namespace Coop.Model
         }
     }
 
+    /// <summary>
+    /// Inventaire d'un joueur, poussé par le serveur à son propriétaire (ReliableOrdered, v19).
+    ///
+    /// Pourquoi un instantané entier plutôt qu'un delta : les mutations sont **rares** (un ramassage
+    /// accordé), l'objet tient dans un paquet, et un instantané complet rend la réconciliation triviale —
+    /// un delta perdu laisserait le client avec un inventaire faux jusqu'à la déconnexion, alors qu'un
+    /// instantané reçu remplace l'état précédent entier.
+    ///
+    /// Le tri et l'unicité des noms sont **vérifiés** à l'écriture comme à la lecture. Sans cela, deux
+    /// paquets pouvaient décrire le même contenu dans deux ordres, et un contenu avec deux lignes du même
+    /// objet aurait deux significations (somme ou écrasement) selon le lecteur.
+    /// </summary>
+    public sealed class InventorySnapshotMessage
+    {
+        /// <summary>Numéro d'ordre des changements serveur ; `0` = inventaire d'admission, vide.</summary>
+        public int Revision;
+
+        public InventoryEntry[] Entries = Array.Empty<InventoryEntry>();
+
+        public void Write(PacketWriter writer)
+        {
+            EnsureValid(Entries, "instantané");
+
+            if (Revision < 0)
+            {
+                throw new ProtocolException($"révision d'inventaire négative ({Revision})");
+            }
+
+            writer.WriteByte((byte)MessageType.InventorySnapshot);
+            writer.WriteInt(Revision);
+            writer.WriteByte((byte)Entries.Length);
+
+            foreach (var entry in Entries)
+            {
+                writer.WriteString(entry.TechTypeName);
+                writer.WriteUInt16((ushort)entry.Count);
+            }
+        }
+
+        public static InventorySnapshotMessage Read(PacketReader reader)
+        {
+            var revision = reader.ReadInt();
+            if (revision < 0)
+            {
+                throw new ProtocolException($"révision d'inventaire reçue négative ({revision})");
+            }
+
+            var count = reader.ReadByte();
+            if (count > Protocol.MaxInventoryEntries)
+            {
+                throw new ProtocolException(
+                    $"instantané d'inventaire trop long ({count} > {Protocol.MaxInventoryEntries})");
+            }
+
+            var entries = new InventoryEntry[count];
+            for (var i = 0; i < count; i++)
+            {
+                entries[i] = new InventoryEntry(reader.ReadString(), reader.ReadUInt16());
+            }
+
+            EnsureValid(entries, "instantané reçu");
+
+            return new InventorySnapshotMessage
+            {
+                Revision = revision,
+                Entries = entries,
+            };
+        }
+
+        /// <summary>
+        /// Refuse un contenu que le lecteur interpréterait de deux façons : nom vide, quantité nulle ou
+        /// au-delà du plafond, doublon, ordre non croissant, trop de lignes.
+        /// </summary>
+        private static void EnsureValid(InventoryEntry[] entries, string label)
+        {
+            if (entries == null)
+            {
+                throw new ProtocolException($"{label} sans contenu (null)");
+            }
+
+            if (entries.Length > Protocol.MaxInventoryEntries)
+            {
+                throw new ProtocolException(
+                    $"{label} trop long ({entries.Length} > {Protocol.MaxInventoryEntries})");
+            }
+
+            string previous = null;
+
+            foreach (var entry in entries)
+            {
+                if (string.IsNullOrEmpty(entry.TechTypeName))
+                {
+                    throw new ProtocolException($"{label} avec un nom d'objet vide");
+                }
+
+                if (entry.TechTypeName.Length > Protocol.MaxTechTypeNameLength)
+                {
+                    throw new ProtocolException(
+                        $"{label} : nom d'objet trop long ({entry.TechTypeName.Length} > {Protocol.MaxTechTypeNameLength})");
+                }
+
+                if (entry.Count <= 0 || entry.Count > Protocol.MaxInventoryStack)
+                {
+                    throw new ProtocolException(
+                        $"{label} : quantité hors bornes pour '{entry.TechTypeName}' ({entry.Count})");
+                }
+
+                if (previous != null && string.CompareOrdinal(previous, entry.TechTypeName) >= 0)
+                {
+                    throw new ProtocolException(
+                        $"{label} : objets non triés ou dupliqués ('{previous}' puis '{entry.TechTypeName}')");
+                }
+
+                previous = entry.TechTypeName;
+            }
+        }
+    }
+
     public static class MessageCodec
     {
         public static byte[] Encode(Action<PacketWriter> write, PacketWriter reusable = null)

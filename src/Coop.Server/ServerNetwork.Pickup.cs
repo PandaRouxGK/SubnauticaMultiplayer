@@ -179,6 +179,7 @@ namespace Coop.Server
             }
 
             var granted = false;
+            var newClaim = false;
             var holder = session.PlayerId;
 
             if (msg.ItemKey == 0L)
@@ -213,6 +214,7 @@ namespace Coop.Server
             {
                 _pickupClaims.Claim(msg.ItemKey, session.PlayerId);
                 granted = true;
+                newClaim = true;
                 PickupClaimsGranted++;
                 _log.LogInfo(
                     $"[net] pickup : clé=0x{msg.ItemKey:x16} '{tech}' réclamée par " +
@@ -239,6 +241,16 @@ namespace Coop.Server
             if (granted && msg.ItemKey != 0L && !_pickupRemoved.Contains(msg.ItemKey))
             {
                 RemoveGrantedItem(msg.ItemKey, tech, session);
+            }
+
+            // — Le registre de l'inventaire (v19).
+            //
+            // Seul un ramassage **nouveau** et accordé ajoute : une réclamation répétée du même joueur
+            // est idempotente, et compter deux fois un seul objet rendrait le registre faux — donc
+            // inutilisable comme coût de fabrication.
+            if (granted && newClaim)
+            {
+                RecordGrantedPickup(peer, session, msg.TechTypeName);
             }
         }
         private void RemoveGrantedItem(long key, string tech, ClientSession session)

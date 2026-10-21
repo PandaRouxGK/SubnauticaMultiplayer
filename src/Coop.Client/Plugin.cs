@@ -208,6 +208,14 @@ namespace Coop.Client
                 go.AddComponent<EntitySpawnProbeBehaviour>();
             }
 
+            if (IsDebugFlagSet("inventory"))
+            {
+                // v19 : vérifie que le registre du serveur correspond à un ramassage réel (`-coopdebug=pickup`
+                // doit tourner en même temps : c'est lui qui a l'objet et le geste).
+                Log.LogWarning("[boot] sonde d'inventaire activée (-coopdebug=inventory).");
+                go.AddComponent<InventoryProbeBehaviour>();
+            }
+
             if (IsDebugFlagSet("time"))
             {
                 // v18 : constate la réception de l'heure du serveur et le recalage effectivement écrit.
@@ -655,6 +663,7 @@ namespace Coop.Client
         private int _pickupGranted;
         private int _pickupDenied;
         private int _pickupForgeriesSent;
+        private string _lastPickupGrantedName = string.Empty;
 
         /// <summary>Identifiant attribué par le serveur à ce client (<c>0</c> tant que le handshake n'est pas passé).</summary>
         internal ushort AssignedPlayerId => _assignedPlayerId;
@@ -709,6 +718,47 @@ namespace Coop.Client
         internal int PickupGrantedCount => _pickupGranted;
         internal int PickupDeniedCount => _pickupDenied;
         internal int PickupForgeriesSent => _pickupForgeriesSent;
+
+        /// <summary>Nom du dernier objet dont le ramassage a été **accordé** par le serveur (v19 : c'est ce nom que le registre serveur doit contenir).</summary>
+        internal string LastPickupGrantedName => _lastPickupGrantedName;
+
+        // — Inventaire serveur (v19) ————————————————————————————————————————————————
+        //
+        // Miroir **du registre serveur**, pas une copie de l'inventaire du jeu : la v19 ne fait que
+        // transporter et vérifier le registre. La réconciliation avec `Inventory.main` (retirer chez le
+        // client ce que le serveur ne contient pas, et inversement) est le lot suivant, et cette limite
+        // est écrite dans `PLAN.md` §67 plutôt que masquée par un nom trompeur.
+        private readonly Dictionary<string, int> _inventory = new Dictionary<string, int>(StringComparer.Ordinal);
+        private int _inventoryMessages;
+        private int _inventoryRevision = -1;
+        private int _inventoryStale;
+
+        internal int InventoryMessages => _inventoryMessages;
+
+        /// <summary>Révision du dernier instantané appliqué ; `-1` = aucun instantané reçu.</summary>
+        internal int InventoryRevision => _inventoryRevision;
+
+        /// <summary>Instantanés arrivés dans le désordre et écartés (le contenu le plus récent est gardé).</summary>
+        internal int InventoryStaleSnapshots => _inventoryStale;
+
+        /// <summary>Quantité annoncée par le serveur pour un objet (0 s'il n'y est pas).</summary>
+        internal int InventoryCountOf(string techTypeName) =>
+            techTypeName != null && _inventory.TryGetValue(techTypeName, out var count) ? count : 0;
+
+        /// <summary>Somme des quantités de l'instantané courant.</summary>
+        internal int InventoryTotalCount
+        {
+            get
+            {
+                var total = 0;
+                foreach (var pair in _inventory)
+                {
+                    total += pair.Value;
+                }
+
+                return total;
+            }
+        }
         private string _lastHeldItemSignature;
 
         /// <summary>Couleur que le serveur a assignée à ce joueur (indice de palette, §27).</summary>
@@ -1657,6 +1707,43 @@ namespace Coop.Client
                     break;
                 }
 
+                case MessageType.InventorySnapshot:
+                {
+                    var snapshot = InventorySnapshotMessage.Read(reader);
+                    _inventoryMessages++;
+
+                    // Un instantané plus ancien que l'état courant est **écarté** et compté : le réseau
+                    // fiable livre dans l'ordre, donc ce cas signale une révision serveur incohérente, pas
+                    // une latence. L'appliquer ferait reculer l'inventaire du joueur.
+                    if (snapshot.Revision < _inventoryRevision)
+                    {
+                        _inventoryStale++;
+                        CoopClientPlugin.Log.LogWarning(
+                            $"[inventaire] instantané périmé écarté : révision {snapshot.Revision} " +
+                            $"< {_inventoryRevision} ({_inventoryStale} écarté(s)).");
+                        break;
+                    }
+
+                    _inventory.Clear();
+                    foreach (var entry in snapshot.Entries)
+                    {
+                        _inventory[entry.TechTypeName] = entry.Count;
+                    }
+
+                    _inventoryRevision = snapshot.Revision;
+
+                    var names = snapshot.Entries.Length == 0
+                        ? "vide"
+                        : string.Join(", ", Array.ConvertAll(
+                            snapshot.Entries,
+                            entry => $"{entry.TechTypeName} ×{entry.Count}"));
+
+                    CoopClientPlugin.Log.LogInfo(
+                        $"[inventaire] instantané du serveur : révision {snapshot.Revision}, " +
+                        $"{snapshot.Entries.Length} objet(s), {InventoryTotalCount} unité(s) [{names}]");
+                    break;
+                }
+
                 case MessageType.PickupResult:
                 {
                     var result = PickupResultMessage.Read(reader);
@@ -1664,6 +1751,7 @@ namespace Coop.Client
                     if (result.Granted)
                     {
                         _pickupGranted++;
+                        _lastPickupGrantedName = result.TechTypeName;
                     }
                     else
                     {
