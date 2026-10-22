@@ -347,6 +347,12 @@ namespace Coop.Client
             InFlight.Clear();
             InventoryReconciler.Reset();
 
+            // Les statistiques de latence sont documentées comme celles de la **session** (§73) : les garder
+            // ferait afficher, à la reconnexion, le min/max de la session précédente.
+            _lastLatencyMs = -1f;
+            _minLatencyMs = -1f;
+            _maxLatencyMs = -1f;
+
             if (pending > 0)
             {
                 _log?.LogInfo(

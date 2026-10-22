@@ -5366,3 +5366,31 @@ après son contrôle.
   aurait retiré un objet si l'état était resté amputé — il faudrait un second report dans la même session.
 - Les deux nouveaux cas testent le **modèle**, pas le client : la conversion millisecondes (`NowMs`) et la
   lecture des ingrédients restent hors jeu.
+
+## 81. Les statistiques de latence ne traversent plus une session (2026-10-22)
+
+Défaut trouvé en relisant : `LastLatencyMs`/`MinLatencyMs`/`MaxLatencyMs` sont documentés (¶ doc de `CraftGuard`,
+§73) comme des valeurs **de la session**, mais `Clear()` — appelé à la déconnexion, sur `Disconnect` et sur un
+changement d'adresse — ne les remettait pas à zéro. À la reconnexion, la sonde aurait imprimé le minimum de la
+session **précédente**, ce qui se lit comme une mesure alors que c'en est une autre.
+
+### 81.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| remise à zéro | `Coop.Client/CraftGuard.cs` (`Clear`) | les trois statistiques repassent à `-1` (« aucune mesure »), comme au démarrage ; la ligne de décision cesse donc d'afficher une latence héritée |
+
+### 81.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| étape **AE** (Survie, 56 s) | **OK** — la mesure reste imprimée avant la purge : `attente de l'accord=11.8 ms (min=11.8, max=…)` ; craft, cadence, report/reprise et purge restent verts |
+| `dotnet test` | **436/436** (inchangé : correctif côté client) |
+
+### 81.3 Ce que ce lot ne prouve pas
+
+- **Aucune étape ne ferme puis rouvre une session** : la remise à zéro n'est vérifiée que par lecture du code ;
+  la prouver demanderait le run de reconnexion qui manque déjà à P4.
+- Les compteurs `bloqués`/`reprises`/`refus` restent, eux, cumulatifs sur la vie du processus — c'est voulu
+  (ils racontent ce que le garde a fait), mais ce n'est pas écrit dans la documentation de `Summary()`.
