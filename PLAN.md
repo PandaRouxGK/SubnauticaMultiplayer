@@ -5359,6 +5359,7 @@ après son contrôle.
 |---|---|
 | `dotnet build` | rc=0, **0 avertissement** |
 | `dotnet test` | **436/436** rc=0 (3 cas de plus qu'au §77) |
+| étapes **AB** et **AC** (rejouées après les derniers changements client, 152 s / 153 s) | **OK** — adoption/registre et débit inchangés : la reprise des reports ne retire rien quand rien n'est reporté |
 | étape **AE** (Survie, 54 s) | **OK** — `retrait de 'Copper' ×1 reporté` → `reprise de 1 retrait(s) reporté(s) [Copper]` → `[sonde] report : … retiré à la reprise=1 (1 -> 0) … verdict=True` à 18:25:44.880, avec l'instantané réel restauré juste après |
 
 ### 80.3 Ce que ce lot ne prouve pas
