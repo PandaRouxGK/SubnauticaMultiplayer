@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using BepInEx.Logging;
+using Coop.Model;
 using Coop.Shared;
 using UnityEngine;
 
@@ -18,14 +19,19 @@ namespace Coop.Client
     ///  1. l'instantané d'admission arrive (révision `0`, contenu vide) — le client sait où il en est ;
     ///  2. le ramassage est accordé, et un instantané de révision supérieure contient l'objet **×1** ;
     ///  3. la quantité annoncée par le serveur est comparée à ce que `Inventory.main` contient
-    ///     **réellement** chez le client pour ce `TechType`.
+    ///     **réellement** chez le client pour ce `TechType` ;
+    ///  4. **(v20)** un **débit** accordé par le serveur vide le registre, et la réconciliation retire
+    ///     l'objet de `Inventory.main` — c'est le serveur qui décide, pas le client ;
+    ///  5. **(v20)** un second débit du même objet est **refusé nommément** (`UnknownItem`), sans avancer
+    ///     la révision ni toucher à l'inventaire du jeu.
     ///
-    /// Le troisième point est celui qui compte : un registre qui ne correspondrait pas au monde serait
-    /// pire qu'aucun registre, puisqu'il servirait de coût de fabrication au lot suivant.
+    /// Le troisième point est celui qui compte pour le registre : un registre qui ne correspondrait pas au
+    /// monde serait pire qu'aucun registre, puisqu'il servirait de coût de fabrication au lot suivant. Les
+    /// deux derniers mesurent la **réconciliation** : sans elle, un débit ne serait qu'une ligne de journal.
     ///
-    /// **Ce que la sonde ne prouve pas** : que le client **applique** l'instantané à son inventaire de jeu
-    /// (il n'y a encore rien à appliquer — le serveur ne fait qu'enregistrer ce que le jeu a déjà accordé),
-    /// ni qu'un retrait côté serveur se répercute sur l'objet en main. La réconciliation est le lot suivant.
+    /// **Ce que la sonde ne prouve pas** : que le jeu consomme réellement l'objet par ses propres chemins
+    /// (craft, nourriture) et appelle le débit — la sonde demande le débit elle-même, à la place d'un
+    /// consommateur ; ni que les objets **équipés** soient réconciliés (hors `Inventory.main.container`).
     /// </summary>
     internal sealed class InventoryProbeBehaviour : MonoBehaviour
     {
@@ -36,6 +42,8 @@ namespace Coop.Client
         private const float FirstSnapshotSeconds = 60f;
         private const float PickupSeconds = 180f;
         private const float MatchingSnapshotSeconds = 30f;
+        private const float DebitSeconds = 90f;
+        private const float RefusalSeconds = 45f;
 
         private IEnumerator Start()
         {
@@ -140,6 +148,99 @@ namespace Coop.Client
                     $"révision avancée={revisionAdvanced}, quantité du serveur={serverCount}, " +
                     $"quantité réelle={localCount} (elles doivent être égales et > 0), " +
                     $"périmés écartés={client.InventoryStaleSnapshots}.");
+                yield break;
+            }
+
+            // — v20 : le débit décidé par le serveur, puis la réconciliation locale —————————————————
+            //
+            // La sonde **ne retire rien elle-même** : elle demande le débit et attend que `Inventory.main`
+            // ait changé. Si le client retirait l'objet de son côté, la mesure ne dirait rien du serveur.
+            var debitStartRevision = client.InventoryRevision;
+
+            if (!client.SendInventoryDebit(pickedName, 1))
+            {
+                Fail("la demande de débit n'a pas pu partir");
+                yield break;
+            }
+
+            var debitDeadline = Time.realtimeSinceStartup + DebitSeconds;
+            while (Time.realtimeSinceStartup < debitDeadline)
+            {
+                if (client.InventoryDebitsGranted > 0
+                    && client.InventoryCountOf(pickedName) == 0
+                    && CountInLocalInventory(pickedName) == 0)
+                {
+                    break;
+                }
+
+                yield return new WaitForSecondsRealtime(0.25f);
+            }
+
+            var debitGranted = client.InventoryDebitsGranted > 0;
+            var serverAfterDebit = client.InventoryCountOf(pickedName);
+            var localAfterDebit = CountInLocalInventory(pickedName);
+            var removedLocally = client.InventoryRemovedLocally;
+            var debitRevision = client.InventoryRevision;
+            var revisionAdvancedByOne = debitRevision == debitStartRevision + 1;
+
+            // Second débit : l'objet n'est plus dans le registre, le refus doit être **nommé** — sinon un
+            // client ne saurait pas distinguer « consommé » de « refusé » et le registre resterait cru.
+            if (!client.SendInventoryDebit(pickedName, 1))
+            {
+                Fail("la seconde demande de débit (celle qui doit être refusée) n'a pas pu partir");
+                yield break;
+            }
+
+            var refusalDeadline = Time.realtimeSinceStartup + RefusalSeconds;
+            while (client.InventoryDebitsRefused == 0 && Time.realtimeSinceStartup < refusalDeadline)
+            {
+                yield return new WaitForSecondsRealtime(0.25f);
+            }
+
+            var refusedNamed = client.InventoryDebitsRefused > 0
+                && string.Equals(
+                    client.InventoryLastDebitRefusal,
+                    nameof(InventoryChangeOutcome.UnknownItem),
+                    StringComparison.Ordinal);
+            var refusalKeptRevision = client.InventoryRevision == debitRevision;
+            var refusalMovedNothing = client.InventoryCountOf(pickedName) == 0 && CountInLocalInventory(pickedName) == 0;
+
+            var debitVerdict = debitGranted
+                && revisionAdvancedByOne
+                && serverAfterDebit == 0
+                && localAfterDebit == 0
+                && removedLocally >= 1
+                && client.InventoryReconciliationFailures == 0
+                && refusedNamed
+                && refusalKeptRevision
+                && refusalMovedNothing;
+
+            Log.LogInfo(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[sonde] débit : accordés={0} refusés={1} retirés localement={2} échecs={3}, '{4}' " +
+                    "serveur={5} local={6}, révision {7} -> {8}, refus nommé={9} — verdict={10}",
+                    client.InventoryDebitsGranted,
+                    client.InventoryDebitsRefused,
+                    removedLocally,
+                    client.InventoryReconciliationFailures,
+                    pickedName,
+                    serverAfterDebit,
+                    localAfterDebit,
+                    debitStartRevision,
+                    debitRevision,
+                    client.InventoryLastDebitRefusal,
+                    debitVerdict));
+
+            if (!debitVerdict)
+            {
+                Log.LogError(
+                    "[sonde] débit : verdict=False — " +
+                    $"accordé={debitGranted}, révision avancée de 1={revisionAdvancedByOne} " +
+                    $"({debitStartRevision} -> {debitRevision}), serveur={serverAfterDebit}, " +
+                    $"local={localAfterDebit}, retirés localement={removedLocally}, " +
+                    $"échecs={client.InventoryReconciliationFailures}, refus nommé={refusedNamed} " +
+                    $"({client.InventoryLastDebitRefusal}), refus sans effet={refusalKeptRevision && refusalMovedNothing}.");
             }
         }
 
@@ -151,43 +252,8 @@ namespace Coop.Client
         /// parser une chaîne du protocole avec une API du jeu — deux sources d'erreur pour un comptage.
         /// Le nom de l'énumération est stable pour les objets de la sauvegarde.
         /// </summary>
-        private static int CountInLocalInventory(string techTypeName)
-        {
-            if (string.IsNullOrEmpty(techTypeName) || Inventory.main == null || Inventory.main.container == null)
-            {
-                return 0;
-            }
-
-            var container = Inventory.main.container as IEnumerable<InventoryItem>;
-            if (container == null)
-            {
-                return 0;
-            }
-
-            var count = 0;
-
-            foreach (var item in container)
-            {
-                var pickupable = item != null ? item.item : null;
-                if (pickupable == null)
-                {
-                    continue;
-                }
-
-                var type = pickupable.GetTechType();
-                if (type == TechType.None)
-                {
-                    continue;
-                }
-
-                if (string.Equals(type.ToString(), techTypeName, StringComparison.Ordinal))
-                {
-                    count++;
-                }
-            }
-
-            return count;
-        }
+        private static int CountInLocalInventory(string techTypeName) =>
+            InventoryReconciler.CountLocal(techTypeName);
 
         private static void Fail(string reason)
         {

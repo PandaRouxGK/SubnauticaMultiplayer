@@ -41,6 +41,8 @@ namespace Coop.Model.Tests
             ("EntitySpawnResult", r => EntitySpawnResultMessage.Read(r)),
             ("WorldTime", r => WorldTimeMessage.Read(r)),
             ("InventorySnapshot", r => InventorySnapshotMessage.Read(r)),
+            ("InventoryDebit", r => InventoryDebitMessage.Read(r)),
+            ("InventoryDebitResult", r => InventoryDebitResultMessage.Read(r)),
         };
 
         /// <summary>
@@ -100,7 +102,7 @@ namespace Coop.Model.Tests
         }
 
         [Fact]
-        public void Un_paquet_reduit_a_l_opcode_est_refuse_par_les_27_lecteurs()
+        public void Un_paquet_reduit_a_l_opcode_est_refuse_par_les_29_lecteurs()
         {
             // Un opcode seul est le cas le plus simple d'un paquet tronqué : chaque lecteur doit
             // s'arrêter sur son premier champ manquant, avec un `ProtocolException` nommée. Un
@@ -129,7 +131,7 @@ namespace Coop.Model.Tests
             }
 
             Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
-            Assert.Equal(27, Readers.Length);
+            Assert.Equal(29, Readers.Length);
         }
 
         [Fact]

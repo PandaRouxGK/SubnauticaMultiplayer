@@ -8,6 +8,11 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **20** : le **débit** de l'inventaire serveur (`InventoryDebit` #28 / `InventoryDebitResult` #29),
+        /// et la **réconciliation** chez le client. Un client peut désormais demander qu'une quantité
+        /// quitte **son** registre (consommation, dépôt) — le serveur refuse nommément ce qu'il ne tient
+        /// pas — et l'instantané qui suit fait **retirer de `Inventory.main`** l'objet que le registre ne
+        /// contient plus. Le débit ne peut que **diminuer** : aucun message ne permet d'ajouter un objet.
         /// **19** : l'**inventaire du joueur** côté serveur (`InventorySnapshot`, #27) : le serveur tient le
         /// registre de ce que chaque joueur possède et l'annonce à son propriétaire après chaque ramassage
         /// accordé — c'est le socle du coût de fabrication. Aucun message ne permet à un client d'**ajouter**
@@ -63,13 +68,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 19;
+        public const int Version = 20;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v19";
+        public const string ConnectionKey = "coop-subnautica-v20";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -499,6 +504,23 @@ namespace Coop.Model
         /// distingue un registre d'une déclaration.
         /// </summary>
         InventorySnapshot = 27,
+
+        /// <summary>
+        /// Demande de **débit** d'inventaire, émise par un client (ReliableOrdered, v20).
+        ///
+        /// Le client ne retire rien de son propre chef : il demande, le serveur vérifie ce que **son**
+        /// registre contient, puis décide. Un débit ne peut que diminuer — le protocole n'expose toujours
+        /// aucune opération d'ajout, donc un client ne peut pas s'inventer un objet en « annulant » un
+        /// débit.
+        /// </summary>
+        InventoryDebit = 28,
+
+        /// <summary>
+        /// Décision du serveur sur un débit, au seul demandeur (v20). Elle porte le refus **nommé**
+        /// (`UnknownItem`, `NotEnough`, `Invalid`) : un refus silencieux laisserait le client croire que
+        /// l'objet a été consommé alors que le registre ne l'a jamais contenu.
+        /// </summary>
+        InventoryDebitResult = 29,
     }
 
     /// <summary>

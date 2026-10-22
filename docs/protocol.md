@@ -12,8 +12,8 @@ porte la mesure ; une valeur choisie le dit.
 
 | Élément | Valeur | Source |
 |---|---|---|
-| Version du protocole | `19` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
-| Clé de connexion LiteNetLib | `coop-subnautica-v19` | `Protocol.ConnectionKey` |
+| Version du protocole | `20` | `Protocol.Version` (`src/Coop.Model/Protocol.cs`) |
+| Clé de connexion LiteNetLib | `coop-subnautica-v20` | `Protocol.ConnectionKey` |
 | Port UDP par défaut | `7777` | `Protocol.DefaultPort` |
 | Bibliothèque de transport | LiteNetLib | `Coop.Server/ServerNetwork.cs`, `Coop.Client/Plugin.cs` |
 | Encodage | little-endian, tampons réutilisables, chaînes UTF-8 **strictes en lecture**, **indépendant du transport** | `PacketWriter.cs`, `PacketReader.cs` |
@@ -69,6 +69,8 @@ et encodé en UTF-8.
 | 25 | `EntitySpawnResult` | serveur → demandeur | ReliableOrdered | `RequestId` int, `Granted` bool, `Key` long (**jamais 0 si accordée**, refusé à l'écriture comme à la lecture), `Reason` string (≤ 96, **non vide si refusée**) |
 | 26 | `WorldTime` | serveur → client | Unreliable (1 Hz) | `TimePassed` float (secondes écoulées, `DayNightCycle.timePassedAsFloat`) — **négatif, `NaN` ou ∞ refusé** à l'écriture comme à la lecture |
 | 27 | `InventorySnapshot` | serveur → propriétaire | ReliableOrdered | `Revision` int (≥ 0), compte octet (**≤ `MaxInventoryEntries`** = 48), puis par objet : nom de `TechType` (≤ 64) et quantité ushort (`1..MaxInventoryStack`) ; **trié par nom et sans doublon**, refusé sinon à l'écriture comme à la lecture |
+| 28 | `InventoryDebit` | client → serveur | ReliableOrdered | `PlayerId` ushort (revendiqué, falsifiable — le serveur prend la session), `TechTypeName` string (**non vide**, ≤ 64), `Count` ushort (**`1..MaxInventoryStack`**) ; hors bornes refusé à l'écriture comme à la lecture |
+| 29 | `InventoryDebitResult` | serveur → demandeur | ReliableOrdered | `TechTypeName` string (≤ 64), `Count` ushort (`1..MaxInventoryStack`), `Granted` bool, `Reason` octet (`InventoryChangeOutcome`), `Revision` int (≥ 0), `ClaimedBy` ushort ; `Granted` doit valoir `Reason == Applied`, une issue inconnue ou une révision négative est refusée à l'écriture comme à la lecture |
 
 Les points de contrat que ces messages portent :
 
@@ -483,7 +485,7 @@ projecteurs d'aurore. Le ciel des deux instances peut donc encore différer ; se
 
 ---
 
-## 4 nonies. Inventaire serveur (v19)
+## 4 nonies. Inventaire serveur (v19) et débit (v20)
 
 Le lot « inventaire » commence par une décision : **le registre vit sur le serveur**, pas dans une déclaration
 du client. Un client qui annonce son contenu peut annoncer n'importe quoi ; le coût de fabrication qui
@@ -501,11 +503,24 @@ s'appuierait dessus n'aurait aucune valeur opposable.
    laisserait le client faux jusqu'à la déconnexion.
 4. **La révision avance par changement appliqué**, jamais sur un refus. Un client peut donc voir qu'un refus
    n'a rien changé, et deux instantanés décrire le même état se comparent par leur numéro.
+5. **(v20) Un client peut demander un débit** (#28) — la seule opération cliente qui touche le registre — et
+   le serveur l'applique ou le refuse **nommément** (#29 : `UnknownItem`, `NotEnough`, `Invalid`). Le débit
+   ne peut que **diminuer** : le protocole n'expose toujours aucune opération d'ajout, donc un client ne
+   peut pas « annuler » un débit pour se recréditer. L'identité vient de la session ; une revendication
+   d'id différente est comptée (`InventoryDebitForgeries`) et ne débite que le registre de l'émetteur.
+6. **(v20) La réconciliation retire l'excédent local.** Le client compare le nouvel instantané au
+   précédent, et retire de `Inventory.main` ce que le jeu possède **en plus** du registre — uniquement
+   pour les noms que les instantanés citent. Une copie de l'instantané d'admission (révision `0`, vide)
+   viderait l'inventaire sauvegardé : ce n'est donc **pas** un miroir, c'est un delta de noms suivis
+   (`Coop.Model/InventoryReconciliation.cs`). L'inverse (serveur > jeu) n'est **pas** corrigé par une
+   création d'objet : il est compté et journalisé.
 
-Ce qui **n'est pas** fait dans cette tranche : le client n'écrit pas l'instantané dans `Inventory.main`
-(aucune réconciliation), rien ne **retire** du registre (consommation, dépôt, craft), et le registre ne
-connaît ni les emplacements ni les tailles de pile du jeu. L'étape AB mesure seulement que le registre **dit
-la vérité sur le ramassage** : la quantité annoncée égale celle que le jeu contient.
+Ce qui **n'est pas** fait dans ces deux tranches : aucun événement du jeu (craft, nourriture, dépôt) ne
+produit encore de débit — le canal existe et est mesuré, mais la consommation réelle reste à brancher au lot
+du craft ; les objets **équipés** (hors de `Inventory.main.container`) ne sont pas réconciliés ; et le
+registre ne connaît ni les emplacements ni les tailles de pile du jeu. Les étapes AB et AC mesurent que le
+registre **dit la vérité sur le ramassage**, puis qu'un débit accordé **vide le monde** chez le client et
+qu'un second débit est refusé nommément.
 
 ---
 
@@ -534,7 +549,7 @@ chargement** : tri `StringComparer.Ordinal` des identifiants bruts, échappement
 et conservation des **8 premiers octets** en 16 caractères hexadécimaux minuscules. La liste vide vaut
 `da39a3ee5e6b4b0d`. Les identifiants usuels (noms de DLL) ne contiennent aucun caractère échappé : leur
 empreinte est donc identique à celle de l'algorithme précédent. Le `NetProbe selftest` couvre désormais un
-aller-retour pour **24 des 27 messages**, y compris les refus (troncature, `NaN`, clé nulle, plafonds) ;
+aller-retour pour **26 des 29 messages**, y compris les refus (troncature, `NaN`, clé nulle, plafonds) ;
 `VehicleUpgrades`, `EntitySpawnRequest` et `EntitySpawnResult` (v15/v16) ne sont couverts que par les tests
 xunit de `tests/Coop.Model.Tests` — leurs bornes y sont vérifiées, mais pas l'aller-retour par l'outil.
 
@@ -563,8 +578,8 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   la création (#19, v10) et le retrait (#20, v11) existent, et depuis la v16 un client peut **demander**
   une fabrication (#24) que le serveur arbitre (liste blanche, portée de `8 m`, cadence de `5 s`, plafond de
   `8` par session) puis fabrique dans **son** monde avant de l'annoncer à tous. Ce qui n'existe pas : un
-  une **consommation** de matériaux (le registre d'inventaire existe depuis la v19, mais le craft ne le
-  débite pas encore), un effet de jeu mesuré de la santé (destruction, réparation), et la persistance d'une
+  une **consommation** de matériaux (le canal de débit existe depuis la v20, mais aucun craft ne l'appelle),
+  un effet de jeu mesuré de la santé (destruction, réparation), et la persistance d'une
   entité fabriquée à l'exécution.
 - **Le volant se libère (v12, #21)** : le conducteur qui descend le rend immédiatement, et un silence de
   `VehicleSilenceReleaseSeconds` (3 s) le libère aussi. Le véhicule n'est donc plus perdu jusqu'à la
@@ -578,9 +593,11 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   portée à tort, les objets **sans clé** ne sont pas arbitrés, et le **retour arrière** n'est exercé par
   aucune mesure. Les collisions de clé sont comptées, pas résolues. Depuis la **v19**, le serveur tient un
   registre d'inventaire par joueur et il l'annonce (#27) : un ramassage accordé y ajoute l'objet, et la
-  quantité annoncée est comparée à `Inventory.main` chez le client (étape AB). Ce qui manque encore : le
-  client **n'applique pas** l'instantané à son inventaire de jeu (aucune réconciliation), aucun retrait
-  n'est débité du registre, et la récolte (plantes, veines, conteneurs) n'est pas arbitrée.
+  quantité annoncée est comparée à `Inventory.main` chez le client (étape AB). Depuis la **v20**, le client
+  peut **demander** un débit (#28), le serveur le refuse ou l'applique (#29), et l'instantané qui suit fait
+  retirer l'unité de `Inventory.main` par la réconciliation (étape AC). Ce qui manque encore : aucun
+  consommateur du jeu (craft, nourriture, dépôt) n'appelle le débit, les objets équipés ne sont pas
+  réconciliés, et la récolte (plantes, veines, conteneurs) n'est pas arbitrée.
 - **Aucun transport d'AssetBundle** (M6) : le client ne reçoit pas de prefab, seulement la définition d'une
   entité qu'il sait **déjà** résoudre. Le contrat v13 (`DefinitionHash`) vérifie cette définition ; il ne
   permet pas d'en livrer une nouvelle.
@@ -588,5 +605,6 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   reçoit le rejeu des **apparitions et des retraits** ; il ne récupère ni ses réclamations de ramassage, ni
   un volant, ni une resynchronisation de baseline. Les réclamations du joueur **parti** sont libérées (pas
   transmises) et un client relancé est un nouveau joueur, avec un nouvel id. Mesuré le 2026-10-20 :
-  `PlayerLeft`, `handshake ACCEPTÉ … id=3`, retraits rejoués, `avatarsActifs=1` (aucun fantôme).- **Version 19** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
-tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).
+  `PlayerLeft`, `handshake ACCEPTÉ … id=3`, retraits rejoués, `avatarsActifs=1` (aucun fantôme).
+- **Version 20** : deux instances de versions différentes ne se parlent pas (refus au handshake), et les
+  tests de sérialisation vivent dans `tools/NetProbe` (`selftest`).

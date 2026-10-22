@@ -4753,3 +4753,67 @@ lecture au propriétaire. Rien n'est encore débité : c'est le socle du lot sui
   sur `PowerCell`, mais ce n'est pas prouvé pour les 400 objets).
 - **Persistance** : le registre vit avec la session. Une reconnexion repart à zéro, même si le joueur a
   toujours les objets dans sa sauvegarde.
+
+## 68. Seconde tranche de l'inventaire : le débit décidé par le serveur, et la réconciliation (v20, 2026-10-22)
+
+La v19 savait **compter ce qui entre**. Elle ne savait pas ce qui **sort** : le registre ne faisait que
+grossir, et un objet consommé chez le joueur y restait compté — un coût de fabrication aurait donc été payé
+avec des objets déjà mangés. La v20 ferme les deux manques ensemble, parce qu'ils n'ont de sens que l'un
+avec l'autre : un **débit** que le serveur décide, et une **réconciliation** qui le rend vrai dans le monde
+du client.
+
+### 68.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| message de demande | `src/Coop.Model/Messages.cs` (`InventoryDebit`, #28) | `PlayerId` **revendiqué** (le serveur prend la session), nom ≤ 64, quantité `1..MaxInventoryStack` ; hors bornes refusé à l'écriture comme à la lecture |
+| message de décision | `Messages.cs` (`InventoryDebitResult`, #29) | `Granted`, `Reason` (`InventoryChangeOutcome`), `Revision`, `ClaimedBy` ; `Granted` **doit** valoir `Reason == Applied`, sinon le paquet est refusé des deux côtés |
+| serveur | `src/Coop.Server/ServerNetwork.Inventory.cs` (`HandleInventoryDebit`) | identité de session, retrait borné par `PlayerInventory.Remove`, refus **nommé**, `InventoryDebitResult` puis instantané au demandeur seul ; un id revendiqué différent est compté |
+| réconciliation (modèle) | `src/Coop.Model/InventoryReconciliation.cs` | delta entre l'instantané précédent et le nouveau, **limité aux noms que les instantanés citent** ; ne retire que l'excédent local ; l'écart inverse est compté, jamais fabriqué |
+| réconciliation (geste) | `src/Coop.Client/InventoryReconciler.cs` | retrouve l'objet par `TechType.ToString()`, le sort de `Inventory.main` et le **détruit** (un objet consommé ne retourne pas dans le monde) |
+| client | `src/Coop.Client/Plugin.cs` | `SendInventoryDebit`, réception du résultat, application de la réconciliation **avant** de remplacer le miroir, révisions périmées toujours écartées |
+| sonde | `src/Coop.Client/InventoryProbeBehaviour.cs` (`-coopdebug=inventory`) | après le ramassage : **demande** un débit (sans rien retirer elle-même), attend que `Inventory.main` ait changé, puis demande un second débit qui doit être refusé nommément |
+| harnais | `tools/verify.sh` (**étape AC**) | six assertions : débit accordé (révision +1), refus `UnknownItem`, unités réellement retirées localement, `serveur=0 local=0`, verdict de sonde, aucun instantané périmé |
+
+### 68.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build SubnauticaCoop.sln` | rc=0, **0 avertissement** |
+| `dotnet test` | **384/384** rc=0 — 18 nouveaux cas (`InventoryReconciliationTests` : admission qui ne vide rien, ramassage, débit d'une et deux unités, objet jamais cité, serveur en avance, idempotence, tri, compteur négatif ; `InventoryDebitTests` : aller-retours, quantités hors bornes, issue inconnue, accord contredit par l'issue, révision négative) et `MessageFuzzTests` passe à **29** lecteurs |
+| `NetProbe selftest` | **SUCCES** — aller-retour `InventoryDebit` et `InventoryDebitResult` (refus nommé), quantité nulle refusée à l'écriture, accord contredit refusé à la lecture |
+| étape **AC** (premier run) | **OK (160 s)** — `[sonde] débit : accordés=1 refusés=1 retirés localement=1 échecs=0, 'PowerCell' serveur=0 local=0, révision 1 -> 2, refus nommé=UnknownItem — verdict=True` |
+| non-régression | étape **AB** rejouée avec les binaires v20 : **OK (152 s)**, `messages=2, révision 0 -> 1, 'PowerCell' serveur=1 local=1 … verdict=True`, `périmés écartés=0` |
+| `check-verify-assertions.sh` | rc=0 — **29** étapes déclarées (A..Z, AA, AB, AC), défaut complet, assertions satisfiables et discriminantes |
+
+### 68.3 Ce que le run a montré, et ce qu'il n'a pas cassé
+
+Le run AC a produit, en plus des lignes affirmées, un écart **transitoire** au moment du ramassage :
+
+```
+[inventaire] instantané du serveur : révision 1, 1 objet(s), 1 unité(s) [PowerCell ×1]
+[inventaire] réconciliation : 1 objet(s) que le serveur compte et que le jeu n'a pas encore — aucune création locale (limite connue).
+```
+
+C'est l'ordre déjà mesuré au §67.3 : la décision du serveur arrive **avant** que `Inventory.Pickup` n'ait
+fini d'ajouter l'objet. La réconciliation ne fabrique rien et ne retire rien — elle le dit. Le choix de ne
+réconcilier que les noms **cités par les instantanés** est ce qui évite le défaut grave : l'instantané
+d'admission est vide, et un miroir naïf aurait vidé l'inventaire sauvegardé du joueur à la connexion. Ce cas
+est figé hors jeu (`L_instantane_d_admission_ne_vide_pas_l_inventaire_du_jeu`).
+
+Aucune étape n'a échoué pendant cette tranche ; l'unique run AC est vert, et l'étape AB l'a été après lui
+avec les mêmes binaires.
+
+### 68.4 Ce que cette tranche ne prouve pas
+
+- **Aucun consommateur du jeu n'appelle le débit.** La sonde le demande à la place d'un craft, d'une
+  nourriture ou d'un dépôt ; le branchement réel appartient au lot du craft, avec la vérification des
+  matériaux côté serveur.
+- **Les objets équipés ne sont pas réconciliés** : `Inventory.main.container` ne les contient pas, et un
+  débit les concernant échouerait en le disant (`échecs=` incrémenté), pas en les retirant.
+- **Un seul objet, une seule unité, un seul client** : ni pile, ni débit en rafale, ni deux joueurs
+  simultanés ; le refus mesuré est `UnknownItem`, pas `NotEnough`.
+- **Le rapprochement de noms reste `TechType.ToString()`**, prouvé sur `PowerCell` seulement.
+- **Le registre n'est toujours ni complet ni persistant** : il ne suit que ce que la session a acquis, ne
+  connaît pas la sauvegarde, et repart à zéro à la reconnexion — un débit ne « rembourse » jamais (aucun
+  message d'ajout n'existe).

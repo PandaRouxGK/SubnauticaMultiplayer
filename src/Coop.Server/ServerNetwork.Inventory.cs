@@ -11,6 +11,15 @@ namespace Coop.Server
         /// <summary>Instantanés d'inventaire envoyés — pour qu'une sonde puisse lire ce que le serveur a fait.</summary>
         public long InventorySnapshotsSent => _inventorySnapshotsSent;
 
+        /// <summary>Débits accordés / refusés, et demandes faites sous un id qui n'est pas celui de la session.</summary>
+        private long _inventoryDebitsGranted;
+        private long _inventoryDebitsRefused;
+        private long _inventoryDebitForgeries;
+
+        public long InventoryDebitsGranted => _inventoryDebitsGranted;
+        public long InventoryDebitsRefused => _inventoryDebitsRefused;
+        public long InventoryDebitForgeries => _inventoryDebitForgeries;
+
         /// <summary>
         /// Annonce à un joueur **son** inventaire, tel que le serveur le tient (v19).
         ///
@@ -68,6 +77,66 @@ namespace Coop.Server
             }
 
             SendInventorySnapshot(peer, session, $"ramassage accordé de '{techTypeName}'");
+        }
+
+        /// <summary>
+        /// Applique une demande de **débit** (v20), puis répond au demandeur.
+        ///
+        /// L'identité vient de la **session**, jamais du message : un client qui revendique l'id d'un autre
+        /// joueur ne débite que son propre registre, et la falsification est comptée. Sans cela, un débit
+        /// — la première opération cliente qui modifie l'inventaire — aurait rouvert exactement le trou
+        /// que le registre serveur de la v19 avait fermé.
+        ///
+        /// Le refus est **nommé** (`UnknownItem`, `NotEnough`, `Invalid`) et n'avance pas la révision : une
+        /// sonde peut donc distinguer « refusé » de « appliqué », et un client sait qu'il n'a rien consommé.
+        /// </summary>
+        private void HandleInventoryDebit(NetPeer peer, ClientSession session, InventoryDebitMessage message)
+        {
+            if (!session.Accepted)
+            {
+                _log.LogWarning($"[net] débit d'inventaire avant handshake ignoré de {peer}");
+                return;
+            }
+
+            if (message.PlayerId != session.PlayerId)
+            {
+                _inventoryDebitForgeries++;
+                _log.LogWarning(
+                    $"[net] inventaire : débit revendiqué sous l'id {message.PlayerId} par " +
+                    $"'{session.Username}'#{session.PlayerId} — débité sur **sa** session (falsifications={_inventoryDebitForgeries}).");
+            }
+
+            var before = session.Inventory.Revision;
+            var outcome = session.Inventory.Remove(message.TechTypeName, message.Count);
+            var granted = outcome == InventoryChangeOutcome.Applied;
+
+            Send(peer, w => new InventoryDebitResultMessage
+            {
+                TechTypeName = message.TechTypeName,
+                Count = message.Count,
+                Granted = granted,
+                Reason = outcome,
+                Revision = session.Inventory.Revision,
+                ClaimedBy = message.PlayerId,
+            }.Write(w), DeliveryMethod.ReliableOrdered);
+
+            if (!granted)
+            {
+                _inventoryDebitsRefused++;
+                _log.LogWarning(
+                    $"[net] inventaire : débit de '{message.TechTypeName}' ×{message.Count} REFUSÉ pour " +
+                    $"'{session.Username}'#{session.PlayerId} ({outcome}) — révision {session.Inventory.Revision} inchangée.");
+                return;
+            }
+
+            _inventoryDebitsGranted++;
+            _log.LogInfo(
+                $"[net] inventaire : débit de '{message.TechTypeName}' ×{message.Count} accordé pour " +
+                $"'{session.Username}'#{session.PlayerId} (révision {before} -> {session.Inventory.Revision})");
+
+            // L'instantané part après la décision, sur le même canal fiable et ordonné : le client applique
+            // le résultat puis le nouvel état, jamais l'inverse.
+            SendInventorySnapshot(peer, session, $"débit de '{message.TechTypeName}' ×{message.Count}");
         }
     }
 }

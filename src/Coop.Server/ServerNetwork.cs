@@ -616,9 +616,14 @@ namespace Coop.Server
                     HandleEntitySpawnRequest(peer, session, EntitySpawnRequestMessage.Read(reader));
                     break;
 
-                // Aucun `case` pour `InventorySnapshot` : c'est un message **serveur → client**. Un client
-                // qui en enverrait un tombe donc dans le `default`, qui le nomme — plutôt que d'être
-                // interprété comme une mutation d'inventaire, ce que le protocole ne permet pas.
+                case MessageType.InventoryDebit:
+                    HandleInventoryDebit(peer, session, InventoryDebitMessage.Read(reader));
+                    break;
+
+                // Aucun `case` pour `InventorySnapshot` ni `InventoryDebitResult` : ce sont des messages
+                // **serveur → client**. Un client qui en enverrait un tombe donc dans le `default`, qui le
+                // nomme — plutôt que d'être interprété comme une mutation d'inventaire, ce que le
+                // protocole ne permet pas.
 
                 default:
                     _log.LogWarning($"[net] message inattendu {type} de {peer} (handshake accepté={session.Accepted})");

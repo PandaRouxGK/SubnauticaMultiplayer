@@ -1234,6 +1234,84 @@ namespace NetProbe
 
             Check(duplicateInventoryReadThrew, "InventorySnapshot (doublon forgé) -> ProtocolException à la lecture");
 
+            // Débit d'inventaire (v20) : la demande, la décision, et les deux refus qui comptent — une
+            // quantité nulle, et un résultat qui contredit son issue.
+            var debit = new InventoryDebitMessage
+            {
+                PlayerId = 2,
+                TechTypeName = "PowerCell",
+                Count = 1,
+            };
+            var debitReader = new PacketReader(MessageCodec.Encode(debit.Write));
+            Check(
+                debitReader.ReadByte() == (byte)MessageType.InventoryDebit,
+                "opcode InventoryDebit");
+            var debitRt = InventoryDebitMessage.Read(debitReader);
+            Check(
+                debitRt.PlayerId == 2 && debitRt.TechTypeName == "PowerCell" && debitRt.Count == 1,
+                "round-trip InventoryDebit (identité revendiquée et quantité conservées)");
+
+            var zeroDebitThrew = false;
+            try
+            {
+                MessageCodec.Encode(new InventoryDebitMessage
+                {
+                    TechTypeName = "PowerCell",
+                    Count = 0,
+                }.Write);
+            }
+            catch (ProtocolException)
+            {
+                zeroDebitThrew = true;
+            }
+
+            Check(zeroDebitThrew, "InventoryDebit (quantité nulle) -> ProtocolException à l'écriture");
+
+            var debitResult = new InventoryDebitResultMessage
+            {
+                TechTypeName = "PowerCell",
+                Count = 1,
+                Granted = false,
+                Reason = InventoryChangeOutcome.NotEnough,
+                Revision = 3,
+                ClaimedBy = 2,
+            };
+            var debitResultReader = new PacketReader(MessageCodec.Encode(debitResult.Write));
+            Check(
+                debitResultReader.ReadByte() == (byte)MessageType.InventoryDebitResult,
+                "opcode InventoryDebitResult");
+            var debitResultRt = InventoryDebitResultMessage.Read(debitResultReader);
+            Check(
+                !debitResultRt.Granted
+                && debitResultRt.Reason == InventoryChangeOutcome.NotEnough
+                && debitResultRt.Revision == 3
+                && debitResultRt.ClaimedBy == 2,
+                "round-trip InventoryDebitResult (refus nommé, révision conservée)");
+
+            var incoherentDebitResultThrew = false;
+            try
+            {
+                var forged = new PacketWriter();
+                forged.WriteByte((byte)MessageType.InventoryDebitResult);
+                forged.WriteString("PowerCell");
+                forged.WriteUInt16(1);
+                forged.WriteBool(true);
+                forged.WriteByte((byte)InventoryChangeOutcome.NotEnough);
+                forged.WriteInt(0);
+                forged.WriteUInt16(1);
+                var forgedReader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+                forgedReader.ReadByte();
+                InventoryDebitResultMessage.Read(forgedReader);
+            }
+            catch (ProtocolException)
+            {
+                incoherentDebitResultThrew = true;
+            }
+
+            Check(
+                incoherentDebitResultThrew,
+                "InventoryDebitResult (accord contredit par l'issue) -> ProtocolException à la lecture");
+
             // Décodage UTF-8 strict : un paquet malformé est refusé, un emoji valide passe.
             var invalidUtf8Threw = false;
             try

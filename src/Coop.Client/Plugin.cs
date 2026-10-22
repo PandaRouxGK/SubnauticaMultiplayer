@@ -733,6 +733,13 @@ namespace Coop.Client
         private int _inventoryRevision = -1;
         private int _inventoryStale;
 
+        /// <summary>Contenu du dernier instantané **appliqué** : la réconciliation ne regarde que les noms qu'il cite.</summary>
+        private InventoryEntry[] _inventoryPrevious = Array.Empty<InventoryEntry>();
+        private int _inventoryDebitResults;
+        private int _inventoryDebitsGranted;
+        private int _inventoryDebitsRefused;
+        private string _inventoryLastDebitRefusal = string.Empty;
+
         internal int InventoryMessages => _inventoryMessages;
 
         /// <summary>Révision du dernier instantané appliqué ; `-1` = aucun instantané reçu.</summary>
@@ -740,6 +747,19 @@ namespace Coop.Client
 
         /// <summary>Instantanés arrivés dans le désordre et écartés (le contenu le plus récent est gardé).</summary>
         internal int InventoryStaleSnapshots => _inventoryStale;
+
+        internal int InventoryDebitResults => _inventoryDebitResults;
+        internal int InventoryDebitsGranted => _inventoryDebitsGranted;
+        internal int InventoryDebitsRefused => _inventoryDebitsRefused;
+
+        /// <summary>Motif du dernier refus de débit (`UnknownItem`, `NotEnough`, `Invalid`), ou vide.</summary>
+        internal string InventoryLastDebitRefusal => _inventoryLastDebitRefusal;
+
+        /// <summary>Unités réellement retirées de `Inventory.main` par la réconciliation (v20).</summary>
+        internal int InventoryRemovedLocally => InventoryReconciler.RemovedItems;
+
+        /// <summary>Retraits que la réconciliation n'a pas pu appliquer — une divergence reste visible.</summary>
+        internal int InventoryReconciliationFailures => InventoryReconciler.FailedRemovals;
 
         /// <summary>Quantité annoncée par le serveur pour un objet (0 s'il n'y est pas).</summary>
         internal int InventoryCountOf(string techTypeName) =>
@@ -758,6 +778,42 @@ namespace Coop.Client
 
                 return total;
             }
+        }
+
+        /// <summary>
+        /// Demande au serveur de retirer des unités du registre (v20). C'est une **demande** : le client ne
+        /// retire rien lui-même, et c'est l'instantané qui suit la décision qui déclenche la réconciliation
+        /// locale. Un refus ne change donc jamais `Inventory.main`.
+        /// </summary>
+        internal bool SendInventoryDebit(string techTypeName, int count)
+        {
+            if (string.IsNullOrEmpty(techTypeName) || count <= 0 || count > Protocol.MaxInventoryStack)
+            {
+                CoopClientPlugin.Log.LogWarning(
+                    $"[inventaire] débit non envoyé : quantité ou nom invalide ('{techTypeName}' ×{count}).");
+                return false;
+            }
+
+            if (_server == null || _server.ConnectionState != ConnectionState.Connected)
+            {
+                CoopClientPlugin.Log.LogWarning(
+                    "[inventaire] débit non envoyé : pas de connexion au serveur.");
+                return false;
+            }
+
+            _writer.Reset();
+            new InventoryDebitMessage
+            {
+                PlayerId = _assignedPlayerId,
+                TechTypeName = techTypeName,
+                Count = count,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+
+            CoopClientPlugin.Log.LogInfo(
+                $"[inventaire] débit demandé : '{techTypeName}' ×{count} (révision locale {_inventoryRevision})");
+            return true;
         }
         private string _lastHeldItemSignature;
 
@@ -1724,6 +1780,14 @@ namespace Coop.Client
                         break;
                     }
 
+                    // La réconciliation se calcule **avant** de remplacer le miroir, et seulement sur les
+                    // noms que les instantanés citent : l'admission (vide) ne vide donc pas l'inventaire
+                    // sauvegardé du joueur (v20, `InventoryReconciliation.Compute`).
+                    var reconciliation = InventoryReconciliation.Compute(
+                        _inventoryPrevious,
+                        snapshot.Entries,
+                        InventoryReconciler.CountLocal);
+
                     _inventory.Clear();
                     foreach (var entry in snapshot.Entries)
                     {
@@ -1731,6 +1795,7 @@ namespace Coop.Client
                     }
 
                     _inventoryRevision = snapshot.Revision;
+                    _inventoryPrevious = snapshot.Entries;
 
                     var names = snapshot.Entries.Length == 0
                         ? "vide"
@@ -1741,6 +1806,39 @@ namespace Coop.Client
                     CoopClientPlugin.Log.LogInfo(
                         $"[inventaire] instantané du serveur : révision {snapshot.Revision}, " +
                         $"{snapshot.Entries.Length} objet(s), {InventoryTotalCount} unité(s) [{names}]");
+
+                    if (reconciliation.MissingLocally > 0)
+                    {
+                        // Rien n'est créé : un écart où le serveur possède davantage est signalé, il ne
+                        // se « corrige » pas en fabriquant un objet dans le monde.
+                        CoopClientPlugin.Log.LogWarning(
+                            $"[inventaire] réconciliation : {reconciliation.MissingLocally} objet(s) que le " +
+                            "serveur compte et que le jeu n'a pas encore — aucune création locale (limite connue).");
+                    }
+
+                    InventoryReconciler.Apply(reconciliation.Removals, CoopClientPlugin.Log);
+                    break;
+                }
+
+                case MessageType.InventoryDebitResult:
+                {
+                    var result = InventoryDebitResultMessage.Read(reader);
+                    _inventoryDebitResults++;
+
+                    if (result.Granted)
+                    {
+                        _inventoryDebitsGranted++;
+                    }
+                    else
+                    {
+                        _inventoryDebitsRefused++;
+                        _inventoryLastDebitRefusal = result.Reason.ToString();
+                    }
+
+                    CoopClientPlugin.Log.LogInfo(
+                        $"[inventaire] débit {(result.Granted ? "accordé" : "REFUSÉ")} : " +
+                        $"'{result.TechTypeName}' ×{result.Count} ({result.Reason}) — révision " +
+                        $"{result.Revision}, revendiqué sous l'id {result.ClaimedBy}");
                     break;
                 }
 

@@ -2,7 +2,7 @@
 
 Coopération pour Subnautica (2019.4.36f1, Mono) : une instance de jeu sert de **serveur
 autoritaire** (BepInEx 5 + HarmonyX), les autres instances sont des clients. Transport UDP
-LiteNetLib, protocole binaire maison **v19**, tick serveur à **20 Hz**.
+LiteNetLib, protocole binaire maison **v20**, tick serveur à **20 Hz**.
 
 L'architecture et l'historique des mesures vivent dans `PLAN.md`. La politique d'autorité système
 par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai aujourd'hui.
@@ -26,7 +26,9 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   5 s d'écart — un client qui charge pendant que l'hôte avance ne démarre plus de nuit quand il fait jour ;
 - **inventaire** : le serveur tient un registre par joueur (borné) et l'annonce à son propriétaire ; un
   ramassage accordé y ajoute l'objet, et la quantité annoncée égale celle que le jeu contient chez le
-  client. La réconciliation avec l'inventaire du jeu n'est pas faite ;
+  client ; un **débit demandé** par le client est appliqué ou **refusé nommément** par le serveur, et
+  l'unité retirée du registre quitte réellement `Inventory.main` (réconciliation) ; aucun consommateur du
+  jeu (craft, nourriture, dépôt) n'appelle encore le débit ;
 - sauvegarde : le client n'écrit pas (garde sur deux remparts), l'hôte écrit toujours ;
 - hôte dédié : aucun personnage joueur exposé aux clients ;
 - **empreinte de sauvegarde (P0)** : handshake v13 accepté avec `save=slot=…` ; étape P verte ;
@@ -37,15 +39,16 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`entités créées ici=0`) ;
 - **contrat de contenu (P1bis)** : étape N verte — `définition vérifiée=True (hash=0x3da1f4bf782becdf)`
   et `définition falsifiée refusée=True` chez **les deux** clients, `définitions refusées=0` ;
-- **batterie des vingt-huit étapes (A–Z, AA, AB)** : les dix-sept premières ont un verdict vert le 2026-10-19
+- **batterie des vingt-neuf étapes (A–Z, AA, AB, AC)** : les dix-sept premières ont un verdict vert le 2026-10-19
   (`PLAN.md` §46) ; `R`, `S` et `T` prouvent les refus P0 en jeu (slot, session, mode — client divergent
   refusé nommément, l'autre admis), `U` la reconnexion (départ diffusé, réclamations libérées, retour admis, aucun avatar fantôme),
   `V` la présence à **trois** clients et `W` les créatures à trois clients, avec les états périmés
   écartés (`PLAN.md` §49.5, §52 et §53) ; `X` la libération du volant par une déconnexion, `Y` la
   fabrication demandée par un client (`PLAN.md` §64), `Z` la santé et la mort d'une créature
-  (`PLAN.md` §65), `AA` l'heure du monde diffusée puis appliquée (`PLAN.md` §66) et `AB` le registre
-  d'inventaire du serveur confronté au ramassage réel (`PLAN.md` §67). `tools/verify.sh` sans `--only`
-  lance bien les vingt-huit.
+  (`PLAN.md` §65), `AA` l'heure du monde diffusée puis appliquée (`PLAN.md` §66), `AB` le registre
+  d'inventaire du serveur confronté au ramassage réel et `AC` le débit accordé puis refusé avec le retrait
+  réel dans `Inventory.main` (`PLAN.md` §67 et §68). `tools/verify.sh` sans `--only` lance bien les
+  vingt-neuf.
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
@@ -55,9 +58,9 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
 capsule de test), plus de 8 joueurs, et des sauvegardes ou zones différentes ; la désynchronisation des
 véhicules et des avatars n'est pas mesurée non plus (`PLAN.md` §62.4).
 
-**Ce qui n'existe pas encore :** craft, récolte, oxygène et bases partagés ; la réconciliation de
-l'inventaire serveur avec l'inventaire du jeu ; contenu custom livré au client ; authentification ou
-chiffrement.
+**Ce qui n'existe pas encore :** craft, récolte, oxygène et bases partagés ; le branchement du débit
+d'inventaire sur les consommateurs du jeu (craft, nourriture, dépôt) ; la réconciliation des objets
+équipés ; contenu custom livré au client ; authentification ou chiffrement.
 
 ## Prérequis
 

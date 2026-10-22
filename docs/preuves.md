@@ -86,7 +86,17 @@ dans la colonne de droite et n'invalident pas le critère.
 | Le registre **dit la vérité sur le monde** : la quantité annoncée égale celle de `Inventory.main` | `[sonde] inventaire : messages=2, révision 0 -> 1, 'PowerCell' serveur=1 local=1 … verdict=True` | `Coop.Client/InventoryProbeBehaviour.cs` ; étape AB | prouvé (2026-10-21, étape AB) |
 | Le premier run mesurait `local=0` : la décision serveur arrive **avant** que le geste n'ait fini d'ajouter l'objet | `serveur=1 local=0 … verdict=False` (premier run AB) | journal du 2026-10-21, `PLAN.md` §67.3 | corrigé (2026-10-21) : la sonde attend que les deux quantités se rejoignent |
 | Une assertion mal échappée peut faire tomber une étape **verte** | `verdict=True` dans le journal, échec sur `serveur=\[1-9\]…` | `tools/verify.sh` (`assert_ab`), `PLAN.md` §67.3 | corrigé (2026-10-21) : classe de chiffres non échappée |
-| Le client **n'applique pas** l'instantané à `Inventory.main`, et rien ne **débite** le registre | aucune ligne de code ne le fait : `InventoryProbeBehaviour` ne fait que comparer | `docs/protocol.md` §4 nonies | non implémenté (assumé, lot suivant) |
+| Le client **n'applique pas** l'instantané à `Inventory.main`, et rien ne **débite** le registre | aucune ligne de code ne le faisait en v19 : `InventoryProbeBehaviour` ne faisait que comparer | `docs/protocol.md` §4 nonies | **corrigé en v20** (débit #28/#29, réconciliation), voir la section suivante |
+
+### Inventaire : débit décidé par le serveur et réconciliation (v20, 2026-10-22)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| Un **débit demandé par le client** est appliqué par le serveur, et sa révision avance | `[net] inventaire : débit de 'PowerCell' ×1 accordé pour 'killi'#1 (révision 1 -> 2)` puis `[net] inventaire de 'killi'#1 : révision 2, 0 objet(s) (0 unité(s)) — débit de 'PowerCell' ×1` | `ServerNetwork.Inventory.cs` (`HandleInventoryDebit`) ; `InventoryDebit` #28 | prouvé (2026-10-22, étape AC) |
+| Un second débit du même objet est **refusé nommément**, sans déplacer la révision | `[net] inventaire : débit de 'PowerCell' ×1 REFUSÉ pour 'killi'#1 (UnknownItem) — révision 2 inchangée.` et, côté client, `[inventaire] débit REFUSÉ : 'PowerCell' ×1 (UnknownItem) — révision 2` | `InventoryDebitResult` #29 ; `PlayerInventory.Remove` | prouvé (2026-10-22, étape AC) |
+| La **réconciliation** retire réellement l'unité de `Inventory.main` chez le client | `[inventaire] réconciliation : 1 unité(s) retirée(s) de Inventory.main, échecs=0 (total retiré=1).` puis `[sonde] débit : … retirés localement=1 échecs=0, 'PowerCell' serveur=0 local=0, révision 1 -> 2, refus nommé=UnknownItem — verdict=True` | `Coop.Client/InventoryReconciler.cs` · `Coop.Model/InventoryReconciliation.cs` ; `-coopdebug=inventory` ; étape AC | prouvé (2026-10-22, étape AC, 160 s) |
+| L'hôte et le client parlent bien la **v20** (clé et version changées ensemble) | `handshake ACCEPTÉ` dans le même run AC, sans refus de version | `Protocol.Version = 20`, `ConnectionKey = coop-subnautica-v20` | prouvé (2026-10-22, étape AC) |
+| L'instantané de ramassage arrive **avant** que le jeu n'ait ajouté l'objet : un écart transitoire est journalisé, pas corrigé | `[inventaire] réconciliation : 1 objet(s) que le serveur compte et que le jeu n'a pas encore — aucune création locale (limite connue).` | `Plugin.cs` (`case InventorySnapshot`) ; `InventoryReconciliation.Compute` | observé et assumé (2026-10-22, étape AC) — la sonde attend la convergence, la réconciliation ne fabrique rien |
 
 ### P2 : reconnexion, mesurée avec un volant tenu (2026-10-20)
 

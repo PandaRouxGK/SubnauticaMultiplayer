@@ -1917,6 +1917,176 @@ namespace Coop.Model
         }
     }
 
+    /// <summary>
+    /// Demande de **débit** d'inventaire (ReliableOrdered, v20), émise par le propriétaire du registre.
+    ///
+    /// `PlayerId` est **revendiqué** : le serveur prend l'identité de la session, jamais celle du message.
+    /// Sinon un client pourrait vider l'inventaire d'un autre joueur — un débit est une mutation, même
+    /// s'il ne peut que diminuer.
+    ///
+    /// Le message ne dit pas *pourquoi* l'objet est consommé (craft, dépôt, dégât) : le registre n'a pas
+    /// à connaître la cause, seulement la quantité qui en sort. Le lot qui introduira le coût de
+    /// fabrication ajoutera sa propre vérification de matériaux ; ici, la seule règle est « on ne retire
+    /// pas plus que ce que le registre contient ».
+    /// </summary>
+    public sealed class InventoryDebitMessage
+    {
+        public ushort PlayerId;
+        public string TechTypeName;
+        public int Count;
+
+        public void Write(PacketWriter writer)
+        {
+            var name = TechTypeName ?? string.Empty;
+            if (name.Length == 0)
+            {
+                throw new ProtocolException("débit d'inventaire sans nom d'objet");
+            }
+
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException(
+                    $"nom de TechType trop long pour un débit ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
+            if (Count <= 0 || Count > Protocol.MaxInventoryStack)
+            {
+                throw new ProtocolException($"quantité de débit hors bornes ({Count})");
+            }
+
+            writer.WriteByte((byte)MessageType.InventoryDebit);
+            writer.WriteUInt16(PlayerId);
+            writer.WriteString(name);
+            writer.WriteUInt16((ushort)Count);
+        }
+
+        public static InventoryDebitMessage Read(PacketReader reader)
+        {
+            var playerId = reader.ReadUInt16();
+            var name = reader.ReadString();
+            if (name.Length == 0)
+            {
+                throw new ProtocolException("débit d'inventaire reçu sans nom d'objet");
+            }
+
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException(
+                    $"nom de TechType reçu trop long pour un débit ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
+            var count = reader.ReadUInt16();
+            if (count == 0 || count > Protocol.MaxInventoryStack)
+            {
+                throw new ProtocolException($"quantité de débit reçue hors bornes ({count})");
+            }
+
+            return new InventoryDebitMessage
+            {
+                PlayerId = playerId,
+                TechTypeName = name,
+                Count = count,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Décision du serveur sur un débit (ReliableOrdered, v20), envoyée au **seul demandeur**.
+    ///
+    /// Le refus est **nommé** par <see cref="InventoryChangeOutcome"/> (`UnknownItem`, `NotEnough`,
+    /// `Invalid`, `InventoryFull`) : le client peut alors dire au joueur ce qui n'a pas été consommé,
+    /// et une sonde peut distinguer « refusé » de « jamais demandé ».
+    ///
+    /// `Granted` et `Reason` sont tenus cohérents à l'écriture comme à la lecture (`Granted` si et
+    /// seulement si `Reason == Applied`) : deux champs qui se contrediraient donneraient deux lectures du
+    /// même paquet, ce que le reste du protocole refuse déjà pour les instantanés.
+    /// </summary>
+    public sealed class InventoryDebitResultMessage
+    {
+        public string TechTypeName;
+        public int Count;
+        public bool Granted;
+        public InventoryChangeOutcome Reason;
+        public int Revision;
+        public ushort ClaimedBy;
+
+        public void Write(PacketWriter writer)
+        {
+            Validate(TechTypeName, Count, Granted, Reason, Revision, "débit");
+
+            writer.WriteByte((byte)MessageType.InventoryDebitResult);
+            writer.WriteString(TechTypeName);
+            writer.WriteUInt16((ushort)Count);
+            writer.WriteBool(Granted);
+            writer.WriteByte((byte)Reason);
+            writer.WriteInt(Revision);
+            writer.WriteUInt16(ClaimedBy);
+        }
+
+        public static InventoryDebitResultMessage Read(PacketReader reader)
+        {
+            var name = reader.ReadString();
+            var count = reader.ReadUInt16();
+            var granted = reader.ReadBool();
+            var reason = (InventoryChangeOutcome)reader.ReadByte();
+            var revision = reader.ReadInt();
+            var claimedBy = reader.ReadUInt16();
+
+            Validate(name, count, granted, reason, revision, "débit reçu");
+
+            return new InventoryDebitResultMessage
+            {
+                TechTypeName = name,
+                Count = count,
+                Granted = granted,
+                Reason = reason,
+                Revision = revision,
+                ClaimedBy = claimedBy,
+            };
+        }
+
+        private static void Validate(
+            string name,
+            int count,
+            bool granted,
+            InventoryChangeOutcome reason,
+            int revision,
+            string label)
+        {
+            if (string.IsNullOrEmpty(name))
+            {
+                throw new ProtocolException($"{label} sans nom d'objet");
+            }
+
+            if (name.Length > Protocol.MaxTechTypeNameLength)
+            {
+                throw new ProtocolException(
+                    $"{label} : nom d'objet trop long ({name.Length} > {Protocol.MaxTechTypeNameLength})");
+            }
+
+            if (count <= 0 || count > Protocol.MaxInventoryStack)
+            {
+                throw new ProtocolException($"{label} : quantité hors bornes ({count})");
+            }
+
+            if (!Enum.IsDefined(typeof(InventoryChangeOutcome), reason))
+            {
+                throw new ProtocolException($"{label} : issue inconnue ({(byte)reason})");
+            }
+
+            if (granted != (reason == InventoryChangeOutcome.Applied))
+            {
+                throw new ProtocolException(
+                    $"{label} : accord ({granted}) incohérent avec l'issue ({reason})");
+            }
+
+            if (revision < 0)
+            {
+                throw new ProtocolException($"{label} : révision négative ({revision})");
+            }
+        }
+    }
+
     public static class MessageCodec
     {
         public static byte[] Encode(Action<PacketWriter> write, PacketWriter reusable = null)

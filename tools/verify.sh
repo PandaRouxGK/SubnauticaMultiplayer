@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les vingt-huit étapes, et ce que chacune prouve :
+# Les vingt-neuf étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -99,10 +99,14 @@
 #      du ramassage, et la quantité annoncée par le serveur **égale** celle que `Inventory.main` contient
 #      réellement. C'est la première tranche de l'inventaire (v19) : un registre, pas encore une
 #      réconciliation avec l'inventaire du jeu.
+#   AC même run, puis un **débit** demandé par la sonde -> le serveur retire l'unité de **son** registre
+#      (révision +1), la réconciliation retire l'objet de `Inventory.main` chez le client, et un second
+#      débit du même objet est **refusé nommément** (`UnknownItem`) sans déplacer la révision. C'est la
+#      seconde tranche de l'inventaire (v20) : le client ne retire rien de son propre chef.
 #
 # Usage :
-#   tools/verify.sh                    # les vingt-huit étapes
-#   tools/verify.sh --only=B           # une seule étape (A..AB, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les vingt-neuf étapes
+#   tools/verify.sh --only=B           # une seule étape (A..AC, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -149,7 +153,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB  étapes à lancer (défaut : les vingt-huit)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC  étapes à lancer (défaut : les vingt-neuf)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -171,7 +175,7 @@ done
 case ",$ONLY," in
     *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A..AB, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A..AC, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -623,6 +627,27 @@ assert_ab() {
         "aucun instantané n'a été écarté comme périmé"
 }
 
+assert_ac() {
+    local server="$WORK_DIR/AC/coop-server.log"
+    local client="$WORK_DIR/AC/coop-client.log"
+
+    # v20 : le débit est une **demande**. Le serveur l'applique ou la refuse nommément, et la
+    # réconciliation retire l'unité de `Inventory.main` — sans ce dernier point, un débit ne serait
+    # qu'une ligne de journal.
+    expect AC "$server" "\\[net\\] inventaire : débit de 'PowerCell' ×1 accordé pour '[^']+'#[0-9]+ \\(révision [0-9]+ -> [1-9][0-9]*\\)" \
+        "un débit accordé est appliqué au registre, et sa révision avance"
+    expect AC "$server" "\\[net\\] inventaire : débit de 'PowerCell' ×1 REFUSÉ pour .* \\(UnknownItem\\)" \
+        "un second débit du même objet est refusé nommément (UnknownItem)"
+    expect AC "$client" "retirés localement=[1-9][0-9]* échecs=0" \
+        "la réconciliation a réellement retiré l'objet de Inventory.main"
+    expect AC "$client" "serveur=0 local=0" \
+        "après le débit, le serveur et le monde sont d'accord sur l'absence de l'objet"
+    expect AC "$client" "\\[sonde\\] débit : .*verdict=True" \
+        "la sonde conclut True sur le débit et sur le refus nommé"
+    expect AC "$client" "périmés écartés=0" \
+        "aucun instantané n'a été écarté comme périmé"
+}
+
 assert_d() {
     local log="$WORK_DIR/D/coop-client.log"
 
@@ -1028,9 +1053,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1517,6 +1542,20 @@ if wanted AB "$ONLY"; then
         args+=(--no-build)
     fi
     step AB "inventaire : le registre du serveur est annoncé et correspond au ramassage réel" assert_ab "${args[@]}"
+fi
+
+if wanted AC "$ONLY"; then
+    # v20 : le même ramassage réel qu'AB, puis la sonde **demande** le débit au lieu de consommer elle-même.
+    # Le retrait dans `Inventory.main` doit être fait par la réconciliation ; un second débit, l'objet
+    # n'étant plus dans le registre, doit être refusé nommément.
+    args=(--clients=1 --timeout=480
+        "--host-args=-coopmode=server"
+        "--client-args=-coopmode=client -coopdebug=pickup -coopdebug=inventory"
+        "--client-marker=\\[sonde\\] débit :")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step AC "inventaire : le débit décidé par le serveur vide le registre et le monde, et un refus reste nommé" assert_ac "${args[@]}"
 fi
 
 if wanted D "$ONLY"; then
