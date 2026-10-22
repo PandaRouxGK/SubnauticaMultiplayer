@@ -5078,9 +5078,10 @@ partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi f
 - **Le seau vit en mémoire** : il repart plein à la reconnexion, ce qui est voulu (nouvelle session) mais
   n'empêche pas un client de se reconnecter en boucle pour contourner le rythme (le handshake reste borné
   par le reste du protocole).
-- **La purge à la fermeture de session est branchée mais non exercée en jeu** : `CraftGuard.Clear()` est
-  appelé sur la déconnexion, sur le message `Disconnect` et sur un changement d'adresse ; aucune étape ne
-  ferme une session avec une demande en attente pour vérifier que la réponse tardive ne rejoue rien.
+- **La purge à la fermeture de session était branchée mais non exercée en jeu** : `CraftGuard.Clear()` est
+  appelé sur la déconnexion, sur le message `Disconnect` et sur un changement d'adresse ; **levé au §79** — la
+  sonde retient une demande fictive, appelle `Clear()` et vérifie `avant=1, après=0` (le déclencheur par une
+  vraie coupure, lui, reste non exercé).
 - **La rafale de la sonde envoie des demandes brutes**, hors garde : avec un inventaire plus riche, une
   partie serait **accordée** sans reprise locale (le registre serait débité). La fixture ne le permet
   pas — le premier craft vide le titane — mais un futur décor plus fourni rendrait la sonde bruyante.
