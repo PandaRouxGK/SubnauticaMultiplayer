@@ -5259,3 +5259,42 @@ lecture des ingrédients et l'horloge, le reste (références, fenêtre, purge) 
   ne sont pas testés hors jeu ; le modèle ne reçoit que des noms.
 - **L'horloge est une `float` convertie en millisecondes** : `realtimeSinceStartup × 1000` perd de la précision
   sur une très longue session ; la fenêtre de 10 s rend l'erreur sans conséquence, mais ce n'est pas mesuré.
+
+## 78. Un retrait reporté est repris à la levée, pas à l'instantané suivant (2026-10-22)
+
+Le §77.3 nommait la dette : `InventoryReconciliation.Compute` n'était appelé **qu'à la réception d'un
+instantané**. Un retrait reporté (matériau protégé par un craft en cours) n'était donc réévalué qu'à
+l'instantané suivant — et si aucun n'arrivait (reprise refusée par le jeu, par exemple), la divergence
+restait indéfiniment. La levée de protection est maintenant un **point de reprise**.
+
+### 78.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| mémoire des reports | `Coop.Client/InventoryReconciler.cs` | la liste des noms **reportés** est tenue (`PendingDeferrals` les compte) et le dernier inventaire **serveur** appliqué est mémorisé (`RememberServerState`) |
+| reprise | `Coop.Client/InventoryReconciler.cs` (`RetryDeferred`) | réévalue **seulement** les noms reportés contre cet instantané (`local > annoncé`), puis applique ; un nom encore protégé est reporté de nouveau ; sans rien à retirer elle l'écrit (« plus rien à retirer ») au lieu de se taire |
+| branchement | `Coop.Client/CraftGuard.cs` | après chaque `protection levée`, `RetryDeferred` est appelé — c'est le seul moment où le report peut être repris sans attendre un instantané ; `Clear()` remet aussi cet état à zéro (`Reset`) |
+| alimentation | `Coop.Client/Plugin.cs` | chaque instantané accepté transmet ses entrées à `RememberServerState` |
+| harnais | `tools/verify.sh` (**AD**, **AE**) | `expect_missing` sur `retrait de '…' ×n reporté` : les runs actuels ne produisent **aucun** report, et une assertion le dit désormais au lieu de laisser croire que le chemin est couvert |
+
+### 78.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `dotnet test` | **433/433** rc=0 (inchangé : ce lot ne touche pas le modèle) |
+| `check-verify-assertions.sh` | rc=0 — 31 étapes, 20 échecs nommés |
+| étape **AD** (Créatif, 54 s) | **OK** — aucune ligne `protection levée`, aucun `reporté` ; `coût retiré par la réconciliation=1` |
+| étape **AE** (Survie, 54 s) | **OK** — protection armée puis levée (25–30 ms), aucun `reporté`, `coût retiré par la réconciliation=0`, verdict=True |
+| recherche du chemin de reprise | `grep "reporté\|reprise de"` sur les journaux AD **et** AE : **0** occurrence |
+
+### 78.3 Ce que ce lot ne prouve pas
+
+- **Le chemin de reprise n'est exercé par aucun run** : il faudrait qu'un retrait soit reporté, donc qu'un
+  tick de réconciliation tombe dans la fenêtre de 25–30 ms. Le code est en place et compilé, mais sa branche
+  non vide n'a jamais tourné — c'est une dette de **preuve**, pas de conception, et le §77.3 la nommait déjà.
+- **Aucun test hors jeu** : `RetryDeferred` lit `Inventory.main` (Unity) ; seule la partie pure (le delta) est
+  testée, dans `InventoryReconciliation`.
+- **La reprise s'appuie sur le dernier instantané connu** : un nom absent de cet instantané est compté `0`, ce
+  qui retirerait toutes ses copies locales. Vrai pour un instantané **complet** (c'est ce que le serveur
+  envoie), faux si un jour il devenait un delta — la restauration de cet invariant n'est pas vérifiée ici.

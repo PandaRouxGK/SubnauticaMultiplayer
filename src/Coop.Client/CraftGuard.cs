@@ -345,6 +345,7 @@ namespace Coop.Client
             Instances.Clear();
             SentAt.Clear();
             InFlight.Clear();
+            InventoryReconciler.Reset();
 
             if (pending > 0)
             {
@@ -392,6 +393,10 @@ namespace Coop.Client
                 _log?.LogInfo(
                     $"[craft] protection levée : {string.Join(", ", released)} (consommation locale faite ou " +
                     "refus : rien ne reste à protéger) — la réconciliation peut de nouveau agir sur ce matériau.");
+
+                // Un retrait avait pu être **reporté** pendant la fenêtre : sans cette reprise il n'aurait été
+                // réévalué qu'à l'instantané suivant, qui peut ne jamais venir.
+                InventoryReconciler.RetryDeferred(_log);
             }
         }
 

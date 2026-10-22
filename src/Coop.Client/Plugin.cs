@@ -1943,6 +1943,10 @@ namespace Coop.Client
                     _inventoryRevision = snapshot.Revision;
                     _inventoryPrevious = snapshot.Entries;
 
+                    // Référence de la reprise : un retrait reporté (craft en cours) sera réévalué contre
+                    // cet inventaire dès que la protection de son matériau sera levée.
+                    InventoryReconciler.RememberServerState(snapshot.Entries);
+
                     var names = snapshot.Entries.Length == 0
                         ? "vide"
                         : string.Join(", ", Array.ConvertAll(

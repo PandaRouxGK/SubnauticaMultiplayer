@@ -28,6 +28,14 @@ namespace Coop.Client
         private static int _failed;
         private static int _deferred;
 
+        /// <summary>
+        /// Dernier inventaire **serveur** appliqué : la référence contre laquelle rejouer un retrait reporté.
+        /// </summary>
+        private static InventoryEntry[] _lastServer;
+
+        /// <summary>Noms dont un retrait a été reporté et qui n'ont pas encore été repris.</summary>
+        private static readonly List<string> DeferredNames = new List<string>();
+
         /// <summary>Unités réellement retirées de `Inventory.main` depuis le démarrage.</summary>
         internal static int RemovedItems => _removed;
 
@@ -36,6 +44,79 @@ namespace Coop.Client
 
         /// <summary>Retraits reportés parce qu'un craft approuvé va consommer ces matériaux lui-même.</summary>
         internal static int DeferredRemovals => _deferred;
+
+        /// <summary>Retraits encore en attente de reprise (reportés, jamais rejoués).</summary>
+        internal static int PendingDeferrals => DeferredNames.Count;
+
+        /// <summary>Mémorise l'inventaire serveur appliqué : référence de la reprise après un report.</summary>
+        internal static void RememberServerState(InventoryEntry[] entries)
+        {
+            _lastServer = entries;
+        }
+
+        /// <summary>
+        /// Rejoue les retraits **reportés** contre le dernier inventaire serveur connu, et rend le nombre de
+        /// noms examinés. Sans cela, un report n'était repris qu'à l'instantané suivant : si aucun n'arrivait
+        /// (reprise refusée par le jeu, par exemple), la divergence restait indéfiniment.
+        ///
+        /// Seuls les noms reportés sont réévalués — pas tout l'instantané : c'est ce qui permet d'ignorer les
+        /// noms qui ne tiennent pas dans un instantané tronqué. L'appel est idempotent, et un matériau encore
+        /// protégé est reporté de nouveau (sans boucle : la reprise n'est déclenchée que par une levée).
+        /// </summary>
+        internal static int RetryDeferred(ManualLogSource log)
+        {
+            if (DeferredNames.Count == 0 || _lastServer == null)
+            {
+                return 0;
+            }
+
+            var names = DeferredNames.ToArray();
+            DeferredNames.Clear();
+
+            var removals = new List<InventoryRemoval>(names.Length);
+
+            foreach (var name in names)
+            {
+                var announced = 0;
+                if (_lastServer != null)
+                {
+                    foreach (var entry in _lastServer)
+                    {
+                        if (string.Equals(entry.TechTypeName, name, StringComparison.Ordinal))
+                        {
+                            announced += entry.Count;
+                        }
+                    }
+                }
+
+                var local = CountLocal(name);
+                if (local > announced)
+                {
+                    removals.Add(new InventoryRemoval(name, local - announced));
+                }
+            }
+
+            if (removals.Count == 0)
+            {
+                log?.LogInfo(
+                    $"[inventaire] réconciliation : {names.Length} report(s) repris — plus rien à retirer.");
+                return names.Length;
+            }
+
+            log?.LogInfo(
+                $"[inventaire] réconciliation : reprise de {removals.Count} retrait(s) reporté(s) " +
+                $"[{string.Join(", ", names)}] — un craft vient de rendre la main.");
+
+            Apply(removals.ToArray(), log);
+            return names.Length;
+        }
+
+        /// <summary>Fin de session : rien de ce qui était reporté ne survit.</summary>
+        internal static void Reset()
+        {
+            _lastServer = null;
+            DeferredNames.Clear();
+        }
 
         /// <summary>Nombre d'unités de ce `TechType` réellement présentes dans l'inventaire du jeu.</summary>
         internal static int CountLocal(string techTypeName)
@@ -138,6 +219,12 @@ namespace Coop.Client
                 if (CraftGuard.IsCostInFlight(removal.TechTypeName))
                 {
                     _deferred++;
+
+                    if (!DeferredNames.Contains(removal.TechTypeName))
+                    {
+                        DeferredNames.Add(removal.TechTypeName);
+                    }
+
                     log?.LogInfo(
                         $"[inventaire] réconciliation : retrait de '{removal.TechTypeName}' ×{removal.Count} " +
                         "reporté — un craft approuvé consomme ce matériau lui-même.");

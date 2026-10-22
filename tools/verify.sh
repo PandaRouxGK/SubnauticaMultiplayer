@@ -690,6 +690,8 @@ assert_ad() {
         "en Créatif, aucune protection n'est armée : c'est la réconciliation qui applique le coût"
     expect_missing AD "$client" "protection levée" \
         "en Créatif, un refus n'a aucune protection à lever"
+    expect_missing AD "$client" "retrait de '[^']+' ×[0-9]+ reporté" \
+        "aucun retrait reporté en Créatif : rien n'est protégé, donc rien n'est différé"
     expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence : [1-9][0-9]* ms" \
         "le serveur nomme et date le refus de cadence"
 }
@@ -723,6 +725,8 @@ assert_ae() {
         "en Survie, le coût est écarté de la réconciliation pendant la reprise"
     expect AE "$client" "protection levée : [A-Za-z]+" \
         "un refus lève la protection : rien n'a été consommé, la réconciliation peut reprendre"
+    expect_missing AE "$client" "retrait de '[^']+' ×[0-9]+ reporté" \
+        "la fenêtre ne couvre que 25–30 ms : aucun retrait n'est reporté (constat, pas un succès)"
     expect AE "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence :" \
         "le refus de cadence est nommé côté serveur, en Survie"
     expect_missing AE "$client" "mode sans ingrédients" \
