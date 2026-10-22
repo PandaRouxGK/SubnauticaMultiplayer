@@ -90,6 +90,33 @@ namespace Coop.Model.Tests
         }
 
         [Fact]
+        public void Le_regime_etabli_tient_huit_en_rafale_puis_cent_vingt_par_minute()
+        {
+            // Un client qui demande à chaque tick (20 Hz) pendant une minute. Le seau plein donne la
+            // rafale, puis la recharge de 1 par 500 ms : 120 jetons en 60 s. C'est la constante que
+            // `PLAN.md` §72.3 annonçait sans la mesurer.
+            var budget = new CraftBudget();
+            var granted = 0;
+            var refused = 0;
+
+            for (var tick = 0; tick <= 1_200; tick++)
+            {
+                if (budget.TryTake(tick * 50L, out var retryAfter))
+                {
+                    granted++;
+                }
+                else
+                {
+                    refused++;
+                    Assert.InRange(retryAfter, 1, CraftBudget.DefaultRefillMs);
+                }
+            }
+
+            Assert.Equal(128, granted);
+            Assert.Equal(1_201 - 128, refused);
+        }
+
+        [Fact]
         public void Le_refus_de_cadence_fait_l_aller_retour_sur_le_fil()
         {
             var message = new CraftResultMessage

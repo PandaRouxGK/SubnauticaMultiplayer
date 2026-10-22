@@ -5073,8 +5073,8 @@ partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi f
 
 ### 72.3 Ce que ce lot ne prouve pas
 
-- **La cadence n'est mesurée qu'en rafale de 12** sur un seul client ; le régime établi (~120/min) n'est pas
-  chronométré, et la constante n'a pas été choisie par mesure d'usage — c'est une borne de sécurité.
+- **La cadence n'est mesurée qu'en rafale de 12** sur un seul client ; le régime établi est établi depuis
+  par un test (§75), mais la constante n'a pas été choisie par mesure d'usage — c'est une borne de sécurité.
 - **Le seau vit en mémoire** : il repart plein à la reconnexion, ce qui est voulu (nouvelle session) mais
   n'empêche pas un client de se reconnecter en boucle pour contourner le rythme (le handshake reste borné
   par le reste du protocole).
@@ -5152,3 +5152,29 @@ déduction (`coût retiré par la réconciliation=0`) — une absence d'effet, p
   n'est pas exercée, et le format de la ligne n'est pas testé pour les cas vides ou l'échec de lecture.
 - **L'absence en Créatif est une assertion négative** : elle prouve que la branche n'est pas armée, pas que
   la réconciliation applique le bon coût au-delà du compteur `1` déjà mesuré au §70.
+
+## 75. Le régime de la cadence est établi hors jeu (2026-10-22)
+
+Le §72.3 laissait une dette mesurable sans jeu : « le régime établi (~120/min) n'est pas chronométré ».
+Un test le chronomètre désormais, en rejouant une minute de demandes à 20 Hz avec le temps passé en
+argument — aucune horloge, donc aucun flottement.
+
+### 75.1 La mesure
+
+`CraftBudgetTests.Le_regime_etabli_tient_huit_en_rafale_puis_cent_vingt_par_minute` :
+
+| Entrée | Sortie |
+|---|---|
+| 1 201 ticks (0 → 60 000 ms, pas de 50 ms), une demande par tick, seau neuf | **128 accordées**, **1 073 refusées** |
+| décomposition | 8 jetons de rafale (seau plein au départ) + **120** rechargés en 60 s (1 par 500 ms) |
+| chaque refus | `retryAfterMs` dans `[1, 500]` — daté, jamais zéro |
+| `dotnet test` | **425/425** rc=0 (le nouveau cas compris) |
+
+### 75.2 Ce que ce test ne dit pas
+
+- C'est le modèle, pas le serveur : il ne prouve pas que `HandleCraftRequest` appelle bien le seau **avant**
+  toute lecture de recette — cela reste prouvé par le run AD/AE (`[net] craft … REFUSÉ (RateLimited …)`).
+- La constante (8 / 500 ms) reste un choix de sécurité, pas une mesure d'usage : aucun joueur réel n'a été
+  observé pour la calibrer.
+- Il ne dit rien du coût d'un refus (lecture de recette évitée, écriture de journal) : seule la cadence
+  logique est comptée.
