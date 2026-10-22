@@ -202,6 +202,11 @@ elle a son propre message (#17) et sa décision (#18).
 | `CraftBudget.DefaultBurst` | `8` | demandes de craft acceptées en rafale pour une session ; au-delà, le refus `RateLimited` **nomme et date** l'attente. La borne est double : le nombre de demandes sans réponse ne croît pas, et le coût d'une demande refusée reste une comparaison, pas une lecture de recette |
 | `CraftBudget.DefaultRefillMs` | `500` | recharge d'un jeton — ~`120` crafts par minute en régime établi ; les étapes AD et AE craftent deux fois en quelques secondes et ne sont pas freinées |
 | `CraftRequestLedger.MaxPending` | `64` | demandes bloquées chez le client avant que le garde ne cesse de compter ; au-delà, le craft passe **sans arbitrage et le dit** plutôt que de rester muet |
+| `MaterialProtection.DefaultWindowMs` | `10 000` | fenêtre pendant laquelle la réconciliation n'ose pas retirer un matériau qu'un craft approuvé consomme lui-même ; le garde la lève dès que le craft est joué ou refusé (§76), et le report est repris à cette levée (§78) |
+
+La protection de matériaux et la reprise d'un retrait reporté sont **entièrement côté client** : aucun
+message n'est ajouté, aucun numéro de message ne change, et un serveur qui ignorerait ces règles ne verrait
+simplement aucune différence sur le fil.
 
 ### Fabrication demandée par un client (v16)
 
