@@ -5069,6 +5069,7 @@ partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi f
 | étape **AE** (Survie) | **OK (56 s)** — le craft consomme toujours réellement le matériau, et la cadence nomme sa rafale |
 | `dotnet run --project tools/NetProbe -- selftest` | **SUCCES** — le codec n'a pas de liste d'issues figée : `RateLimited` passe les contrôles existants |
 | `tools/session-verdict.sh --self-test` | **SUCCES (8 cas, 0 échec)** — le verrou de la session P4 n'a pas été touché |
+| non-régression de l'inventaire | **AB OK (152 s)**, **AC OK (152 s)**, `VERDICT GLOBAL : tout est vert` — le ramassage et le débit ne sont pas touchés par les changements du garde |
 
 ### 72.3 Ce que ce lot ne prouve pas
 
