@@ -5066,6 +5066,8 @@ partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi f
 | `dotnet test` | **423/423** rc=0 — dont 12 tests `CraftRequestLedger` et 7 `CraftBudget` (dont l'aller-retour de `RateLimited`) |
 | étape **AD** (Créatif) | **OK (56 s)** — craft inchangé, puis `[sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True` ; serveur `REFUSÉ (RateLimited : cadence : 499 ms avant le prochain jeton (rafale 8, 1 par 500 ms)) — révision 3 inchangée.` |
 | étape **AE** (Survie) | **OK (56 s)** — le craft consomme toujours réellement le matériau, et la cadence nomme sa rafale |
+| `dotnet run --project tools/NetProbe -- selftest` | **SUCCES** — le codec n'a pas de liste d'issues figée : `RateLimited` passe les contrôles existants |
+| `tools/session-verdict.sh --self-test` | **SUCCES (8 cas, 0 échec)** — le verrou de la session P4 n'a pas été touché |
 
 ### 72.3 Ce que ce lot ne prouve pas
 
