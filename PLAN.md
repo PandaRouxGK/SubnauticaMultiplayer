@@ -154,6 +154,9 @@ correctement chez 2 clients, l'architecture est bonne pour tout le reste.
 >
 > **État au 2026-10-20** : M0, M1, M2, M3, **M4** et M5 sont **clos** (critères du §6 prouvés, §54 et §56) ;
 > M6 reste ouvert (AssetBundle gelé, en attente d'une session réelle de 30 min).
+> **Complément au 2026-10-22** : M6 reste ouvert (P4 et AssetBundle gelés), mais l'**économie** du monde
+> est désormais arbitrée de bout en bout — ramassage, débit, adoption, coût du craft, cadence et latence
+> mesurée (v19–v21, §67–§73) : c'est l'infrastructure dont M6 aura besoin, pas M6 lui-même.
 
 ---
 
