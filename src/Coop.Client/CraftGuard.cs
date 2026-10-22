@@ -66,6 +66,13 @@ namespace Coop.Client
         private static readonly Dictionary<string, float> InFlightCosts =
             new Dictionary<string, float>(StringComparer.Ordinal);
 
+        /// <summary>
+        /// Nombre de crafts en attente qui protègent le même matériau : deux recettes peuvent partager un
+        /// ingrédient, et lever la protection de l'un ne doit pas découvrir l'autre. À zéro, l'entrée part.
+        /// </summary>
+        private static readonly Dictionary<string, int> InFlightRefs =
+            new Dictionary<string, int>(StringComparer.Ordinal);
+
         private const float InFlightSeconds = 10f;
 
         private static ManualLogSource _log;
@@ -247,6 +254,10 @@ namespace Coop.Client
                 if (Ledger.TryRefuse(result.RequestId, out _))
                 {
                     _refused++;
+
+                    // Seule une demande passée par le garde a armé une protection : la lever pour un refus
+                    // venu d'ailleurs (rafale brute de la sonde) découragerait un craft encore en attente.
+                    ReleaseCost(tech);
                 }
 
                 _log?.LogWarning(
@@ -271,6 +282,7 @@ namespace Coop.Client
                 // Jeton armé pour une instance perdue (monde déchargé) : le retirer plutôt que le laisser
                 // autoriser un craft ultérieur de cette instance recyclée par Unity.
                 Ledger.ConsumeApproval(pending.InstanceId);
+                ReleaseCost(tech);
                 _log?.LogWarning(
                     $"[craft] accord de '{tech}' (requête {result.RequestId}) pour une instance perdue — " +
                     "la reprise n'a rien à rejouer.");
@@ -292,6 +304,13 @@ namespace Coop.Client
                     _log?.LogWarning(
                         $"[craft] la reprise de '{tech}' a été refusée par le jeu (recette non satisfaite " +
                         $"localement ?) — le registre est déjà débité (échecs={_replayFailed}).");
+                }
+                else
+                {
+                    // `PerformAction` consomme les ressources **avant** de démarrer (`GhostCrafter.Craft`),
+                    // donc à ce point le jeu a payé : garder la protection 10 s de plus ne protégerait
+                    // qu'un matériau déjà parti, et retarderait la réconciliation sans raison.
+                    ReleaseCost(tech);
                 }
             }
             catch (Exception exception)
@@ -333,11 +352,67 @@ namespace Coop.Client
             Ledger.Clear();
             Instances.Clear();
             SentAt.Clear();
+            InFlightCosts.Clear();
+            InFlightRefs.Clear();
 
             if (pending > 0)
             {
                 _log?.LogInfo(
                     $"[craft] {pending} demande(s) en attente oubliée(s) à la fermeture de session.");
+            }
+        }
+
+        /// <summary>
+        /// Lève la protection d'une recette dont la demande a été **refusée** : le préfixe a bloqué avant
+        /// toute consommation, donc la fenêtre de 10 s ne protège plus rien et ne ferait que retarder la
+        /// réconciliation sur ce matériau. Deux recettes peuvent partager un ingrédient : la protection ne
+        /// part qu'à la dernière référence, sinon un refus découvrirait un craft encore en attente.
+        /// </summary>
+        private static void ReleaseCost(TechType techType)
+        {
+            List<string> released = null;
+
+            try
+            {
+                var ingredients = TechData.GetIngredients(techType);
+                if (ingredients == null)
+                {
+                    return;
+                }
+
+                foreach (var ingredient in ingredients)
+                {
+                    var name = ingredient.techType.ToString();
+                    if (string.IsNullOrEmpty(name) || !InFlightRefs.TryGetValue(name, out var refs))
+                    {
+                        continue;
+                    }
+
+                    if (refs > 1)
+                    {
+                        InFlightRefs[name] = refs - 1;
+                        continue;
+                    }
+
+                    InFlightRefs.Remove(name);
+                    InFlightCosts.Remove(name);
+                    released ??= new List<string>();
+                    released.Add(name);
+                }
+            }
+            catch (Exception exception)
+            {
+                _log?.LogWarning(
+                    $"[craft] levée de protection de '{techType}' illisible ({exception.GetType().Name}) — " +
+                    "les matériaux resteront protégés jusqu'à l'expiration.");
+                return;
+            }
+
+            if (released != null && released.Count > 0)
+            {
+                _log?.LogInfo(
+                    $"[craft] protection levée : {string.Join(", ", released)} (consommation locale faite ou " +
+                    "refus : rien ne reste à protéger) — la réconciliation peut de nouveau agir sur ce matériau.");
             }
         }
 
@@ -369,10 +444,8 @@ namespace Coop.Client
                 if (ingredients == null)
                 {
                     return;
-                }
-
-                var expiresAt = UnityEngine.Time.realtimeSinceStartup + InFlightSeconds;
-                var protectedNames = new List<string>(ingredients.Count);
+                }                    var expiresAt = UnityEngine.Time.realtimeSinceStartup + InFlightSeconds;
+                    var protectedNames = new List<string>(ingredients.Count);
 
                 foreach (var ingredient in ingredients)
                 {
@@ -380,6 +453,8 @@ namespace Coop.Client
                     if (!string.IsNullOrEmpty(name))
                     {
                         InFlightCosts[name] = expiresAt;
+                        InFlightRefs.TryGetValue(name, out var refs);
+                        InFlightRefs[name] = refs + 1;
                         protectedNames.Add(name);
                     }
                 }

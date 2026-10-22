@@ -5178,3 +5178,40 @@ argument — aucune horloge, donc aucun flottement.
   observé pour la calibrer.
 - Il ne dit rien du coût d'un refus (lecture de recette évitée, écriture de journal) : seule la cadence
   logique est comptée.
+
+## 76. Une protection de matériaux qui ne survit pas à sa raison d'être (2026-10-22)
+
+Le §74 rendait la protection visible ; elle restait armée **10 s** après l'interception, quel que soit le
+sort de la demande. Or elle ne protège que d'une chose : que la réconciliation retire le matériau **avant**
+que le jeu ne le consomme. Une fois le refus connu (rien n'a été consommé) ou la reprise faite
+(`GhostCrafter.Craft` consomme **avant** de démarrer), il n'y a plus rien à protéger — et garder la fenêtre
+ouverte ne fait que retarder la réconciliation sur ce matériau.
+
+### 76.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| levée de protection | `Coop.Client/CraftGuard.cs` (`ReleaseCost`) | appelée sur **refus** (seulement si la demande venait du garde : une rafale brute de la sonde n'a rien armé) et sur **reprise réussie** ; une reprise refusée par le jeu garde la protection, puisque les matériaux sont toujours là |
+| références par matériau | `Coop.Client/CraftGuard.cs` (`InFlightRefs`) | deux recettes peuvent partager un ingrédient : un refus ne découvre que **sa** référence, et la dernière levée retire l'entrée ; `Clear()` oublie aussi ces deux tables (elles survivaient à la session) |
+| journal | `Coop.Client/CraftGuard.cs` | `[craft] protection levée : Titanium (consommation locale faite ou refus : rien ne reste à protéger) — la réconciliation peut de nouveau agir sur ce matériau.` |
+| harnais | `tools/verify.sh` (**AE**, **AD**) | `expect` sur `protection levée : [A-Za-z]+` en Survie, `expect_missing` en Créatif (aucune protection armée, donc rien à lever) |
+
+### 76.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `check-verify-assertions.sh` | rc=0 — 31 étapes, fixtures AE/AD au nouveau format, 20 échecs nommés |
+| étape **AD** (Créatif, 54 s) | **OK** — `mode='Créatif' … coût retiré par la réconciliation=1` ; `grep -c "matériaux protégés\|protection levée"` = **0** |
+| étape **AE** (Survie, 55 s) | **OK** — `matériaux protégés 10 s : Titanium` à 17:54:22.158, `accord du serveur … (décision en 27.3 ms)`, `protection levée : Titanium` à 17:54:22.189 (31 ms plus tard, après la consommation du jeu), puis seconde demande : protection armée, **refus** `MissingMaterial` et `protection levée` **avant** la ligne de refus ; verdict `matériaux consommés=True, coût retiré par la réconciliation=0, attente de l'accord=27.1 ms (min=27.1, max=27.3) … verdict=True` |
+| étape **AE**, cadence | **OK** — `[sonde] cadence : demandes=12 refus de cadence=4 … verdict=True` |
+| première tentative | **AE rouge** : l'assertion attendait une levée au refus, mais la protection du **premier** craft (accordé) était encore armée → la levée ne faisait que décrémenter (références). C'est ce qui a mené à lever aussi après une reprise réussie |
+
+### 76.3 Ce que ce lot ne prouve pas
+
+- **La fenêtre reste la seule borne** quand la décision n'arrive jamais (client qui perd la connexion entre
+  l'interception et la réponse) : la protection expire alors au bout de 10 s sans avoir servi.
+- **Aucun test hors jeu de `ReleaseCost`** : la logique vit dans `Coop.Client` (Unity, `TechData`), donc seule
+  la sonde en jeu la couvre — un cas « deux recettes partageant un ingrédient » n'est pas exercé.
+- **`Clear()` n'est toujours pas exercé en jeu** : la dette du §72.3 reste ouverte (les deux tables sont
+  désormais vidées, mais aucune étape ne ferme une session avec une protection armée).
