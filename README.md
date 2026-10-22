@@ -7,7 +7,7 @@ LiteNetLib, protocole binaire maison **v21**, tick serveur à **20 Hz**.
 L'architecture et l'historique des mesures vivent dans `PLAN.md`. La politique d'autorité système
 par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai aujourd'hui.
 
-## État au 2026-10-21
+## État au 2026-10-22
 
 **Mesuré en jeu, avec instrument :**
 
@@ -33,7 +33,10 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   **atomiquement** sur son registre et refuse en nommant le manque ; l'**action du fabricator**
   (`Crafter.PerformAction`, celle que le bouton du menu déclenche) attend cet accord avant de consommer
   l'énergie ou les matériaux, puis le craft est rejoué — le produit, lui, reste fabriqué par le client ;
-  une rafale de demandes est refusée nommément par le serveur (`RateLimited`) ;
+  une rafale de demandes est refusée nommément par le serveur (`RateLimited`) ; la **protection des
+  matériaux** pendant la reprise est tracée, levée dès que le craft est joué ou refusé, un retrait tombé
+  dans cette fenêtre est **reporté puis repris à la levée**, et la **purge de fin de session** est
+  exercée en jeu (`PLAN.md` §74–§81) ;
 - sauvegarde : le client n'écrit pas (garde sur deux remparts), l'hôte écrit toujours ;
 - hôte dédié : aucun personnage joueur exposé aux clients ;
 - **empreinte de sauvegarde (P0)** : handshake v13 accepté avec `save=slot=…` ; étape P verte ;
@@ -62,7 +65,7 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
   de l'avatar du pair).
 
-**Reste non mesuré en jeu :** la **session de 30 min** (P4), la marche (pas de terre ferme près de la
+**Reste non mesuré en jeu :** la **session de 30 min** (P4), une coïncidence **spontanée** d'un retrait tombé dans la fenêtre de protection (la sonde la force, `PLAN.md` §78.3), la marche (pas de terre ferme près de la
 capsule de test), plus de 8 joueurs, et des sauvegardes ou zones différentes ; la désynchronisation des
 véhicules et des avatars n'est pas mesurée non plus (`PLAN.md` §62.4).
 
