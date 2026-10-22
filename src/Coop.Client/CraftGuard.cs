@@ -42,11 +42,14 @@ namespace Coop.Client
     {
         private const string HarmonyId = "coop.subnautica.client.craft";
 
-        private static readonly Dictionary<ushort, PendingCraft> Pending =
-            new Dictionary<ushort, PendingCraft>();
+        /// <summary>
+        /// Demandes en attente, indexées par **id de requête**, avec un jeton d'approbation par instance.
+        /// Pur, donc testé hors jeu : deux crafts de la même recette ne se recouvrent plus.
+        /// </summary>
+        private static readonly CraftRequestLedger Ledger = new CraftRequestLedger();
 
-        /// <summary>Technologies approuvées dont la reprise n'a pas encore été jouée.</summary>
-        private static readonly HashSet<ushort> Approved = new HashSet<ushort>();
+        /// <summary>Instances par id, pour rejouer l'action sur celle qui a demandé (références Unity).</summary>
+        private static readonly Dictionary<int, Crafter> Instances = new Dictionary<int, Crafter>();
 
         /// <summary>
         /// Noms de matériaux dont le prélèvement local est **en cours** : la réconciliation ne doit pas les
@@ -63,11 +66,6 @@ namespace Coop.Client
         private static int _replayed;
         private static int _refused;
         private static int _replayFailed;
-
-        private sealed class PendingCraft
-        {
-            public Crafter Instance;
-        }
 
         public static int BlockedCount => _blocked;
         public static int ReplayedCount => _replayed;
@@ -159,7 +157,10 @@ namespace Coop.Client
         /// </summary>
         private static bool Intercept(Crafter __instance, TechType techType, ref bool __result)
         {
-            if (Approved.Remove((ushort)techType))
+            var instanceId = __instance.GetInstanceID();
+
+            // Reprise approuvée : le jeton vaut pour **cette** instance, une seule fois.
+            if (Ledger.ConsumeApproval(instanceId))
             {
                 return true;
             }
@@ -172,7 +173,8 @@ namespace Coop.Client
                 return true;
             }
 
-            if (network.SendCraftRequest((ushort)techType) == 0)
+            var requestId = network.SendCraftRequest((ushort)techType);
+            if (requestId == 0)
             {
                 // Pas de connexion au moment du geste : laisser le jeu faire ce qu'il faisait avant le mod
                 // vaut mieux qu'un fabricator muet. C'est dit, et compté comme un craft non arbitré.
@@ -181,7 +183,17 @@ namespace Coop.Client
                 return true;
             }
 
-            Pending[(ushort)techType] = new PendingCraft { Instance = __instance };
+            if (!Ledger.Add(requestId, instanceId, (ushort)techType))
+            {
+                // Bloquer sans pouvoir rejouer laisserait un fabricator muet : on laisse passer ce craft
+                // **et on le dit**. La borne (64) rend ce cas inatteignable en pratique.
+                _log?.LogError(
+                    $"[craft] '{techType}' non compté (requête {requestId} : table pleine ou id inattendu) — " +
+                    "ce craft passe sans arbitrage du serveur.");
+                return true;
+            }
+
+            Instances[instanceId] = __instance;
 
             RememberCost(techType);
             _blocked++;
@@ -191,7 +203,7 @@ namespace Coop.Client
 
             _log?.LogInfo(
                 $"[craft] interception : '{techType}' bloqué avant consommation, en attente du serveur " +
-                $"(bloqués={_blocked}).");
+                $"(requête {requestId}, bloqués={_blocked}).");
             return false;
         }
 
@@ -210,35 +222,48 @@ namespace Coop.Client
 
             if (!result.Granted)
             {
-                Pending.Remove(result.TechType);
-                _refused++;
+                if (Ledger.TryRefuse(result.RequestId, out _))
+                {
+                    _refused++;
+                }
+
                 _log?.LogWarning(
                     $"[craft] refus du serveur : '{tech}' ({result.Outcome}" +
                     (result.MissingTechType != 0
                         ? $", manque TechType {result.MissingTechType} ×{result.MissingAmount}"
                         : string.Empty) +
-                    ") — rien n'a été consommé localement.");
+                    $") — rien n'a été consommé localement (requête {result.RequestId}).");
                 return;
             }
 
-            if (!Pending.TryGetValue(result.TechType, out var pending) || pending.Instance == null)
+            if (!Ledger.TryApprove(result.RequestId, result.TechType, out var pending))
             {
                 _log?.LogWarning(
-                    $"[craft] accord de '{tech}' sans appel en attente — la reprise n'a rien à rejouer.");
+                    $"[craft] accord de '{tech}' (requête {result.RequestId}) sans demande en attente ou " +
+                    "recette incohérente — la reprise n'a rien à rejouer.");
                 return;
             }
 
-            Pending.Remove(result.TechType);
-            Approved.Add(result.TechType);
+            if (!Instances.TryGetValue(pending.InstanceId, out var instance) || instance == null)
+            {
+                // Jeton armé pour une instance perdue (monde déchargé) : le retirer plutôt que le laisser
+                // autoriser un craft ultérieur de cette instance recyclée par Unity.
+                Ledger.ConsumeApproval(pending.InstanceId);
+                _log?.LogWarning(
+                    $"[craft] accord de '{tech}' (requête {result.RequestId}) pour une instance perdue — " +
+                    "la reprise n'a rien à rejouer.");
+                return;
+            }
+
             _replayed++;
 
             _log?.LogInfo(
                 $"[craft] accord du serveur : '{tech}' — reprise du craft local sur le fabricator " +
-                $"(reprises={_replayed}).");
+                $"(requête {result.RequestId}, reprises={_replayed}).");
 
             try
             {
-                var started = ((ITreeActionReceiver)pending.Instance).PerformAction(tech);
+                var started = ((ITreeActionReceiver)instance).PerformAction(tech);
                 if (!started)
                 {
                     _replayFailed++;

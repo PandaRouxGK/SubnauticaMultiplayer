@@ -33,6 +33,7 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   **atomiquement** sur son registre et refuse en nommant le manque ; l'**action du fabricator**
   (`Crafter.PerformAction`, celle que le bouton du menu déclenche) attend cet accord avant de consommer
   l'énergie ou les matériaux, puis le craft est rejoué — le produit, lui, reste fabriqué par le client ;
+  une rafale de demandes est refusée nommément par le serveur (`RateLimited`) ;
 - sauvegarde : le client n'écrit pas (garde sur deux remparts), l'hôte écrit toujours ;
 - hôte dédié : aucun personnage joueur exposé aux clients ;
 - **empreinte de sauvegarde (P0)** : handshake v13 accepté avec `save=slot=…` ; étape P verte ;

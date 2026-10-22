@@ -530,6 +530,11 @@ s'appuierait dessus n'aurait aucune valeur opposable.
    (`Coop.Model/InventoryReconciliation.cs`). L'inverse (serveur > jeu) n'est **pas** corrigé par une
    création d'objet : il est compté et journalisé.
 
+9. **(v21) La cadence des demandes est bornée par un seau à jetons** (`CraftBudget` : `8` en rafale, puis
+   `1` par `500 ms`, soit ~`120`/min). Le contrôle vient **avant** toute lecture de recette ; le refus est
+   nommé (`CraftOutcome.RateLimited`) et **daté** (`cadence : N ms avant le prochain jeton`), la révision
+   ne bouge pas. Le seau est par session : il repart plein à la reconnexion.
+
 Ce qui **n'est pas** fait : aucun autre consommateur du jeu (nourriture, dépôt, récolte) n'appelle encore le débit ; le **fabricator**, lui, est patché — `Crafter.PerformAction` (l'action du bouton) est interceptée avant consommation, énergie comprise, et rejouée sur accord (#32/#33), donc le menu ne fabrique plus gratuitement ; le produit reste **instancié par le client**, jamais par le serveur ; les objets **équipés** (hors de `Inventory.main.container`) ne sont pas réconciliés ni comptés à
 l'adoption ; le registre ne connaît ni les emplacements ni les tailles de pile du jeu. Les étapes AB, AC et
 **AD** mesurent que le registre **dit la vérité sur le ramassage**, qu'un débit accordé **vide le monde**

@@ -293,6 +293,23 @@ namespace Coop.Server
             session.CraftRequests++;
             var tech = (TechType)message.TechType;
 
+            // Cadence avant tout le reste : une boucle de demandes ne doit pas coûter une lecture de recette
+            // et une ligne de journal par message. Le refus est nommé et daté, la révision ne bouge pas.
+            if (!session.CraftBudget.TryTake(ServerClock.Milliseconds, out var retryAfterMs))
+            {
+                RefuseCraft(
+                    peer,
+                    session,
+                    message,
+                    tech,
+                    CraftOutcome.RateLimited,
+                    0,
+                    0,
+                    $"cadence : {retryAfterMs} ms avant le prochain jeton (rafale {session.CraftBudget.Burst}, " +
+                    $"1 par {session.CraftBudget.RefillMs} ms)");
+                return;
+            }
+
             // La recette vient du **jeu**, pas du client : `TechData.GetIngredients` est la source que le
             // fabricator utilise lui-même (vérifié sur `Assembly-CSharp` : `ReadOnlyCollection<Ingredient>`,
             // chaque `Ingredient` portant `techType` et `amount`).

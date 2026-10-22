@@ -37,6 +37,12 @@ namespace Coop.Model
 
         /// <summary>Recette illisible : nom trop long, quantité hors bornes.</summary>
         Invalid = 4,
+
+        /// <summary>
+        /// Cadence : trop de demandes en rafale (seau à jetons du serveur). Rien n'est débité, la révision
+        /// ne bouge pas ; le client peut redemander après `CraftBudget.DefaultRefillMs`.
+        /// </summary>
+        RateLimited = 5,
     }
 
     /// <summary>Issue d'une mutation de l'inventaire serveur.</summary>

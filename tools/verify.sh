@@ -682,6 +682,10 @@ assert_ad() {
         "l'accord du serveur rejoue le craft sur l'instance interceptée"
     expect AD "$client" "\\[sonde\\] craft : .*verdict=True" \
         "la sonde conclut True : bloqué, accordé, produit apparu, refus nommé sans effet"
+    expect AD "$client" "\\[sonde\\] cadence : .*verdict=True" \
+        "une rafale de demandes est refusée par la cadence, sans coupure"
+    expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence : [1-9][0-9]* ms" \
+        "le serveur nomme et date le refus de cadence"
 }
 
 assert_ae() {
@@ -705,6 +709,10 @@ assert_ae() {
         "les matériaux sont réellement partis de Inventory.main"
     expect AE "$client" "\\[sonde\\] craft : .*verdict=True" \
         "la sonde conclut True en Survie : bloqué, accordé, rejoué, produit apparu, refus nommé"
+    expect AE "$client" "\\[sonde\\] cadence : .*verdict=True" \
+        "la cadence refuse une rafale, même en Survie"
+    expect AE "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence :" \
+        "le refus de cadence est nommé côté serveur, en Survie"
     expect_missing AE "$client" "mode sans ingrédients" \
         "aucune exemption Créatif : le jeu exige et consomme les ingrédients"
 }

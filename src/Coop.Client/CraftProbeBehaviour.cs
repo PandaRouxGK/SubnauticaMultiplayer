@@ -299,6 +299,46 @@ namespace Coop.Client
                     $"rien après refus={untouchedAfterRefusal}, " +
                     $"échecs de réconciliation={client.InventoryReconciliationFailures}.");
             }
+
+            // 5. **Cadence** (v21) : une rafale de demandes brutes doit être refusée **nommément** par le
+            //    serveur. Ces demandes ne passent pas par le garde — c'est justement le serveur qui borne,
+            //    et le refus doit être lisible (`RateLimited`), pas une coupure.
+            var rateLimitedBefore = client.CraftsRateLimited;
+            var requestsSent = 0;
+
+            for (var index = 0; index < 12; index++)
+            {
+                if (client.SendCraftRequest((ushort)tech) != 0)
+                {
+                    requestsSent++;
+                }
+            }
+
+            var burstDeadline = Time.realtimeSinceStartup + 3f;
+            while (client.CraftsRateLimited == rateLimitedBefore && Time.realtimeSinceStartup < burstDeadline)
+            {
+                yield return new WaitForSecondsRealtime(0.25f);
+            }
+
+            var rateLimited = client.CraftsRateLimited - rateLimitedBefore;
+            var cadenceVerdict = requestsSent > 0 && rateLimited > 0;
+
+            Log.LogInfo(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[sonde] cadence : demandes={0} refus de cadence={1} (rafale {2}, 1 par {3} ms) — verdict={4}",
+                    requestsSent,
+                    rateLimited,
+                    CraftBudget.DefaultBurst,
+                    CraftBudget.DefaultRefillMs,
+                    cadenceVerdict));
+
+            if (!cadenceVerdict)
+            {
+                Log.LogError(
+                    $"[sonde] cadence : verdict=False — {requestsSent} demande(s) partie(s), " +
+                    $"{rateLimited} refus de cadence reçu(s) (attendu ≥ 1).");
+            }
         }
 
         /// <summary>

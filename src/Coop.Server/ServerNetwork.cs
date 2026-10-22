@@ -64,6 +64,12 @@ namespace Coop.Server
             public long CraftsGranted;
             public long CraftsRefused;
 
+            /// <summary>
+            /// Cadence des demandes de craft (v21) : le coût est déjà borné par le registre, le **rythme**
+            /// ne l'était pas. Un seau à jetons par session, remis à neuf à chaque connexion.
+            /// </summary>
+            public readonly CraftBudget CraftBudget = new CraftBudget();
+
             // Dernier état de position reçu du joueur (ou position de spawn initiale).
             public uint LastPositionSequence;
             public float X;

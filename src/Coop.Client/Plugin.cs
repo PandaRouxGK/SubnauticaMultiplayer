@@ -810,6 +810,7 @@ namespace Coop.Client
         private int _craftResults;
         private int _craftsGranted;
         private int _craftsRefused;
+        private int _craftsRateLimited;
         private CraftOutcome _lastCraftOutcome;
         private ushort _lastCraftTech;
         private ushort _lastCraftMissingTech;
@@ -822,6 +823,9 @@ namespace Coop.Client
         internal int CraftResults => _craftResults;
         internal int CraftsGranted => _craftsGranted;
         internal int CraftsRefused => _craftsRefused;
+
+        /// <summary>Refus de **cadence** reçus (v21) : le serveur borne le rythme des demandes.</summary>
+        internal int CraftsRateLimited => _craftsRateLimited;
         internal CraftOutcome LastCraftOutcome => _lastCraftOutcome;
         internal ushort LastCraftTech => _lastCraftTech;
         internal ushort LastCraftMissingTech => _lastCraftMissingTech;
@@ -1996,6 +2000,11 @@ namespace Coop.Client
                     else
                     {
                         _craftsRefused++;
+
+                        if (result.Outcome == CraftOutcome.RateLimited)
+                        {
+                            _craftsRateLimited++;
+                        }
                     }
 
                     // La reprise du craft local est **faite ici**, sur le thread principal, avant que

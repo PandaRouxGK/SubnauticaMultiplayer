@@ -5031,3 +5031,46 @@ trouvé un défaut de produit : le garde était posé **sous** le point de conso
 - **Le produit reste local** : le serveur arbitre le coût, le client fabrique ; deux joueurs peuvent avoir
   chacun le leur.
 - **Aucun remboursement** si la reprise échoue, et **latence non chronométrée**.
+
+## 72. Deux crafts de la même recette, et une cadence nommée (2026-10-22)
+
+Après la mesure en Survie (§71), deux dettes restaient dans le lot craft : la comptabilité des demandes
+était indexée par **TechType** (deux crafts de la même recette se recouvraient, et un jeton d'approbation
+valait pour n'importe quelle instance de cette recette), et le serveur n'avait **aucune borne de rythme**
+— seul le coût était borné, par l'inventaire.
+
+### 72.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| registre des demandes | `Coop.Model/CraftRequestLedger.cs` | une demande par **id de requête** (celui que le serveur renvoie), un **jeton d'approbation par instance** ; id inconnu, recette incohérente, doublon d'id ou table pleine (64) sont refusés sans armer de jeton ; `Clear()` pour une nouvelle session |
+| garde | `Coop.Client/CraftGuard.cs` | consomme le jeton de **son** instance au préfixe ; une réponse ne rejoue que l'instance qui a demandé ; une instance perdue retire son jeton au lieu de le laisser traîner |
+| cadence serveur | `Coop.Model/CraftBudget.cs` | seau à jetons **entier** (milli-jetons) : 8 en rafale, puis 1 par 500 ms (~120/min) ; le refus rend le délai d'attente |
+| refus nommé | `CraftOutcome.RateLimited = 5` (`PlayerInventory.cs`) | nouveau motif, transporté par `CraftResult` (#33) ; révision inchangée, rien n'est débité |
+| branchement | `ServerNetwork.Inventory.cs` (`HandleCraftRequest`) | la cadence est testée **avant** toute lecture de recette ; le journal nomme et date le refus (`cadence : N ms avant le prochain jeton`) |
+| sonde | `CraftProbeBehaviour` | après la mesure du craft, envoie **12 demandes brutes** (hors garde) et compte les refus `RateLimited` |
+| harnais | étapes **AD** et **AE** | deux assertions de plus chacune : verdict de cadence côté client, refus nommé côté serveur |
+
+Le seau est en arithmétique entière : le premier jet était en `double`, et un test a montré qu'une recharge
+partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi flottant).
+
+### 72.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `dotnet test` | **423/423** rc=0 — dont 12 tests `CraftRequestLedger` et 7 `CraftBudget` (dont l'aller-retour de `RateLimited`) |
+| étape **AD** (Créatif) | **OK (56 s)** — craft inchangé, puis `[sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True` ; serveur `REFUSÉ (RateLimited : cadence : 499 ms avant le prochain jeton (rafale 8, 1 par 500 ms)) — révision 3 inchangée.` |
+| étape **AE** (Survie) | **OK (56 s)** — le craft consomme toujours réellement le matériau, et la cadence nomme sa rafale |
+
+### 72.3 Ce que ce lot ne prouve pas
+
+- **La cadence n'est mesurée qu'en rafale de 12** sur un seul client ; le régime établi (~120/min) n'est pas
+  chronométré, et la constante n'a pas été choisie par mesure d'usage — c'est une borne de sécurité.
+- **Le seau vit en mémoire** : il repart plein à la reconnexion, ce qui est voulu (nouvelle session) mais
+  n'empêche pas un client de se reconnecter en boucle pour contourner le rythme (le handshake reste borné
+  par le reste du protocole).
+- **Le registre des demandes ne survit pas à une déconnexion** : les demandes en attente sont simplement
+  perdues, et le jeu n'a rien consommé pour elles (`Clear()` n'est pas encore branché sur la fermeture de
+  session — la perte est bénigne, mais elle n'est pas exercée).
+- **Rien de nouveau côté contenu** : `RocketConstructor` reste hors du garde, et le produit reste local.
