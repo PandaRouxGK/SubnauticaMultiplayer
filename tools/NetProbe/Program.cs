@@ -1312,6 +1312,54 @@ namespace NetProbe
                 incoherentDebitResultThrew,
                 "InventoryDebitResult (accord contredit par l'issue) -> ProtocolException à la lecture");
 
+            // Adoption et craft (v21) : la forme de l'inventaire initial, la demande, et le refus nommé.
+            var adopt = new InventoryAdoptMessage
+            {
+                Entries = new[]
+                {
+                    new InventoryEntry("Copper", 2),
+                    new InventoryEntry("Titanium", 10),
+                },
+            };
+            var adoptReader = new PacketReader(MessageCodec.Encode(adopt.Write));
+            Check(adoptReader.ReadByte() == (byte)MessageType.InventoryAdopt, "opcode InventoryAdopt");
+            var adoptRt = InventoryAdoptMessage.Read(adoptReader);
+            Check(
+                adoptRt.Entries.Length == 2
+                && adoptRt.Entries[0].TechTypeName == "Copper"
+                && adoptRt.Entries[0].Count == 2
+                && adoptRt.Entries[1].TechTypeName == "Titanium",
+                "round-trip InventoryAdopt (contenu et tri conservés)");
+
+            var request = new CraftRequestMessage { RequestId = 9, TechType = 66 };
+            var requestReader = new PacketReader(MessageCodec.Encode(request.Write));
+            Check(requestReader.ReadByte() == (byte)MessageType.CraftRequest, "opcode CraftRequest");
+            var requestRt = CraftRequestMessage.Read(requestReader);
+            Check(
+                requestRt.RequestId == 9 && requestRt.TechType == 66,
+                "round-trip CraftRequest (identifiant de demande et type conservés)");
+
+            var craftResult = new CraftResultMessage
+            {
+                RequestId = 9,
+                TechType = 66,
+                Granted = false,
+                Outcome = CraftOutcome.NotEnoughMaterial,
+                MissingTechType = 12,
+                MissingAmount = 2,
+                Revision = 5,
+            };
+            var craftResultReader = new PacketReader(MessageCodec.Encode(craftResult.Write));
+            Check(craftResultReader.ReadByte() == (byte)MessageType.CraftResult, "opcode CraftResult");
+            var craftResultRt = CraftResultMessage.Read(craftResultReader);
+            Check(
+                !craftResultRt.Granted
+                && craftResultRt.Outcome == CraftOutcome.NotEnoughMaterial
+                && craftResultRt.MissingTechType == 12
+                && craftResultRt.MissingAmount == 2
+                && craftResultRt.Revision == 5,
+                "round-trip CraftResult (manque nommé, révision conservée)");
+
             // Décodage UTF-8 strict : un paquet malformé est refusé, un emoji valide passe.
             var invalidUtf8Threw = false;
             try

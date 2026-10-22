@@ -8,6 +8,12 @@ namespace Coop.Model
         /// <summary>
         /// Version du protocole. Un client d'une autre version est refusé au handshake.
         ///
+        /// **21** : l'**inventaire persistant** et le **craft payé**. Le serveur adopte une fois l'inventaire
+        /// réel du joueur (`InventoryAdopt` #31), le conserve sur disque pour la session, et vérifie le
+        /// coût d'un craft (`CraftRequest` #32 / `CraftResult` #33) sur **les recettes du jeu** avant de
+        /// débiter le registre ; un matériau manquant est nommé. Le produit reste fabriqué par le client :
+        /// ce lot arbitre le **coût**, pas encore l'instanciation.
+        ///
         /// **20** : le **débit** de l'inventaire serveur (`InventoryDebit` #28 / `InventoryDebitResult` #29),
         /// et la **réconciliation** chez le client. Un client peut désormais demander qu'une quantité
         /// quitte **son** registre (consommation, dépôt) — le serveur refuse nommément ce qu'il ne tient
@@ -68,13 +74,13 @@ namespace Coop.Model
         /// et laisserait les Seamoth du serveur chez lui, immobiles et simulés localement — le refus au
         /// handshake est préférable à cette divergence silencieuse.
         /// </summary>
-        public const int Version = 20;
+        public const int Version = 21;
 
         /// <summary>Port UDP par défaut du serveur.</summary>
         public const int DefaultPort = 7777;
 
         /// <summary>Clé de connexion LiteNetLib : filtre les paquets parasites avant même le handshake.</summary>
-        public const string ConnectionKey = "coop-subnautica-v20";
+        public const string ConnectionKey = "coop-subnautica-v21";
 
         public const int MaxUsernameLength = 32;
         public const int MaxClients = 10;
@@ -521,6 +527,30 @@ namespace Coop.Model
         /// l'objet a été consommé alors que le registre ne l'a jamais contenu.
         /// </summary>
         InventoryDebitResult = 29,
+
+        /// <summary>
+        /// Demande d'**adoption** de l'inventaire (v21), du serveur vers un joueur qui vient d'être admis.
+        ///
+        /// Le serveur ne peut pas lire la sauvegarde d'un client : c'est le client qui envoie, **une fois**,
+        /// ce que `Inventory.main` contient. Sans cette adoption, le registre ne verrait que les objets
+        /// ramassés pendant la session et refuserait de payer un craft avec des matériaux sauvegardés.
+        /// </summary>
+        InventoryAdoptionRequest = 30,
+
+        /// <summary>
+        /// Inventaire initial d'un joueur (v21), en réponse à une demande d'adoption. Bornes et tri sont
+        /// ceux de l'instantané : c'est la même vérité, dans l'autre sens.
+        /// </summary>
+        InventoryAdopt = 31,
+
+        /// <summary>
+        /// Demande de **craft** (v21). Le client ne paie rien lui-même : il demande, le serveur lit la
+        /// recette du jeu, vérifie le registre et débite — ou refuse en nommant le matériau manquant.
+        /// </summary>
+        CraftRequest = 32,
+
+        /// <summary>Décision du serveur sur un craft, au seul demandeur (v21).</summary>
+        CraftResult = 33,
     }
 
     /// <summary>

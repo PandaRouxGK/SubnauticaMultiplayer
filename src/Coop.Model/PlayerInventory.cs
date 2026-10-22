@@ -17,6 +17,28 @@ namespace Coop.Model
         public int Count { get; }
     }
 
+    /// <summary>
+    /// Issue d'une **demande de craft** (v21). Elle est distincte de <see cref="InventoryChangeOutcome"/> :
+    /// un craft peut échouer parce que la recette n'existe pas, ce que le registre ne sait pas dire.
+    /// </summary>
+    public enum CraftOutcome : byte
+    {
+        /// <summary>La recette existe et le coût a été débité : la révision avance de un.</summary>
+        Applied = 0,
+
+        /// <summary>Aucune recette connue pour ce `TechType` (ou recette vide).</summary>
+        UnknownRecipe = 1,
+
+        /// <summary>Le registre ne contient pas un des matériaux (`MissingTechType` le nomme).</summary>
+        MissingMaterial = 2,
+
+        /// <summary>Les matériaux sont là, mais en quantité insuffisante (`MissingAmount` dit combien il manque).</summary>
+        NotEnoughMaterial = 3,
+
+        /// <summary>Recette illisible : nom trop long, quantité hors bornes.</summary>
+        Invalid = 4,
+    }
+
     /// <summary>Issue d'une mutation de l'inventaire serveur.</summary>
     public enum InventoryChangeOutcome
     {
@@ -151,6 +173,144 @@ namespace Coop.Model
 
             Revision++;
             return InventoryChangeOutcome.Applied;
+        }
+
+        /// <summary>
+        /// Retire **plusieurs** matériaux d'un coup, ou aucun (v21, coût de craft).
+        ///
+        /// L'atomicité n'est pas un confort : un craft qui débiterait le titane puis découvrirait que le
+        /// verre manque laisserait le joueur payé pour rien. Toutes les quantités sont donc vérifiées
+        /// **avant** la première suppression, et un échec laisse le registre intact (révision comprise).
+        ///
+        /// Le premier manque est nommé dans `missingName`/`missingNeeded`/`missingHave` : un refus sans nom
+        /// obligerait le client à deviner ce qui bloque.
+        /// </summary>
+        public InventoryChangeOutcome RemoveMany(
+            InventoryEntry[] costs,
+            out string missingName,
+            out int missingNeeded,
+            out int missingHave)
+        {
+            missingName = null;
+            missingNeeded = 0;
+            missingHave = 0;
+
+            if (costs == null || costs.Length == 0 || costs.Length > Protocol.MaxInventoryEntries)
+            {
+                return InventoryChangeOutcome.Invalid;
+            }
+
+            // Une recette pourrait citer deux fois le même matériau (deux lignes du jeu) : les sommer
+            // évite de vérifier chaque ligne séparément contre un registre qui ne verra que le total.
+            var totals = new Dictionary<string, int>(StringComparer.Ordinal);
+
+            foreach (var cost in costs)
+            {
+                if (!IsValidName(cost.TechTypeName) || cost.Count <= 0)
+                {
+                    return InventoryChangeOutcome.Invalid;
+                }
+
+                totals.TryGetValue(cost.TechTypeName, out var current);
+                if (current + cost.Count > Protocol.MaxInventoryStack)
+                {
+                    return InventoryChangeOutcome.Invalid;
+                }
+
+                totals[cost.TechTypeName] = current + cost.Count;
+            }
+
+            foreach (var pair in totals)
+            {
+                var have = CountOf(pair.Key);
+                if (have >= pair.Value)
+                {
+                    continue;
+                }
+
+                missingName = pair.Key;
+                missingNeeded = pair.Value;
+                missingHave = have;
+
+                return have == 0 ? InventoryChangeOutcome.UnknownItem : InventoryChangeOutcome.NotEnough;
+            }
+
+            foreach (var pair in totals)
+            {
+                var remaining = CountOf(pair.Key) - pair.Value;
+                if (remaining == 0)
+                {
+                    _items.Remove(pair.Key);
+                }
+                else
+                {
+                    _items[pair.Key] = remaining;
+                }
+            }
+
+            Revision++;
+            return InventoryChangeOutcome.Applied;
+        }
+
+        /// <summary>
+        /// Remplace tout le contenu (v21, **adoption** du joueur à l'admission).
+        ///
+        /// C'est la seule écriture qui ne provient pas d'une décision du serveur, et elle est bornée comme
+        /// un instantané : noms valides, quantités `1..MaxInventoryStack`, pas de doublon, tri ordinal. Le
+        /// tri est exigé parce que le même contenu doit avoir **une** forme : deux adoptions du même
+        /// inventaire ne doivent pas produire deux fichiers différents.
+        /// </summary>
+        public bool TryReplace(InventoryEntry[] entries, out string error)
+        {
+            error = null;
+
+            if (entries == null)
+            {
+                error = "contenu nul";
+                return false;
+            }
+
+            if (entries.Length > Protocol.MaxInventoryEntries)
+            {
+                error = $"trop d'objets ({entries.Length} > {Protocol.MaxInventoryEntries})";
+                return false;
+            }
+
+            var rebuilt = new Dictionary<string, int>(StringComparer.Ordinal);
+            string previous = null;
+
+            foreach (var entry in entries)
+            {
+                if (!IsValidName(entry.TechTypeName))
+                {
+                    error = "nom d'objet vide ou trop long";
+                    return false;
+                }
+
+                if (entry.Count <= 0 || entry.Count > Protocol.MaxInventoryStack)
+                {
+                    error = $"quantité hors bornes pour '{entry.TechTypeName}' ({entry.Count})";
+                    return false;
+                }
+
+                if (previous != null && string.CompareOrdinal(previous, entry.TechTypeName) >= 0)
+                {
+                    error = $"objets non triés ou dupliqués ('{previous}' puis '{entry.TechTypeName}')";
+                    return false;
+                }
+
+                previous = entry.TechTypeName;
+                rebuilt[entry.TechTypeName] = entry.Count;
+            }
+
+            _items.Clear();
+            foreach (var pair in rebuilt)
+            {
+                _items[pair.Key] = pair.Value;
+            }
+
+            Revision++;
+            return true;
         }
 
         /// <summary>

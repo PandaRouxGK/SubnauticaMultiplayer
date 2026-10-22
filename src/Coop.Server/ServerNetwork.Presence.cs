@@ -361,10 +361,11 @@ namespace Coop.Server
             //    d'une entité doit déjà connaître l'état du monde auquel elle se rattache.
             SendSpawnedEntities(peer, session);
 
-            // 4. Son inventaire, **à lui seul** (v19). Envoyé à l'admission même vide : le client sait
-            //    ainsi à quelle révision il en est avant le premier ramassage, au lieu de deviner s'il a
-            //    manqué un instantané pendant son chargement.
-            SendInventorySnapshot(peer, session, "admission");
+            // 4. Son inventaire, **à lui seul** (v19), mais d'abord son **adoption** (v21) : le serveur ne
+            //    peut pas lire la sauvegarde d'un client, donc il demande une fois ce que `Inventory.main`
+            //    contient. Le registre restauré du disque est déjà chargé ; l'adoption le remplace. Sans
+            //    elle, aucun craft ne pourrait être payé avec des matériaux sauvegardés (PLAN.md §69).
+            RequestInventoryAdoption(peer, session);
         }
         private byte AllocateColorIndex(bool hostInWorld)
         {

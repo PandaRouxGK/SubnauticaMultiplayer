@@ -98,6 +98,18 @@ dans la colonne de droite et n'invalident pas le critère.
 | L'hôte et le client parlent bien la **v20** (clé et version changées ensemble) | `handshake ACCEPTÉ` dans le même run AC, sans refus de version | `Protocol.Version = 20`, `ConnectionKey = coop-subnautica-v20` | prouvé (2026-10-22, étape AC) |
 | L'instantané de ramassage arrive **avant** que le jeu n'ait ajouté l'objet : un écart transitoire est journalisé, pas corrigé | `[inventaire] réconciliation : 1 objet(s) que le serveur compte et que le jeu n'a pas encore — aucune création locale (limite connue).` | `Plugin.cs` (`case InventorySnapshot`) ; `InventoryReconciliation.Compute` | observé et assumé (2026-10-22, étape AC) — la sonde attend la convergence, la réconciliation ne fabrique rien |
 
+### Inventaire adopté, conservé, et craft payé (v21, 2026-10-22)
+
+| Affirmation | Instrument | Source | Statut |
+|---|---|---|---|
+| Le serveur **adopte** l'inventaire réel du joueur au lieu d'en supposer un | `[inventaire] adoption demandée par le serveur (n°1) — différée jusqu'au chargement du monde` puis `[inventaire] adoption envoyée : 3 objet(s) [Copper ×1, FireExtinguisher ×1, Titanium ×1]` et, côté serveur, `[net] inventaire de 'killi'#1 : révision 2, 3 objet(s) (3 unité(s)) — adoption` | `ServerNetwork.Inventory.cs` (`RequestInventoryAdoption`, `HandleInventoryAdopt`) ; `InventoryAdopt` #31 | prouvé (2026-10-22, étape AD) |
+| Le registre est **conservé sur disque** et **relu** à la session suivante | `[net] inventaire : 'killi'#1 conservé sur disque (3 objet(s), 3 unité(s), révision 2) — adoption` puis, au run suivant, `[net] inventaire : 'killi'#1 restauré depuis le disque (2 objet(s), 2 unité(s)) — en attente de l'adoption` | `Coop.Model/InventoryStore.cs` ; `PersistInventory` | prouvé (2026-10-22, deux runs AD) — l'adoption reste la source au démarrage |
+| Le **coût d'une vraie recette** est prélevé sur le registre, et la révision avance | `[net] craft : 'killi'#1 -> 'Accumulator' ACCORDÉ (coût : Titanium ×1) — révision 2 -> 3.` | `HandleCraftRequest` ; `TechData.GetIngredients` ; `CraftRequest` #32 | prouvé (2026-10-22, étape AD) |
+| Le monde du client s'aligne sur le prélèvement | `[inventaire] réconciliation : 1 unité(s) retirée(s) de Inventory.main, échecs=0 (total retiré=1).` et `[sonde] craft : … matériaux retirés localement=1/1 …` | `InventoryReconciler` ; sonde `-coopdebug=craft` | prouvé (2026-10-22, étape AD) |
+| La même demande, les matériaux partis, est **refusée en nommant le manque** | `[net] craft : 'killi'#1 -> 'Accumulator' REFUSÉ (MissingMaterial : Titanium ×1 (registre 0)) — révision 3 inchangée.` et côté client `[craft] résultat : TechType 1520 REFUSÉ (MissingMaterial, manque TechType 16 ×1) — révision 3` | `CraftResult` #33 ; `PlayerInventory.RemoveMany` (atomique) | prouvé (2026-10-22, étape AD) |
+| L'adoption envoyée **avant** le chargement du monde ne déclare rien | premier run AD : `[inventaire] adoption envoyée : 0 objet(s) [vide]` alors que `Inventory.main` contenait du titane ; craft refusé `MissingMaterial` | journal du 2026-10-22, `PLAN.md` §69.3 | corrigé (2026-10-22) : adoption **différée** jusqu'au chargement |
+| Le produit n'est **pas** instancié par le serveur, et le menu de craft n'est pas patché | aucune ligne de création côté serveur ; seul le coût est décidé (verdict de sonde sur `accordé`/`refus`), et `CraftProbeBehaviour` est le seul demandeur | `src/Coop.Client/CraftProbeBehaviour.cs` ; `docs/protocol.md` §4 nonies | non implémenté (assumé, lot suivant) |
+
 ### P2 : reconnexion, mesurée avec un volant tenu (2026-10-20)
 
 | Affirmation | Instrument | Source | Statut |

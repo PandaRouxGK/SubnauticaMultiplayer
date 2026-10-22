@@ -208,6 +208,15 @@ namespace Coop.Client
                 go.AddComponent<EntitySpawnProbeBehaviour>();
             }
 
+            if (IsDebugFlagSet("craft"))
+            {
+                // v21 : le serveur lit la recette du jeu et prélève le coût sur son registre ; la sonde
+                // choisit une recette réellement satisfaite par l'inventaire local, puis la rejoue pour
+                // obtenir le refus nommé.
+                Log.LogWarning("[boot] sonde de craft activée (-coopdebug=craft).");
+                go.AddComponent<CraftProbeBehaviour>();
+            }
+
             if (IsDebugFlagSet("inventory"))
             {
                 // v19 : vérifie que le registre du serveur correspond à un ramassage réel (`-coopdebug=pickup`
@@ -780,6 +789,117 @@ namespace Coop.Client
             }
         }
 
+        // — Adoption et craft (v21) ————————————————————————————————————————————————
+        private int _inventoryAdoptionsRequested;
+        private int _inventoryAdoptionsSent;
+
+        /// <summary>
+        /// Adoption demandée par le serveur mais **différée** : `Inventory.main` n'existe qu'une fois le
+        /// monde chargé, et le handshake arrive avant. Mesuré au premier run AD : l'adoption était partie
+        /// avec `0 objet(s)` alors que le joueur avait du titane — le coût du craft était donc refusé pour
+        /// une raison qui n'avait rien à voir avec le serveur.
+        /// </summary>
+        private bool _adoptionPending;
+        private int _craftRequestsSent;
+        private int _craftResults;
+        private int _craftsGranted;
+        private int _craftsRefused;
+        private CraftOutcome _lastCraftOutcome;
+        private ushort _lastCraftTech;
+        private ushort _lastCraftMissingTech;
+        private int _lastCraftRevision = -1;
+        private int _nextCraftRequestId = 1;
+
+        internal int InventoryAdoptionsRequested => _inventoryAdoptionsRequested;
+        internal int InventoryAdoptionsSent => _inventoryAdoptionsSent;
+        internal int CraftRequestsSent => _craftRequestsSent;
+        internal int CraftResults => _craftResults;
+        internal int CraftsGranted => _craftsGranted;
+        internal int CraftsRefused => _craftsRefused;
+        internal CraftOutcome LastCraftOutcome => _lastCraftOutcome;
+        internal ushort LastCraftTech => _lastCraftTech;
+        internal ushort LastCraftMissingTech => _lastCraftMissingTech;
+        internal int LastCraftRevision => _lastCraftRevision;
+
+        /// <summary>
+        /// Envoie au serveur l'inventaire **réel** du joueur, une fois, en réponse à sa demande d'adoption
+        /// (v21). C'est la seule déclaration que le protocole accepte : bornée, triée, et le serveur la
+        /// remplace ensuite par ses propres décisions.
+        /// </summary>
+        internal bool SendInventoryAdopt()
+        {
+            if (_server == null || _server.ConnectionState != ConnectionState.Connected)
+            {
+                CoopClientPlugin.Log.LogWarning("[inventaire] adoption non envoyée : pas de connexion au serveur.");
+                return false;
+            }
+
+            var entries = InventoryReconciler.CollectLocal(out var distinct, out var truncated);
+
+            if (truncated)
+            {
+                CoopClientPlugin.Log.LogWarning(
+                    $"[inventaire] adoption tronquée : {distinct} objets distincts > {Protocol.MaxInventoryEntries} " +
+                    "— les suivants ne seront pas connus du serveur.");
+            }
+
+            _writer.Reset();
+            new InventoryAdoptMessage { Entries = entries }.Write(_writer);
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+
+            _inventoryAdoptionsSent++;
+
+            var names = entries.Length == 0
+                ? "vide"
+                : string.Join(", ", Array.ConvertAll(entries, entry => $"{entry.TechTypeName} ×{entry.Count}"));
+
+            CoopClientPlugin.Log.LogInfo(
+                $"[inventaire] adoption envoyée : {entries.Length} objet(s) [{names}] " +
+                $"— le serveur les remplace ensuite par ses décisions.");
+            return true;
+        }
+
+        /// <summary>
+        /// Demande un **craft** au serveur (v21). Le client ne prélève rien et ne fabrique rien avant la
+        /// réponse : c'est le serveur qui lit la recette et paie le coût depuis son registre.
+        ///
+        /// Rend l'identifiant de demande (`0` si rien n'est parti) pour que l'appelant puisse corréler.
+        /// </summary>
+        internal int SendCraftRequest(ushort techType)
+        {
+            if (techType == 0)
+            {
+                CoopClientPlugin.Log.LogWarning("[craft] demande non envoyée : TechType 0.");
+                return 0;
+            }
+
+            if (_server == null || _server.ConnectionState != ConnectionState.Connected)
+            {
+                CoopClientPlugin.Log.LogWarning("[craft] demande non envoyée : pas de connexion au serveur.");
+                return 0;
+            }
+
+            var requestId = _nextCraftRequestId++;
+            if (_nextCraftRequestId <= 0)
+            {
+                _nextCraftRequestId = 1;
+            }
+
+            _writer.Reset();
+            new CraftRequestMessage
+            {
+                RequestId = requestId,
+                TechType = techType,
+            }.Write(_writer);
+
+            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+            _craftRequestsSent++;
+
+            CoopClientPlugin.Log.LogInfo(
+                $"[craft] demande envoyée : TechType {techType} (requête {requestId}) — le serveur arbitre le coût.");
+            return requestId;
+        }
+
         /// <summary>
         /// Demande au serveur de retirer des unités du registre (v20). C'est une **demande** : le client ne
         /// retire rien lui-même, et c'est l'instantané qui suit la décision qui déclenche la réconciliation
@@ -1008,6 +1128,17 @@ namespace Coop.Client
             }
 
             _net.PollEvents();
+
+            // Adoption (v21) : envoyée dès que le monde est chargé, si le serveur l'avait demandée avant.
+            if (_adoptionPending
+                && AutoLoadBehaviour.WorldLoaded
+                && Player.main != null
+                && Inventory.main != null)
+            {
+                _adoptionPending = false;
+                CoopClientPlugin.Log.LogInfo("[inventaire] adoption différée : le monde est chargé, envoi de l'inventaire réel.");
+                SendInventoryAdopt();
+            }
 
             // Sans adresse, il n'y a rien à tenter : la boucle de reconnexion resterait sinon à écrire
             // un échec toutes les 500 ms en accusant le réseau alors que l'adresse manque.
@@ -1817,6 +1948,57 @@ namespace Coop.Client
                     }
 
                     InventoryReconciler.Apply(reconciliation.Removals, CoopClientPlugin.Log);
+                    break;
+                }
+
+                case MessageType.InventoryAdoptionRequest:
+                {
+                    var request = InventoryAdoptionRequestMessage.Read(reader);
+                    _inventoryAdoptionsRequested++;
+
+                    if (AutoLoadBehaviour.WorldLoaded && Player.main != null && Inventory.main != null)
+                    {
+                        CoopClientPlugin.Log.LogInfo(
+                            $"[inventaire] adoption demandée par le serveur (n°{request.Sequence}) — envoi de l'inventaire local.");
+
+                        SendInventoryAdopt();
+                    }
+                    else
+                    {
+                        _adoptionPending = true;
+                        CoopClientPlugin.Log.LogInfo(
+                            $"[inventaire] adoption demandée par le serveur (n°{request.Sequence}) — différée jusqu'au chargement du monde " +
+                            "(Inventory.main n'existe pas encore).");
+                    }
+
+                    break;
+                }
+
+                case MessageType.CraftResult:
+                {
+                    var result = CraftResultMessage.Read(reader);
+                    _craftResults++;
+                    _lastCraftOutcome = result.Outcome;
+                    _lastCraftTech = result.TechType;
+                    _lastCraftMissingTech = result.MissingTechType;
+                    _lastCraftRevision = result.Revision;
+
+                    if (result.Granted)
+                    {
+                        _craftsGranted++;
+                    }
+                    else
+                    {
+                        _craftsRefused++;
+                    }
+
+                    CoopClientPlugin.Log.LogInfo(
+                        $"[craft] résultat : TechType {result.TechType} {(result.Granted ? "ACCORDÉ" : "REFUSÉ")} " +
+                        $"({result.Outcome}" +
+                        (result.MissingTechType != 0
+                            ? $", manque TechType {result.MissingTechType} ×{result.MissingAmount}"
+                            : string.Empty) +
+                        $") — révision {result.Revision}, requête {result.RequestId}");
                     break;
                 }
 

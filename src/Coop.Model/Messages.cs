@@ -1872,7 +1872,7 @@ namespace Coop.Model
         /// Refuse un contenu que le lecteur interpréterait de deux façons : nom vide, quantité nulle ou
         /// au-delà du plafond, doublon, ordre non croissant, trop de lignes.
         /// </summary>
-        private static void EnsureValid(InventoryEntry[] entries, string label)
+        internal static void EnsureValid(InventoryEntry[] entries, string label)
         {
             if (entries == null)
             {
@@ -2083,6 +2083,226 @@ namespace Coop.Model
             if (revision < 0)
             {
                 throw new ProtocolException($"{label} : révision négative ({revision})");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Demande d'adoption de l'inventaire (v21), serveur → client. Aucune charge utile : c'est un
+    /// **ordre de dire une fois** ce que le joueur possède, pas une question.
+    /// </summary>
+    public sealed class InventoryAdoptionRequestMessage
+    {
+        /// <summary>Numéro de la demande pour cette session (`1` à la première). Sert au journal et rend
+        /// un paquet tronqué **détectable** : un message sans charge utile serait indiscernable d'un octet
+        /// d'opcode seul.</summary>
+        public int Sequence;
+
+        public void Write(PacketWriter writer)
+        {
+            if (Sequence <= 0)
+            {
+                throw new ProtocolException($"demande d'adoption avec un numéro non positif ({Sequence})");
+            }
+
+            writer.WriteByte((byte)MessageType.InventoryAdoptionRequest);
+            writer.WriteInt(Sequence);
+        }
+
+        public static InventoryAdoptionRequestMessage Read(PacketReader reader)
+        {
+            var sequence = reader.ReadInt();
+            if (sequence <= 0)
+            {
+                throw new ProtocolException($"demande d'adoption reçue avec un numéro non positif ({sequence})");
+            }
+
+            return new InventoryAdoptionRequestMessage { Sequence = sequence };
+        }
+    }
+
+    /// <summary>
+    /// Inventaire initial d'un joueur (v21), en réponse à <see cref="InventoryAdoptionRequestMessage"/>.
+    ///
+    /// Même contrat de forme que l'instantané : trié, sans doublon, quantités bornées. Le serveur refuse
+    /// le tout — jamais une ligne — si le contenu est ambigu : une adoption partielle serait un inventaire
+    /// faux conservé sur disque.
+    /// </summary>
+    public sealed class InventoryAdoptMessage
+    {
+        public InventoryEntry[] Entries = Array.Empty<InventoryEntry>();
+
+        public void Write(PacketWriter writer)
+        {
+            InventorySnapshotMessage.EnsureValid(Entries, "adoption");
+
+            writer.WriteByte((byte)MessageType.InventoryAdopt);
+            writer.WriteByte((byte)Entries.Length);
+
+            foreach (var entry in Entries)
+            {
+                writer.WriteString(entry.TechTypeName);
+                writer.WriteUInt16((ushort)entry.Count);
+            }
+        }
+
+        public static InventoryAdoptMessage Read(PacketReader reader)
+        {
+            var count = reader.ReadByte();
+            if (count > Protocol.MaxInventoryEntries)
+            {
+                throw new ProtocolException(
+                    $"adoption trop longue ({count} > {Protocol.MaxInventoryEntries})");
+            }
+
+            var entries = new InventoryEntry[count];
+            for (var i = 0; i < count; i++)
+            {
+                entries[i] = new InventoryEntry(reader.ReadString(), reader.ReadUInt16());
+            }
+
+            InventorySnapshotMessage.EnsureValid(entries, "adoption reçue");
+
+            return new InventoryAdoptMessage { Entries = entries };
+        }
+    }
+
+    /// <summary>
+    /// Demande de craft (v21). Le client ne débite rien lui-même et ne fabrique rien avant la réponse :
+    /// c'est le serveur qui lit la recette du jeu et paie le coût depuis son registre.
+    /// </summary>
+    public sealed class CraftRequestMessage
+    {
+        public int RequestId;
+        public ushort TechType;
+
+        public void Write(PacketWriter writer)
+        {
+            if (TechType == 0)
+            {
+                throw new ProtocolException("demande de craft sans TechType (0)");
+            }
+
+            writer.WriteByte((byte)MessageType.CraftRequest);
+            writer.WriteInt(RequestId);
+            writer.WriteUInt16(TechType);
+        }
+
+        public static CraftRequestMessage Read(PacketReader reader)
+        {
+            var requestId = reader.ReadInt();
+            var techType = reader.ReadUInt16();
+
+            if (techType == 0)
+            {
+                throw new ProtocolException("demande de craft reçue avec TechType 0");
+            }
+
+            return new CraftRequestMessage
+            {
+                RequestId = requestId,
+                TechType = techType,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Décision du serveur sur un craft (v21), au seul demandeur.
+    ///
+    /// `MissingTechType`/`MissingAmount` nomment le matériau qui bloque : un refus sans nom obligerait le
+    /// client à deviner, et un craft refusé pour deux unités de cuivre serait indiscernable d'un craft
+    /// refusé pour une recette inconnue.
+    /// </summary>
+    public sealed class CraftResultMessage
+    {
+        public int RequestId;
+        public ushort TechType;
+        public bool Granted;
+        public CraftOutcome Outcome;
+        public ushort MissingTechType;
+        public ushort MissingAmount;
+        public int Revision;
+
+        public void Write(PacketWriter writer)
+        {
+            Validate(TechType, Granted, Outcome, MissingTechType, MissingAmount, Revision, "craft");
+
+            writer.WriteByte((byte)MessageType.CraftResult);
+            writer.WriteInt(RequestId);
+            writer.WriteUInt16(TechType);
+            writer.WriteBool(Granted);
+            writer.WriteByte((byte)Outcome);
+            writer.WriteUInt16(MissingTechType);
+            writer.WriteUInt16(MissingAmount);
+            writer.WriteInt(Revision);
+        }
+
+        public static CraftResultMessage Read(PacketReader reader)
+        {
+            var requestId = reader.ReadInt();
+            var techType = reader.ReadUInt16();
+            var granted = reader.ReadBool();
+            var outcome = (CraftOutcome)reader.ReadByte();
+            var missingTechType = reader.ReadUInt16();
+            var missingAmount = reader.ReadUInt16();
+            var revision = reader.ReadInt();
+
+            Validate(techType, granted, outcome, missingTechType, missingAmount, revision, "craft reçu");
+
+            return new CraftResultMessage
+            {
+                RequestId = requestId,
+                TechType = techType,
+                Granted = granted,
+                Outcome = outcome,
+                MissingTechType = missingTechType,
+                MissingAmount = missingAmount,
+                Revision = revision,
+            };
+        }
+
+        private static void Validate(
+            ushort techType,
+            bool granted,
+            CraftOutcome outcome,
+            ushort missingTechType,
+            ushort missingAmount,
+            int revision,
+            string label)
+        {
+            if (techType == 0)
+            {
+                throw new ProtocolException($"{label} : TechType 0");
+            }
+
+            if (!Enum.IsDefined(typeof(CraftOutcome), outcome))
+            {
+                throw new ProtocolException($"{label} : issue inconnue ({(byte)outcome})");
+            }
+
+            if (granted != (outcome == CraftOutcome.Applied))
+            {
+                throw new ProtocolException(
+                    $"{label} : accord ({granted}) incohérent avec l'issue ({outcome})");
+            }
+
+            if (revision < 0)
+            {
+                throw new ProtocolException($"{label} : révision négative ({revision})");
+            }
+
+            if (outcome == CraftOutcome.MissingMaterial || outcome == CraftOutcome.NotEnoughMaterial)
+            {
+                if (missingTechType == 0 || missingAmount == 0)
+                {
+                    throw new ProtocolException(
+                        $"{label} : manque de matériau sans le nommer ({missingTechType} ×{missingAmount})");
+                }
+            }
+            else if (missingTechType != 0 || missingAmount != 0)
+            {
+                throw new ProtocolException(
+                    $"{label} : matériau manquant annoncé hors d'un refus de matériau ({outcome})");
             }
         }
     }

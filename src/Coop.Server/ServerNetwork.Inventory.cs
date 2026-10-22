@@ -1,5 +1,10 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using Coop.Model;
 using LiteNetLib;
+using UnityEngine;
 
 namespace Coop.Server
 {
@@ -137,6 +142,311 @@ namespace Coop.Server
             // L'instantané part après la décision, sur le même canal fiable et ordonné : le client applique
             // le résultat puis le nouvel état, jamais l'inverse.
             SendInventorySnapshot(peer, session, $"débit de '{message.TechTypeName}' ×{message.Count}");
+        }
+
+        /// <summary>Racine des fichiers du serveur : `BepInEx/coop` (même dossier que le canal du launcher).</summary>
+        private static string InventoryRoot => Path.Combine(BepInEx.Paths.BepInExRootPath, "coop");
+
+        private static string InventoryPathFor(ClientSession session)
+        {
+            var slot = session.Save != null ? session.Save.Slot : null;
+            return InventoryStore.PathFor(InventoryRoot, slot, session.Username);
+        }
+
+        /// <summary>
+        /// Écrit le registre du joueur sur le disque du serveur (v21), après chaque changement appliqué.
+        ///
+        /// Pourquoi écrire à chaque mutation plutôt qu'à la déconnexion : un arrêt brutal ne doit pas
+        /// emporter les ramassages et les crafts de la session. Un échec est **nommé** et n'interrompt pas
+        /// le jeu : le registre continue de vivre en mémoire.
+        /// </summary>
+        private void PersistInventory(ClientSession session, string reason)
+        {
+            var path = InventoryPathFor(session);
+
+            if (InventoryStore.Save(path, session.Inventory.Snapshot(), out var error))
+            {
+                _log.LogInfo(
+                    $"[net] inventaire : '{session.Username}'#{session.PlayerId} conservé sur disque " +
+                    $"({session.Inventory.Count} objet(s), {session.Inventory.TotalCount} unité(s), révision {session.Inventory.Revision}) — {reason}.");
+                return;
+            }
+
+            _log.LogWarning(
+                $"[net] inventaire : écriture impossible pour '{session.Username}'#{session.PlayerId} " +
+                $"({error}) — le registre vit en mémoire seulement ({reason}).");
+        }
+
+        /// <summary>
+        /// Relit le registre conservé d'un joueur, s'il existe, **avant** de demander l'adoption.
+        ///
+        /// Ce fichier n'est pas la vérité du joueur — le serveur ne peut pas lire sa sauvegarde — mais il
+        /// couvre le cas où le client ne répondrait pas à la demande d'adoption : le registre précédent
+        /// vaut mieux qu'un inventaire vide.
+        /// </summary>
+        private void LoadStoredInventory(ClientSession session)
+        {
+            var path = InventoryPathFor(session);
+
+            if (!InventoryStore.TryLoad(path, out var entries, out var error, out var missing))
+            {
+                if (!missing)
+                {
+                    _log.LogWarning(
+                        $"[net] inventaire : fichier illisible pour '{session.Username}'#{session.PlayerId} " +
+                        $"({error}) — registre vide, l'adoption du client fera foi.");
+                }
+
+                return;
+            }
+
+            if (!session.Inventory.TryReplace(entries, out var replaceError))
+            {
+                _log.LogWarning(
+                    $"[net] inventaire : fichier incohérent pour '{session.Username}'#{session.PlayerId} " +
+                    $"({replaceError}) — ignoré, l'adoption du client fera foi.");
+                return;
+            }
+
+            _log.LogInfo(
+                $"[net] inventaire : '{session.Username}'#{session.PlayerId} restauré depuis le disque " +
+                $"({entries.Length} objet(s), {session.Inventory.TotalCount} unité(s)) — en attente de l'adoption.");
+        }
+
+        /// <summary>
+        /// Admission (v21) : demande au client **son** inventaire actuel, une fois.
+        ///
+        /// L'ordre compte : on relit le fichier d'abord (filet de sécurité), puis on demande l'adoption, qui
+        /// **remplace** ce contenu. L'adoption est la seule déclaration cliente du protocole, et elle est
+        /// bornée, triée et unique par session.
+        /// </summary>
+        private void RequestInventoryAdoption(NetPeer peer, ClientSession session)
+        {
+            LoadStoredInventory(session);
+            session.AdoptionReceived = false;
+
+            Send(
+                peer,
+                writer => new InventoryAdoptionRequestMessage { Sequence = 1 }.Write(writer),
+                DeliveryMethod.ReliableOrdered);
+
+            _log.LogInfo(
+                $"[net] inventaire : adoption demandée à '{session.Username}'#{session.PlayerId} " +
+                $"(registre initial {session.Inventory.Count} objet(s), {session.Inventory.TotalCount} unité(s)).");
+        }
+
+        /// <summary>
+        /// Reçoit l'inventaire initial déclaré par le client et remplace le registre (v21).
+        ///
+        /// Un contenu invalide est refusé **en entier** et le registre reste tel quel : une adoption
+        /// partielle vaudrait moins qu'aucune adoption, parce qu'elle ferait refuser des crafts légitimes
+        /// ou en accorderait à tort.
+        /// </summary>
+        private void HandleInventoryAdopt(NetPeer peer, ClientSession session, InventoryAdoptMessage message)
+        {
+            if (!session.Accepted)
+            {
+                _log.LogWarning($"[net] adoption d'inventaire avant handshake ignorée de {peer}");
+                return;
+            }
+
+            if (session.AdoptionReceived)
+            {
+                _log.LogWarning(
+                    $"[net] inventaire : seconde adoption refusée pour '{session.Username}'#{session.PlayerId} " +
+                    "— le registre ne se remplace qu'une fois par session.");
+                return;
+            }
+
+            if (!session.Inventory.TryReplace(message.Entries, out var error))
+            {
+                _log.LogError(
+                    $"[net] inventaire : adoption REFUSÉE pour '{session.Username}'#{session.PlayerId} " +
+                    $"({error}) — registre inchangé ({session.Inventory.Count} objet(s)).");
+                return;
+            }
+
+            session.AdoptionReceived = true;
+            PersistInventory(session, "adoption");
+            SendInventorySnapshot(peer, session, "adoption");
+        }
+
+        /// <summary>
+        /// Vérifie et prélève le **coût de craft** depuis les recettes du jeu (v21), puis rend la décision.
+        ///
+        /// La recette est lue côté serveur (`CraftData.GetRecipe`) : un client ne fournit ni le coût ni la
+        /// liste des matériaux. Le prélèvement est atomique (`PlayerInventory.RemoveMany`), et un manque est
+        /// rendu **nommé** (`MissingTechType`/`MissingAmount`) — un refus sans nom obligerait le joueur à
+        /// deviner ce qui bloque.
+        ///
+        /// Le produit n'est pas instancié ici : ce lot arbitre le **coût**. Le client fabrique après
+        /// l'accord, et l'instantané qui suit retire du monde les matériaux réellement prélevés.
+        /// </summary>
+        private void HandleCraftRequest(NetPeer peer, ClientSession session, CraftRequestMessage message)
+        {
+            if (!session.Accepted)
+            {
+                _log.LogWarning($"[net] demande de craft avant handshake ignorée de {peer}");
+                return;
+            }
+
+            session.CraftRequests++;
+            var tech = (TechType)message.TechType;
+
+            // La recette vient du **jeu**, pas du client : `TechData.GetIngredients` est la source que le
+            // fabricator utilise lui-même (vérifié sur `Assembly-CSharp` : `ReadOnlyCollection<Ingredient>`,
+            // chaque `Ingredient` portant `techType` et `amount`).
+            System.Collections.ObjectModel.ReadOnlyCollection<Ingredient> recipe = null;
+            try
+            {
+                recipe = TechData.GetIngredients(tech);
+            }
+            catch (Exception exception)
+            {
+                _log.LogWarning($"[net] craft : recette de '{tech}' illisible ({exception.GetType().Name}).");
+            }
+
+            if (recipe == null || recipe.Count == 0)
+            {
+                RefuseCraft(peer, session, message, tech, CraftOutcome.UnknownRecipe, 0, 0, "aucune recette");
+                return;
+            }
+
+            var costs = new List<InventoryEntry>(recipe.Count);
+            var costTechs = new List<TechType>(recipe.Count);
+
+            foreach (var ingredient in recipe)
+            {
+                if (ingredient == null || ingredient.amount <= 0)
+                {
+                    continue;
+                }
+
+                var name = ingredient.techType.ToString();
+                if (string.IsNullOrEmpty(name) || name.Length > Protocol.MaxTechTypeNameLength)
+                {
+                    RefuseCraft(
+                        peer,
+                        session,
+                        message,
+                        tech,
+                        CraftOutcome.Invalid,
+                        0,
+                        0,
+                        $"recette illisible pour '{tech}'");
+                    return;
+                }
+
+                costs.Add(new InventoryEntry(name, ingredient.amount));
+                costTechs.Add(ingredient.techType);
+            }
+
+            if (costs.Count == 0)
+            {
+                RefuseCraft(peer, session, message, tech, CraftOutcome.UnknownRecipe, 0, 0, "recette sans matériau");
+                return;
+            }
+
+            var revisionBefore = session.Inventory.Revision;
+            var outcome = session.Inventory.RemoveMany(
+                costs.ToArray(),
+                out var missingName,
+                out var needed,
+                out var have);
+
+            if (outcome != InventoryChangeOutcome.Applied)
+            {
+                var missingTech = TechType.None;
+                for (var index = 0; index < costs.Count; index++)
+                {
+                    if (string.Equals(costs[index].TechTypeName, missingName, StringComparison.Ordinal))
+                    {
+                        missingTech = costTechs[index];
+                        break;
+                    }
+                }
+
+                var craftOutcome = outcome == InventoryChangeOutcome.Invalid
+                    ? CraftOutcome.Invalid
+                    : (have == 0 ? CraftOutcome.MissingMaterial : CraftOutcome.NotEnoughMaterial);
+
+                var amount = Math.Min(Math.Max(needed - have, 0), ushort.MaxValue);
+
+                RefuseCraft(
+                    peer,
+                    session,
+                    message,
+                    tech,
+                    craftOutcome,
+                    (ushort)missingTech,
+                    (ushort)amount,
+                    $"{missingName} ×{needed} (registre {have})");
+                return;
+            }
+
+            session.CraftsGranted++;
+
+            Send(peer, writer => new CraftResultMessage
+            {
+                RequestId = message.RequestId,
+                TechType = message.TechType,
+                Granted = true,
+                Outcome = CraftOutcome.Applied,
+                Revision = session.Inventory.Revision,
+            }.Write(writer), DeliveryMethod.ReliableOrdered);
+
+            _log.LogInfo(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[net] craft : '{0}'#{1} -> '{2}' ACCORDÉ (coût : {3}) — révision {4} -> {5}.",
+                    session.Username,
+                    session.PlayerId,
+                    tech,
+                    DescribeCost(costs),
+                    revisionBefore,
+                    session.Inventory.Revision));
+
+            PersistInventory(session, $"craft de '{tech}'");
+            SendInventorySnapshot(peer, session, $"craft de '{tech}'");
+        }
+
+        private void RefuseCraft(
+            NetPeer peer,
+            ClientSession session,
+            CraftRequestMessage message,
+            TechType tech,
+            CraftOutcome outcome,
+            ushort missingTechType,
+            ushort missingAmount,
+            string detail)
+        {
+            session.CraftsRefused++;
+
+            Send(peer, writer => new CraftResultMessage
+            {
+                RequestId = message.RequestId,
+                TechType = message.TechType,
+                Granted = false,
+                Outcome = outcome,
+                MissingTechType = missingTechType,
+                MissingAmount = missingAmount,
+                Revision = session.Inventory.Revision,
+            }.Write(writer), DeliveryMethod.ReliableOrdered);
+
+            _log.LogWarning(
+                $"[net] craft : '{session.Username}'#{session.PlayerId} -> '{tech}' REFUSÉ " +
+                $"({outcome} : {detail}) — révision {session.Inventory.Revision} inchangée.");
+        }
+
+        private static string DescribeCost(List<InventoryEntry> costs)
+        {
+            var parts = new string[costs.Count];
+            for (var index = 0; index < costs.Count; index++)
+            {
+                parts[index] = $"{costs[index].TechTypeName} ×{costs[index].Count}";
+            }
+
+            return string.Join(", ", parts);
         }
     }
 }

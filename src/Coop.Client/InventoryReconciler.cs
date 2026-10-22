@@ -55,6 +55,57 @@ namespace Coop.Client
             return count;
         }
 
+        /// <summary>
+        /// Contenu **actuel** de `Inventory.main`, prêt pour l'adoption (v21) : noms triés, quantités
+        /// cumulées, bornés comme un instantané.
+        ///
+        /// `distinct` dit combien de noms existent réellement ; si la borne en coupe, `truncated` le dit —
+        /// une adoption silencieusement amputée ferait refuser des crafts légitimes sans explication.
+        /// </summary>
+        internal static InventoryEntry[] CollectLocal(out int distinct, out bool truncated)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            var inventory = Inventory.main;
+
+            if (inventory != null && inventory.container != null)
+            {
+                foreach (var pickupable in Enumerate(inventory))
+                {
+                    var type = pickupable.GetTechType();
+                    if (type == TechType.None)
+                    {
+                        continue;
+                    }
+
+                    var name = type.ToString();
+                    if (string.IsNullOrEmpty(name) || name.Length > Protocol.MaxTechTypeNameLength)
+                    {
+                        continue;
+                    }
+
+                    counts.TryGetValue(name, out var current);
+                    counts[name] = Math.Min(current + 1, Protocol.MaxInventoryStack);
+                }
+            }
+
+            distinct = counts.Count;
+            truncated = distinct > Protocol.MaxInventoryEntries;
+
+            var names = new string[counts.Count];
+            counts.Keys.CopyTo(names, 0);
+            Array.Sort(names, StringComparer.Ordinal);
+
+            var length = Math.Min(names.Length, Protocol.MaxInventoryEntries);
+            var entries = new InventoryEntry[length];
+
+            for (var index = 0; index < length; index++)
+            {
+                entries[index] = new InventoryEntry(names[index], counts[names[index]]);
+            }
+
+            return entries;
+        }
+
         /// <summary>Retire les unités demandées. Chaque échec est nommé, jamais silencieux.</summary>
         internal static void Apply(InventoryRemoval[] removals, ManualLogSource log)
         {

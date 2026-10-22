@@ -54,6 +54,16 @@ namespace Coop.Server
             /// </summary>
             public readonly PlayerInventory Inventory = new PlayerInventory();
 
+            /// <summary>
+            /// L'adoption (v21) n'est acceptée **qu'une fois** par session : c'est la seule écriture qui ne
+            /// vient pas d'une décision du serveur, et la rejouer remplacerait un registre déjà débité.
+            /// </summary>
+            public bool AdoptionReceived;
+
+            public long CraftRequests;
+            public long CraftsGranted;
+            public long CraftsRefused;
+
             // Dernier état de position reçu du joueur (ou position de spawn initiale).
             public uint LastPositionSequence;
             public float X;
@@ -620,7 +630,16 @@ namespace Coop.Server
                     HandleInventoryDebit(peer, session, InventoryDebitMessage.Read(reader));
                     break;
 
-                // Aucun `case` pour `InventorySnapshot` ni `InventoryDebitResult` : ce sont des messages
+                case MessageType.InventoryAdopt:
+                    HandleInventoryAdopt(peer, session, InventoryAdoptMessage.Read(reader));
+                    break;
+
+                case MessageType.CraftRequest:
+                    HandleCraftRequest(peer, session, CraftRequestMessage.Read(reader));
+                    break;
+
+                // Aucun `case` pour `InventorySnapshot`, `InventoryDebitResult`, `InventoryAdoptionRequest`
+                // ni `CraftResult` : ce sont des messages
                 // **serveur → client**. Un client qui en enverrait un tombe donc dans le `default`, qui le
                 // nomme — plutôt que d'être interprété comme une mutation d'inventaire, ce que le
                 // protocole ne permet pas.

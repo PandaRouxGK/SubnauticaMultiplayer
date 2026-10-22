@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les vingt-neuf étapes, et ce que chacune prouve :
+# Les trente étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -103,10 +103,14 @@
 #      (révision +1), la réconciliation retire l'objet de `Inventory.main` chez le client, et un second
 #      débit du même objet est **refusé nommément** (`UnknownItem`) sans déplacer la révision. C'est la
 #      seconde tranche de l'inventaire (v20) : le client ne retire rien de son propre chef.
+#   AD un client, sonde de craft -> le serveur **adopte** l'inventaire réel du joueur (seule déclaration
+#      du protocole, une fois par session), lit la **recette du jeu** (`TechData.GetIngredients`), prélève
+#      les matériaux sur son registre et le monde du client s'aligne ; la même demande rejouée est
+#      **refusée en nommant le matériau manquant**. Le produit n'est pas instancié : ce lot arbitre le coût.
 #
 # Usage :
-#   tools/verify.sh                    # les vingt-neuf étapes
-#   tools/verify.sh --only=B           # une seule étape (A..AC, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les trente étapes
+#   tools/verify.sh --only=B           # une seule étape (A..AD, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -153,7 +157,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC  étapes à lancer (défaut : les vingt-neuf)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD  étapes à lancer (défaut : les trente)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -175,7 +179,7 @@ done
 case ",$ONLY," in
     *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A..AC, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A..AD, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -612,15 +616,18 @@ assert_ab() {
     local server="$WORK_DIR/AB/coop-server.log"
     local client="$WORK_DIR/AB/coop-client.log"
 
-    # v19 : l'instantané d'admission (révision 0, vide) prouve que le client sait où il en est ; celui qui
-    # suit le ramassage porte l'objet **×1** ; et la sonde compare la quantité du serveur à l'inventaire
-    # réellement modifié par le jeu — c'est ce dernier point qui fait du registre autre chose qu'un écho.
-    expect AB "$server" "\\[net\\] inventaire de '[^']+'#[0-9]+ : révision 0, 0 objet\\(s\\) \\(0 unité\\(s\\)\\) — admission" \
-        "le serveur annonce un inventaire vide à l'admission"
-    expect AB "$server" "\\[net\\] inventaire de '[^']+'#[0-9]+ : révision [1-9][0-9]*, 1 objet\\(s\\) \\([1-9][0-9]* unité\\(s\\)\\) — ramassage accordé" \
+    # v21 : l'admission n'envoie plus un instantané vide — le serveur **adopte** d'abord l'inventaire réel
+    # du joueur. Celui qui suit le ramassage porte l'objet **×1**, et la sonde compare la quantité du
+    # serveur à l'inventaire réellement modifié par le jeu : c'est ce dernier point qui fait du registre
+    # autre chose qu'un écho.
+    expect AB "$client" "\\[inventaire\\] adoption envoyée" \
+        "le client envoie son inventaire réel à l'adoption"
+    expect AB "$server" "\\[net\\] inventaire de '[^']+'#[0-9]+ : révision [1-9][0-9]*, [0-9]+ objet\\(s\\) .* — adoption" \
+        "le serveur enregistre l'inventaire adopté et l'annonce à son propriétaire"
+    # L'inventaire adopté contient déjà les objets de la sauvegarde : la ligne ne peut plus dire « 1 ».
+    # C'est la révision qui avance qui prouve l'enregistrement, et l'égalité de la sonde qui prouve le reste.
+    expect AB "$server" "\\[net\\] inventaire de '[^']+'#[0-9]+ : révision [1-9][0-9]*, [1-9][0-9]* objet\\(s\\) \\([1-9][0-9]* unité\\(s\\)\\) — ramassage accordé" \
         "un ramassage accordé est enregistré dans le registre du joueur"
-    expect AB "$client" "\\[inventaire\\] instantané du serveur : révision 0, 0 objet\\(s\\)" \
-        "le client reçoit l'instantané d'admission"
     expect AB "$client" "serveur=[1-9][0-9]* local=[1-9][0-9]*.*verdict=True" \
         "la quantité du serveur égale celle du monde chez le client, et la sonde conclut True"
     expect AB "$client" "périmés écartés=0" \
@@ -646,6 +653,24 @@ assert_ac() {
         "la sonde conclut True sur le débit et sur le refus nommé"
     expect AC "$client" "périmés écartés=0" \
         "aucun instantané n'a été écarté comme périmé"
+}
+
+assert_ad() {
+    local server="$WORK_DIR/AD/coop-server.log"
+    local client="$WORK_DIR/AD/coop-client.log"
+
+    # v21 : l'adoption est la seule déclaration cliente ; le coût, lui, vient du jeu côté serveur, et un
+    # refus doit nommer le matériau manquant — sans quoi le joueur ne saurait pas quoi ramasser.
+    expect AD "$client" "\\[inventaire\\] adoption envoyée" \
+        "le client a envoyé son inventaire réel à l'adoption"
+    expect AD "$server" "\\[net\\] inventaire de '[^']+'#[0-9]+ : révision [0-9]+, [0-9]+ objet\\(s\\) .* — adoption" \
+        "le serveur enregistre l'inventaire adopté et l'annonce"
+    expect AD "$server" "\\[net\\] craft : '[^']+'#[0-9]+ -> '[^']+' ACCORDÉ \\(coût : .+\\) — révision [0-9]+ -> [1-9][0-9]*" \
+        "le serveur prélève le coût de la recette du jeu et sa révision avance"
+    expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\((MissingMaterial|NotEnoughMaterial) : .+\\) — révision [0-9]+ inchangée" \
+        "la même demande, les matériaux partis, est refusée en nommant le manque"
+    expect AD "$client" "\\[sonde\\] craft : .*verdict=True" \
+        "la sonde conclut True sur le coût prélevé et sur le refus nommé"
 }
 
 assert_d() {
@@ -1053,9 +1078,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1556,6 +1581,20 @@ if wanted AC "$ONLY"; then
         args+=(--no-build)
     fi
     step AC "inventaire : le débit décidé par le serveur vide le registre et le monde, et un refus reste nommé" assert_ac "${args[@]}"
+fi
+
+if wanted AD "$ONLY"; then
+    # v21 : la sonde choisit une recette réellement satisfaite par l'inventaire du joueur, la demande, et
+    # la rejoue. Le serveur lit la recette du jeu et prélève sur son registre ; le produit n'est pas
+    # instancié (ce lot arbitre le coût).
+    args=(--clients=1 --timeout=480
+        "--host-args=-coopmode=server"
+        "--client-args=-coopmode=client -coopdebug=craft"
+        "--client-marker=\\[sonde\\] craft :")
+    if [ "$NO_BUILD" = 1 ]; then
+        args+=(--no-build)
+    fi
+    step AD "craft : le coût est prélevé sur le registre du serveur, et un manque est refusé nommément" assert_ad "${args[@]}"
 fi
 
 if wanted D "$ONLY"; then

@@ -4817,3 +4817,87 @@ avec les mêmes binaires.
 - **Le registre n'est toujours ni complet ni persistant** : il ne suit que ce que la session a acquis, ne
   connaît pas la sauvegarde, et repart à zéro à la reconnexion — un débit ne « rembourse » jamais (aucun
   message d'ajout n'existe).
+
+## 69. Craft payé : le serveur adopte l'inventaire, le conserve, et vérifie le coût (v21, 2026-10-22)
+
+La v20 savait débiter sur demande, mais la demande venait d'une sonde : aucun craft réel ne la produisait,
+et surtout le registre ne connaissait **pas** les matériaux de la sauvegarde. Un joueur avec quarante titanes
+aurait vu son premier craft refusé pour « matériau manquant ». La v21 ferme ce trou par une **adoption**
+unique à l'admission — la seule déclaration que le protocole accepte —, **conserve** ensuite le registre sur
+disque, et arbitre le **coût** d'une recette réelle.
+
+### 69.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| adoption (demande) | `Coop.Model/Messages.cs` (`InventoryAdoptionRequest`, #30) | `Sequence` > 0, envoyé à l'admission ; un paquet tronqué est détectable |
+| adoption (réponse) | `Messages.cs` (`InventoryAdopt`, #31) | contenu borné, trié, sans doublon ; refusé en entier sinon |
+| conservation | `Coop.Model/InventoryStore.cs` | format `coop-inventory 1` + lignes `Nom\tQuantité`, relecture stricte, écriture par fichier temporaire puis remplacement ; chemin `BepInEx/coop/inventories/<partie>/<pseudo>.inv` (valeurs assainies) |
+| coût atomique | `Coop.Model/PlayerInventory.cs` (`RemoveMany`, `TryReplace`) | toutes les quantités vérifiées **avant** la première suppression ; premier manque nommé ; une seule révision par craft |
+| craft (demande/décision) | `Messages.cs` (`CraftRequest` #32, `CraftResult` #33, `CraftOutcome`) | `TechType` jamais 0 ; `Granted ⇔ Applied` ; un refus de matériau **doit** nommer le matériau et la quantité manquante |
+| serveur | `ServerNetwork.Inventory.cs` | adoption à l'admission (fichier relu puis remplacé), persistance à chaque mutation, recette lue par `TechData.GetIngredients`, prélèvement `RemoveMany`, refus `MissingMaterial`/`NotEnoughMaterial` |
+| client | `Coop.Client/Plugin.cs` | adoption **différée** jusqu'au chargement du monde, `SendCraftRequest`, réception et journalisation du résultat |
+| sonde | `Coop.Client/CraftProbeBehaviour.cs` (`-coopdebug=craft`) | choisit la recette la moins chère que `Inventory.main` satisfait réellement, la demande, vérifie le prélèvement **et** le retrait local, puis la rejoue pour obtenir le refus nommé |
+| harnais | `tools/verify.sh` (**étape AD**) | cinq assertions : adoption envoyée, adoption enregistrée, coût prélevé (révision +1), refus nommé, verdict de sonde |
+
+**L'API des recettes a été vérifiée sur l'assembly du jeu, pas devinée** : `CraftData.GetRecipe` **n'existe
+pas** dans 2019.4.36f1 (le compilateur l'a refusé) ; la source utilisée par le fabricator est
+`TechData.GetIngredients(TechType)`, qui rend une `ReadOnlyCollection<Ingredient>` dont chaque `Ingredient`
+porte `techType` et `amount`. C'est cette méthode que le serveur appelle.
+
+### 69.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `dotnet test` | **404/404** rc=0 — 20 nouveaux cas (`PlayerInventoryCraftTests` : coût atomique, manque nommé, sommation de lignes, adoption et validation ; `InventoryStoreTests` : aller-retour, fichier absent, en-tête, ligne mal formée, doublon, bornes, assainissement de chemin) et `MessageFuzzTests` passe à **33** lecteurs |
+| `NetProbe selftest` | **SUCCES** — aller-retours `InventoryAdopt`, `CraftRequest`, `CraftResult` (manque nommé) |
+| étape **AD** (premier run) | **ÉCHEC** — sonde `verdict=False`, `MissingMaterial : Titanium ×1 (registre 0)` : l'adoption était partie **avant** le chargement du monde, avec `0 objet(s)` (voir §69.3) |
+| étape **AD** (deuxième run) | sonde `verdict=True` — `recette='Accumulator' coût=[Titanium ×1] accordé=True révision 2 -> 3, matériaux retirés localement=1/1, refus nommé=True` — mais une assertion serveur ne correspondait pas au format de la ligne (voir §69.3) |
+| étape **AD** (troisième run) | **OK (48 s)** |
+| non-régression | **AB OK (151 s)** et **AC OK (152 s)** avec les binaires v21, `VERDICT GLOBAL : tout est vert` — l'admission n'envoie plus d'instantané vide, l'assertion d'admission a été réécrite pour l'adoption |
+| `check-verify-assertions.sh` | rc=0 — **30** étapes déclarées (A..Z, AA, AB, AC, AD), défaut complet |
+
+Lignes mesurées du run vert :
+
+```
+[net] inventaire : 'killi'#1 restauré depuis le disque (2 objet(s), 2 unité(s)) — en attente de l'adoption.
+[inventaire] adoption envoyée : 3 objet(s) [Copper ×1, FireExtinguisher ×1, Titanium ×1]
+[net] inventaire de 'killi'#1 : révision 2, 3 objet(s) (3 unité(s)) — adoption
+[net] craft : 'killi'#1 -> 'Accumulator' ACCORDÉ (coût : Titanium ×1) — révision 2 -> 3.
+[inventaire] réconciliation : 1 unité(s) retirée(s) de Inventory.main, échecs=0 (total retiré=1).
+[net] craft : 'killi'#1 -> 'Accumulator' REFUSÉ (MissingMaterial : Titanium ×1 (registre 0)) — révision 3 inchangée.
+[sonde] craft : recette='Accumulator' coût=[Titanium ×1] accordé=True révision 2 -> 3, matériaux retirés localement=1/1, refus nommé=True (MissingMaterial) — verdict=True
+```
+
+### 69.3 Ce que les runs ont trouvé
+
+1. **L'adoption partait trop tôt, et déclarait un inventaire vide.** Le serveur demande l'adoption au
+   handshake ; le client répondait immédiatement, or `Inventory.main` n'existe qu'une fois le monde chargé.
+   Le premier run a mesuré `adoption envoyée : 0 objet(s) [vide]` alors que la sonde trouvait du titane
+   localement — le craft était donc refusé pour une raison qui accusait à tort le registre. Correction : la
+   demande est **mémorisée** et l'envoi a lieu dans `Update`, quand `AutoLoadBehaviour.WorldLoaded` et
+   `Inventory.main` sont vrais. Le journal dit les deux cas (`différée jusqu'au chargement du monde`).
+   C'est un défaut de produit, pas de mesure : un vrai joueur aurait perdu son coût de craft sans comprendre.
+2. **Une assertion ne correspondait pas au format écrit.** La ligne serveur fermait la parenthèse après la
+   révision (`ACCORDÉ (coût : … — révision 2 -> 3).`) alors que l'assertion attendait `ACCORDÉ (coût : …) —`.
+   Le run était fonctionnellement vert, l'étape rouge. Correction du **format** (plus lisible) et non de
+   l'assertion : le coût est une information entre parenthèses, la révision une conséquence à côté.
+
+### 69.4 Ce que cette tranche ne prouve pas
+
+- **Aucun menu de craft n'est patché.** La sonde est le seul demandeur ; un joueur qui craft dans le
+  fabricator n'obtient ni prélèvement serveur ni refus. C'est la dette la plus visible de ce lot.
+- **Le produit n'est pas instancié.** Le serveur décide le coût ; le client « fabriquera après accord » — le
+  branchement et la création de l'objet restent à écrire, et aucune étape ne les mesure.
+- **L'adoption n'est pas vérifiable.** Le serveur ne peut pas lire la sauvegarde d'un client : un client
+  hostile peut déclarer des matériaux qu'il n'a pas. Bornée, triée et unique par session, elle reste une
+  déclaration — c'est la limite qui justifie de ne pas s'en servir comme preuve d'intégrité.
+- **La conservation est écrasée à chaque admission** : le fichier sert de filet en cours de session et de
+  trace lisible, pas d'état de référence entre deux parties.
+- **Un objet, une unité, un client, une recette** : la recette choisie est la moins chère (`Accumulator`,
+  `Titanium ×1`) ; ni pile, ni craft en rafale, ni deux joueurs simultanés, ni recette à plus de trois
+  matériaux. Aucune cadence ni plafond ne borne les demandes de craft (chaque accord consomme le registre,
+  donc l'abus est borné par l'inventaire, pas par une règle).
+- **L'hôte n'a pas d'adoption** : son registre démarre vide (ou restauré) et ses ramassages ne sont pas
+  comptés — le craft mesuré est celui d'un client.

@@ -2,7 +2,7 @@
 
 Coopération pour Subnautica (2019.4.36f1, Mono) : une instance de jeu sert de **serveur
 autoritaire** (BepInEx 5 + HarmonyX), les autres instances sont des clients. Transport UDP
-LiteNetLib, protocole binaire maison **v20**, tick serveur à **20 Hz**.
+LiteNetLib, protocole binaire maison **v21**, tick serveur à **20 Hz**.
 
 L'architecture et l'historique des mesures vivent dans `PLAN.md`. La politique d'autorité système
 par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai aujourd'hui.
@@ -27,8 +27,11 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
 - **inventaire** : le serveur tient un registre par joueur (borné) et l'annonce à son propriétaire ; un
   ramassage accordé y ajoute l'objet, et la quantité annoncée égale celle que le jeu contient chez le
   client ; un **débit demandé** par le client est appliqué ou **refusé nommément** par le serveur, et
-  l'unité retirée du registre quitte réellement `Inventory.main` (réconciliation) ; aucun consommateur du
-  jeu (craft, nourriture, dépôt) n'appelle encore le débit ;
+  l'unité retirée du registre quitte réellement `Inventory.main` (réconciliation) ; l'inventaire réel du
+  joueur est **adopté** une fois à l'admission, puis **conservé sur disque** par le serveur ;
+- **craft payé** : le serveur lit la **recette du jeu** (`TechData.GetIngredients`), prélève les matériaux
+  **atomiquement** sur son registre et refuse en nommant le manque — le produit reste fabriqué par le
+  client, et le menu du jeu n'est pas encore patché (la sonde est le seul demandeur) ;
 - sauvegarde : le client n'écrit pas (garde sur deux remparts), l'hôte écrit toujours ;
 - hôte dédié : aucun personnage joueur exposé aux clients ;
 - **empreinte de sauvegarde (P0)** : handshake v13 accepté avec `save=slot=…` ; étape P verte ;
@@ -39,16 +42,17 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`entités créées ici=0`) ;
 - **contrat de contenu (P1bis)** : étape N verte — `définition vérifiée=True (hash=0x3da1f4bf782becdf)`
   et `définition falsifiée refusée=True` chez **les deux** clients, `définitions refusées=0` ;
-- **batterie des vingt-neuf étapes (A–Z, AA, AB, AC)** : les dix-sept premières ont un verdict vert le 2026-10-19
+- **batterie des trente étapes (A–Z, AA, AB, AC, AD)** : les dix-sept premières ont un verdict vert le 2026-10-19
   (`PLAN.md` §46) ; `R`, `S` et `T` prouvent les refus P0 en jeu (slot, session, mode — client divergent
   refusé nommément, l'autre admis), `U` la reconnexion (départ diffusé, réclamations libérées, retour admis, aucun avatar fantôme),
   `V` la présence à **trois** clients et `W` les créatures à trois clients, avec les états périmés
   écartés (`PLAN.md` §49.5, §52 et §53) ; `X` la libération du volant par une déconnexion, `Y` la
   fabrication demandée par un client (`PLAN.md` §64), `Z` la santé et la mort d'une créature
   (`PLAN.md` §65), `AA` l'heure du monde diffusée puis appliquée (`PLAN.md` §66), `AB` le registre
-  d'inventaire du serveur confronté au ramassage réel et `AC` le débit accordé puis refusé avec le retrait
-  réel dans `Inventory.main` (`PLAN.md` §67 et §68). `tools/verify.sh` sans `--only` lance bien les
-  vingt-neuf.
+  d'inventaire du serveur confronté au ramassage réel, `AC` le débit accordé puis refusé avec le retrait
+  réel dans `Inventory.main` (`PLAN.md` §67 et §68) et `AD` l'adoption de l'inventaire, le coût d'une vraie
+  recette prélevé puis refusé nommément (`PLAN.md` §69). `tools/verify.sh` sans `--only` lance bien les
+  trente.
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
@@ -58,9 +62,10 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
 capsule de test), plus de 8 joueurs, et des sauvegardes ou zones différentes ; la désynchronisation des
 véhicules et des avatars n'est pas mesurée non plus (`PLAN.md` §62.4).
 
-**Ce qui n'existe pas encore :** craft, récolte, oxygène et bases partagés ; le branchement du débit
-d'inventaire sur les consommateurs du jeu (craft, nourriture, dépôt) ; la réconciliation des objets
-équipés ; contenu custom livré au client ; authentification ou chiffrement.
+**Ce qui n'existe pas encore :** récolte, oxygène et bases partagés ; le **menu de craft** patché et
+l'instanciation du produit après accord (le coût, lui, est arbitré) ; le branchement du débit sur les
+consommateurs du jeu (nourriture, dépôt) ; la réconciliation des objets équipés ; contenu custom livré au
+client ; authentification ou chiffrement.
 
 ## Prérequis
 
@@ -151,7 +156,7 @@ accepte n'importe qui connaissant l'IP, la clé LiteNetLib ne filtrant que les p
 | `tools/deploy.sh --verify` | secondes | binaires installés = manifeste |
 | `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only` **et** lancées par le défaut, et les assertions P/Q/N/B/R acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
 | `tools/session-verdict.sh --self-test` | secondes | le graveur de session longue accepte un journal vert **et** échoue sur les six cas rouges (exception, dérive > 2 m, mesure vide, sauvegarde absente, reconnexion absente, durée courte) |
-| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–AB) |
+| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–AD) |
 | `tools/verify.sh` | long (~45 min) | les vingt-huit étapes, un seul verdict |
 | `tools/p4-session.sh --minutes=30` | 30 min + chargement | une session longue à deux clients (reconnexion au tiers, sauvegarde de l'hôte) et **un** verdict P4 (`PLAN.md` §62) |
 
@@ -182,9 +187,10 @@ docs/              protocole, politique d'autorité, table des preuves, comptes 
 - **L'heure est partagée, pas le ciel.** Le serveur diffuse l'heure (`WorldTime`, v18) ; la météo, les
   aurores et les événements de Radiations ne voyagent pas — deux joueurs peuvent voir le même soleil et
   un temps différent.
-- **L'inventaire serveur est un registre, pas celui du jeu.** Il compte des quantités par objet et
-  s'alimente d'un ramassage accordé ; le client ne l'applique pas encore à `Inventory.main`, rien ne le
-  débite (craft, dépôt, consommation), et il ignore les emplacements et les tailles de pile du jeu.
+- **L'inventaire serveur est un registre, pas celui du jeu.** Il compte des quantités par objet, s'alimente
+  d'un ramassage accordé et de l'adoption initiale (la seule déclaration cliente, non vérifiable), se
+  débite sur demande et au coût d'un craft, et se réconcilie avec `Inventory.main` ; il ignore en revanche
+  les emplacements, les tailles de pile et les objets équipés.
 - **L'économie n'est pas partagée.** Deux joueurs peuvent encore avoir chacun leur copie d'un objet
   fabriqué ou consommé ; seul le ramassage d'un objet du monde est arbitré.
 - **Une seule sauvegarde et un seul biome ont servi de preuve.** Les identités de créatures reposent
