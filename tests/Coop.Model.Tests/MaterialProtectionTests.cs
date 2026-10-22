@@ -104,6 +104,43 @@ namespace Coop.Model.Tests
         }
 
         [Fact]
+        public void Une_levee_sur_une_entree_echee_ne_ressuscite_rien()
+        {
+            var protection = new MaterialProtection(windowMs: 100);
+            protection.Arm(0, Titanium);
+            protection.Arm(0, Titanium);
+
+            // L'entrée est échue mais pas encore purgée : la levée décrémente une référence, elle ne rend
+            // pas la protection vivante, et la lecture suivante l'oublie.
+            Assert.Empty(protection.Release(Titanium));
+            Assert.Equal(1, protection.TotalRefs);
+            Assert.False(protection.IsProtected(101, "Titanium"));
+            Assert.Equal(0, protection.Count);
+            Assert.Equal(0, protection.TotalRefs);
+        }
+
+        [Fact]
+        public void Les_compteurs_restent_coherents_sur_des_operations_melees()
+        {
+            var protection = new MaterialProtection(windowMs: 1_000);
+            protection.Arm(0, new[] { "Titanium", "Copper" });
+            protection.Arm(500, Titanium);
+            Assert.Equal(2, protection.Count);
+            Assert.Equal(3, protection.TotalRefs);
+
+            Assert.Empty(protection.Release(new[] { "Titanium" }));
+            Assert.Equal(2, protection.TotalRefs);
+
+            Assert.Equal(new[] { "Copper" }, protection.Release(new[] { "Copper" }));
+            Assert.Equal(1, protection.Count);
+            Assert.Equal(1, protection.TotalRefs);
+
+            Assert.Equal(new[] { "Titanium" }, protection.Release(Titanium));
+            Assert.Equal(0, protection.Count);
+            Assert.Equal(0, protection.TotalRefs);
+        }
+
+        [Fact]
         public void Clear_oublie_tout_et_une_fenetre_invalide_est_ramenee_a_un()
         {
             var protection = new MaterialProtection(windowMs: 0);

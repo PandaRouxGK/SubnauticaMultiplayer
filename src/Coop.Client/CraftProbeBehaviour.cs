@@ -406,14 +406,28 @@ namespace Coop.Client
             CraftGuard.ProtectForProbe(material);
 
             // Le serveur ne compterait plus ce matériau (débit) : c'est la seule situation où la
-            // réconciliation a quelque chose à retirer.
-            InventoryReconciler.RememberServerState(Array.Empty<InventoryEntry>());
+            // réconciliation a quelque chose à retirer. L'état réel est **restauré ensuite** — le laisser
+            // amputé ferait retirer des objets au prochain report repris.
+            var current = ClientNetworkBehaviour.Current;
+            var real = current == null ? Array.Empty<InventoryEntry>() : current.InventorySnapshotPrevious;
+
+            var withoutMaterial = new List<InventoryEntry>(real.Length);
+            foreach (var entry in real)
+            {
+                if (!string.Equals(entry.TechTypeName, material, StringComparison.Ordinal))
+                {
+                    withoutMaterial.Add(entry);
+                }
+            }
+
+            InventoryReconciler.RememberServerState(withoutMaterial.ToArray());
             InventoryReconciler.Apply(new[] { new InventoryRemoval(material, 1) }, Log);
 
             var deferred = InventoryReconciler.PendingDeferrals;
             var afterDefer = InventoryReconciler.CountLocal(material);
 
             CraftGuard.ReleaseForProbe(material);
+            InventoryReconciler.RememberServerState(real);
 
             var afterRetry = InventoryReconciler.CountLocal(material);
             var pendingAfter = InventoryReconciler.PendingDeferrals;

@@ -5336,3 +5336,32 @@ demande en attente** — on savait le code présent, pas qu'il vidait la table. 
   prouverait.
 - `Clear()` vide aussi `Instances`, `SentAt` et l'état de protection/report ; seule la table des demandes est
   comptée ici, le reste n'est vérifié qu'indirectement (les étapes suivantes restent vertes).
+
+## 80. Deux garde-fous ajoutés après coup : compteurs et état restauré (2026-10-22)
+
+Deux fragilités laissées par les lots §77–§79, corrigées avant de clore la session : la comptabilité pure
+n'était testée que sur des cas « propres », et la sonde de report laissait l'inventaire serveur **amputé**
+après son contrôle.
+
+### 80.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| levée sur une entrée échue | `tests/Coop.Model.Tests/MaterialProtectionTests.cs` | une levée ne **ressuscite** pas une protection expirée : elle décrémente, la lecture suivante oublie l'entrée et `Count`/`TotalRefs` retombent à zéro |
+| invariants de compteurs | même fichier | suite mêlée (deux armements, deux noms, levées partielles) : `Count` et `TotalRefs` vérifiés à chaque étape — c'est ce test qui a **trouvé une erreur d'arithmétique dans mes propres attentes**, corrigée avant commit |
+| état serveur restauré | `Coop.Client/Plugin.cs` (`InventorySnapshotPrevious`) + `CraftProbeBehaviour.DeferAndRetry` | la sonde construit « le serveur ne compte plus ce matériau » en retirant **seulement** ce nom du dernier instantané réel, puis **restaure** cet instantané après la reprise ; laisser un inventaire vide en place ferait retirer des objets à la prochaine reprise |
+
+### 80.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `dotnet test` | **435/435** rc=0 (2 cas de plus qu'au §77) |
+| étape **AE** (Survie, 54 s) | **OK** — `retrait de 'Copper' ×1 reporté` → `reprise de 1 retrait(s) reporté(s) [Copper]` → `[sonde] report : … retiré à la reprise=1 (1 -> 0) … verdict=True` à 18:25:44.880, avec l'instantané réel restauré juste après |
+
+### 80.3 Ce que ce lot ne prouve pas
+
+- **La restauration n'est vérifiée qu'indirectement** : aucun run ne montre ensuite une réconciliation qui
+  aurait retiré un objet si l'état était resté amputé — il faudrait un second report dans la même session.
+- Les deux nouveaux cas testent le **modèle**, pas le client : la conversion millisecondes (`NowMs`) et la
+  lecture des ingrédients restent hors jeu.

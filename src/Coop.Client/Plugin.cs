@@ -757,6 +757,13 @@ namespace Coop.Client
 
         internal int InventoryMessages => _inventoryMessages;
 
+        /// <summary>
+        /// Dernier instantané serveur appliqué. La sonde de craft s'en sert pour fabriquer un état « ce nom
+        /// n'est plus compté » et **le restaurer ensuite** : laisser un inventaire vide en place ferait
+        /// retirer des objets à la prochaine reprise de report.
+        /// </summary>
+        internal InventoryEntry[] InventorySnapshotPrevious => _inventoryPrevious;
+
         /// <summary>Révision du dernier instantané appliqué ; `-1` = aucun instantané reçu.</summary>
         internal int InventoryRevision => _inventoryRevision;
 
