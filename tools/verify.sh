@@ -686,6 +686,8 @@ assert_ad() {
         "une rafale de demandes est refusée par la cadence, sans coupure"
     expect AD "$client" "attente de l'accord=[0-9]+\\.[0-9] ms" \
         "la latence ajoutée par l'accord est mesurée, pas supposée"
+    expect_missing AD "$client" "matériaux protégés" \
+        "en Créatif, aucune protection n'est armée : c'est la réconciliation qui applique le coût"
     expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence : [1-9][0-9]* ms" \
         "le serveur nomme et date le refus de cadence"
 }
@@ -715,6 +717,8 @@ assert_ae() {
         "la cadence refuse une rafale, même en Survie"
     expect AE "$client" "attente de l'accord=[0-9]+\\.[0-9] ms" \
         "la latence de l'accord est mesurée en Survie aussi"
+    expect AE "$client" "matériaux protégés [0-9]+ s : [A-Za-z]+" \
+        "en Survie, le coût est écarté de la réconciliation pendant la reprise"
     expect AE "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence :" \
         "le refus de cadence est nommé côté serveur, en Survie"
     expect_missing AE "$client" "mode sans ingrédients" \

@@ -372,6 +372,7 @@ namespace Coop.Client
                 }
 
                 var expiresAt = UnityEngine.Time.realtimeSinceStartup + InFlightSeconds;
+                var protectedNames = new List<string>(ingredients.Count);
 
                 foreach (var ingredient in ingredients)
                 {
@@ -379,7 +380,17 @@ namespace Coop.Client
                     if (!string.IsNullOrEmpty(name))
                     {
                         InFlightCosts[name] = expiresAt;
+                        protectedNames.Add(name);
                     }
+                }
+
+                // Sans cette ligne, la branche de protection était muette en Survie : impossible de savoir,
+                // dans un journal, si le coût avait été écarté de la réconciliation ou non.
+                if (protectedNames.Count > 0)
+                {
+                    _log?.LogInfo(
+                        $"[craft] matériaux protégés {InFlightSeconds:F0} s : {string.Join(", ", protectedNames)} " +
+                        "(le craft approuvé les consomme lui-même).");
                 }
             }
             catch (Exception exception)

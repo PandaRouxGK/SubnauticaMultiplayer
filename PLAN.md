@@ -5115,3 +5115,38 @@ et l'instant où la décision est traitée, et imprime l'écart.
 - Elle inclut le traitement serveur et la cadence de lecture des paquets du client ; elle n'isole pas la
   part du blocage lui-même.
 - Elle ne dit rien du **démarrage** perçu par le joueur (animation, son) : seule la décision est datée.
+
+## 74. La protection des matériaux se voit dans le journal (2026-10-22)
+
+En Survie, le coût d'une recette est **écarté de la réconciliation** pendant la reprise locale
+(`InFlightSeconds`, 10 s) : sans cela, la réconciliation retirerait le matériau avant que le jeu ne le
+consomme, et la reprise échouerait faute d'ingrédients. Cette branche était **muette** : rien dans un
+journal ne disait si la protection avait été armée, ni pour quels matériaux. La seule preuve était une
+déduction (`coût retiré par la réconciliation=0`) — une absence d'effet, pas une trace.
+
+### 74.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| journal | `Coop.Client/CraftGuard.cs` (`RememberCost`) | une ligne par craft protégé : `[craft] matériaux protégés 10 s : Titanium (le craft approuvé les consomme lui-même).` — les noms sont collectés pendant l'armement, donc une recette sans ingrédient lisible ne produit rien |
+| harnais, Survie | `tools/verify.sh` (étape **AE**) | `expect` sur `matériaux protégés [0-9]+ s : [A-Za-z]+` : un journal sans protection fait échouer l'étape |
+| harnais, Créatif | `tools/verify.sh` (étape **AD**) | `expect_missing` sur `matériaux protégés` : en Créatif, rien n'est protégé, et c'est la réconciliation qui applique le coût — l'assertion croisée interdit de « protéger » par erreur dans ce mode |
+
+### 74.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `dotnet test` | **424/424** rc=0 |
+| étape **AD** (Créatif, 17:43) | **OK** — `mode='Créatif' … matériaux consommés=True, coût retiré par la réconciliation=1, attente de l'accord=13.3 ms (min=13.3, max=20.0) … verdict=True` ; `grep -c "matériaux protégés"` = **0** |
+| étape **AE** (Survie, 17:44) | **OK** — `matériaux protégés 10 s : Titanium (le craft approuvé les consomme lui-même).` puis `mode='Survie' … matériaux consommés=True, coût retiré par la réconciliation=0, attente de l'accord=19.9 ms (min=19.8, max=19.9) … verdict=True` |
+| latence, comparée au §73.2 | **13,3 / 19,9 ms** ici contre **26,6 / 27,4 ms** au run précédent : même chemin de code, écart de charge de la machine — ce n'est pas un gain, seulement une mesure de plus |
+
+### 74.3 Ce que ce lot ne prouve pas
+
+- **La fenêtre de 10 s n'est pas éprouvée** : si la décision arrivait après l'expiration, la réconciliation
+  pourrait retirer le coût avant la reprise. Aucune étape ne retarde la réponse au-delà de la fenêtre.
+- **Un seul matériau journalisé** : `Accumulator` n'a qu'un ingrédient ; une recette à plusieurs ingrédients
+  n'est pas exercée, et le format de la ligne n'est pas testé pour les cas vides ou l'échec de lecture.
+- **L'absence en Créatif est une assertion négative** : elle prouve que la branche n'est pas armée, pas que
+  la réconciliation applique le bon coût au-delà du compteur `1` déjà mesuré au §70.
