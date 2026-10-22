@@ -5348,7 +5348,8 @@ après son contrôle.
 | Brique | Fichier | Comportement |
 |---|---|---|
 | levée sur une entrée échue | `tests/Coop.Model.Tests/MaterialProtectionTests.cs` | une levée ne **ressuscite** pas une protection expirée : elle décrémente, la lecture suivante oublie l'entrée et `Count`/`TotalRefs` retombent à zéro |
-| invariants de compteurs | même fichier | suite mêlée (deux armements, deux noms, levées partielles) : `Count` et `TotalRefs` vérifiés à chaque étape — c'est ce test qui a **trouvé une erreur d'arithmétique dans mes propres attentes**, corrigée avant commit |
+| idempotence de la reprise | `tests/Coop.Model.Tests/InventoryReconciliationTests.cs` | `Compute(même instantané, même instantané, local)` : l'invariant sur lequel repose la reprise du §78 — deux unités de trop donnent un retrait de 2, puis plus rien une fois le jeu aligné |
+| invariants de compteurs | `MaterialProtectionTests.cs` | suite mêlée (deux armements, deux noms, levées partielles) : `Count` et `TotalRefs` vérifiés à chaque étape — c'est ce test qui a **trouvé une erreur d'arithmétique dans mes propres attentes**, corrigée avant commit |
 | état serveur restauré | `Coop.Client/Plugin.cs` (`InventorySnapshotPrevious`) + `CraftProbeBehaviour.DeferAndRetry` | la sonde construit « le serveur ne compte plus ce matériau » en retirant **seulement** ce nom du dernier instantané réel, puis **restaure** cet instantané après la reprise ; laisser un inventaire vide en place ferait retirer des objets à la prochaine reprise |
 
 ### 80.2 Mesures du 2026-10-22
@@ -5356,7 +5357,7 @@ après son contrôle.
 | Contrôle | Valeur mesurée |
 |---|---|
 | `dotnet build` | rc=0, **0 avertissement** |
-| `dotnet test` | **435/435** rc=0 (2 cas de plus qu'au §77) |
+| `dotnet test` | **436/436** rc=0 (3 cas de plus qu'au §77) |
 | étape **AE** (Survie, 54 s) | **OK** — `retrait de 'Copper' ×1 reporté` → `reprise de 1 retrait(s) reporté(s) [Copper]` → `[sonde] report : … retiré à la reprise=1 (1 -> 0) … verdict=True` à 18:25:44.880, avec l'instantané réel restauré juste après |
 
 ### 80.3 Ce que ce lot ne prouve pas

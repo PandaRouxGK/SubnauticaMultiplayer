@@ -144,6 +144,32 @@ namespace Coop.Model.Tests
         }
 
         [Fact]
+        public void Rejouer_contre_le_meme_instantane_est_idempotent()
+        {
+            // C'est l'invariant sur lequel repose la reprise d'un retrait reporté (§78) : le client compare
+            // le local au **même** instantané serveur, autant de fois que nécessaire.
+            var snapshot = Snapshot(("Titanium", 0), ("Copper", 1));
+
+            var first = InventoryReconciliation.Compute(
+                snapshot,
+                snapshot,
+                Local(("Titanium", 2), ("Copper", 1)));
+
+            Assert.Single(first.Removals);
+            Assert.Equal("Titanium", first.Removals[0].TechTypeName);
+            Assert.Equal(2, first.Removals[0].Count);
+
+            // Le jeu a retiré ses deux unités : le même instantané ne demande plus rien.
+            var second = InventoryReconciliation.Compute(
+                snapshot,
+                snapshot,
+                Local(("Copper", 1)));
+
+            Assert.True(second.IsEmpty);
+            Assert.Equal(0, second.MissingLocally);
+        }
+
+        [Fact]
         public void Les_retraits_sont_tries_par_nom()
         {
             var reconciliation = InventoryReconciliation.Compute(
