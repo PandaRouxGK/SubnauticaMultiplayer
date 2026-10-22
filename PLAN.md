@@ -5030,7 +5030,7 @@ trouvé un défaut de produit : le garde était posé **sous** le point de conso
   ici — `RequiresIngredients()` et la consommation réelle — l'a été.
 - **Le produit reste local** : le serveur arbitre le coût, le client fabrique ; deux joueurs peuvent avoir
   chacun le leur.
-- **Aucun remboursement** si la reprise échoue, et **latence non chronométrée**.
+- **Aucun remboursement** si la reprise échoue ; la latence de l'accord est mesurée depuis le §73.
 
 ## 72. Deux crafts de la même recette, et une cadence nommée (2026-10-22)
 
@@ -5074,4 +5074,37 @@ partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi f
 - **La purge à la fermeture de session est branchée mais non exercée en jeu** : `CraftGuard.Clear()` est
   appelé sur la déconnexion, sur le message `Disconnect` et sur un changement d'adresse ; aucune étape ne
   ferme une session avec une demande en attente pour vérifier que la réponse tardive ne rejoue rien.
+- **La rafale de la sonde envoie des demandes brutes**, hors garde : avec un inventaire plus riche, une
+  partie serait **accordée** sans reprise locale (le registre serait débité). La fixture ne le permet
+  pas — le premier craft vide le titane — mais un futur décor plus fourni rendrait la sonde bruyante.
 - **Rien de nouveau côté contenu** : `RocketConstructor` reste hors du garde, et le produit reste local.
+
+## 73. La latence de l'accord est mesurée, plus supposée (2026-10-22)
+
+Le garde bloque le craft jusqu'à la décision du serveur : c'était le prix assumé du §70, et il était écrit
+« non chronométré ». La sonde relève maintenant l'instant de l'interception (`SentAt`, par id de requête)
+et l'instant où la décision est traitée, et imprime l'écart.
+
+### 73.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| mesure | `Coop.Client/CraftGuard.cs` | `TakeLatency(requestId)` au traitement de la réponse ; `LastLatencyMs`, `MinLatencyMs`, `MaxLatencyMs` ; la ligne de décision écrit `décision en X ms` et **rien** si la demande n'est pas passée par le garde |
+| sonde | `CraftProbeBehaviour` | la ligne de verdict porte `attente de l'accord=X ms (min=…, max=…)` |
+| harnais | étapes **AD** et **AE** | assertion `attente de l'accord=[0-9]+\.[0-9] ms` : une valeur absente ou négative fait échouer l'étape |
+
+### 73.2 Mesures du 2026-10-22
+
+| Run | Valeur mesurée |
+|---|---|
+| étape **AD** (Créatif, 54 s) | accord en **26,6 ms**, refus en **19,4 ms** — `attente de l'accord=26.6 ms (min=19.4, max=26.6)` |
+| étape **AE** (Survie, 53 s) | `attente de l'accord=27.4 ms (min=26.0, max=27.4)` — la décision d'un accord et celle d'un refus sont du même ordre |
+
+### 73.3 Ce que cette mesure ne dit pas
+
+- **Localhost seulement** : serveur et client sur la même machine. La latence d'un aller-retour réel
+  (Internet) s'y ajoute ; ce qui est mesuré ici est le coût **propre** du garde et de la boucle réseau
+  locale, pas l'expérience d'un joueur distant.
+- Elle inclut le traitement serveur et la cadence de lecture des paquets du client ; elle n'isole pas la
+  part du blocage lui-même.
+- Elle ne dit rien du **démarrage** perçu par le joueur (animation, son) : seule la décision est datée.

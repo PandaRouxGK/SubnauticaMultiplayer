@@ -195,6 +195,14 @@ part (#23) parce qu'ils changent rarement et qu'un module perdu change la profon
 message fiable coûte moins qu'un état qui se corrige tout seul. La **conduite** n'est pas dans ce flux :
 elle a son propre message (#17) et sa décision (#18).
 
+### Craft payé (v21)
+
+| Constante | Valeur | Justification |
+|---|---|---|
+| `CraftBudget.DefaultBurst` | `8` | demandes de craft acceptées en rafale pour une session ; au-delà, le refus `RateLimited` **nomme et date** l'attente. La borne est double : le nombre de demandes sans réponse ne croît pas, et le coût d'une demande refusée reste une comparaison, pas une lecture de recette |
+| `CraftBudget.DefaultRefillMs` | `500` | recharge d'un jeton — ~`120` crafts par minute en régime établi ; les étapes AD et AE craftent deux fois en quelques secondes et ne sont pas freinées |
+| `CraftRequestLedger.MaxPending` | `64` | demandes bloquées chez le client avant que le garde ne cesse de compter ; au-delà, le craft passe **sans arbitrage et le dit** plutôt que de rester muet |
+
 ### Fabrication demandée par un client (v16)
 
 | Constante | Valeur | Justification |

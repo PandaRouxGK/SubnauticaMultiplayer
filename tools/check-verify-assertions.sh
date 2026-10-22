@@ -151,7 +151,7 @@ LOG
 [Coop Client] [craft] interception : 'Accumulator' bloqué avant consommation, en attente du serveur (requête 1, bloqués=1).
 [Coop Client] [craft] accord du serveur : 'Accumulator' — reprise du craft local sur le fabricator (requête 1, reprises=1).
 [Coop Client] [inventaire] adoption envoyée : 3 objet(s) [Copper ×1, FireExtinguisher ×1, Titanium ×1] — le serveur les remplace ensuite par ses décisions.
-[Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Créatif', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=1, refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True
+[Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Créatif', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=1, attente de l'accord=26.6 ms (min=19.4, max=26.6), refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True
 [Coop Craft] [sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True
 LOG
     cat > "$WORK_DIR/AD/coop-server.log" <<'LOG'
@@ -164,7 +164,7 @@ LOG
 [Coop Client] [boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde=True, pauseCliente=désactivée, ramassage=arbitré, craft=arbitré).
 [Coop Client] [craft] interception : 'Accumulator' bloqué avant consommation, en attente du serveur (requête 1, bloqués=1).
 [Coop Client] [craft] accord du serveur : 'Accumulator' — reprise du craft local sur le fabricator (requête 1, reprises=1).
-[Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Survie', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=0, refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True
+[Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Survie', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=0, attente de l'accord=27.4 ms (min=26.0, max=27.4), refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True
 [Coop Craft] [sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True
 LOG
     cat > "$WORK_DIR/AE/coop-server.log" <<'LOG'

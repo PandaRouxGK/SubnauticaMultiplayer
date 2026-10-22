@@ -51,6 +51,13 @@ namespace Coop.Client
         /// <summary>Instances par id, pour rejouer l'action sur celle qui a demandé (références Unity).</summary>
         private static readonly Dictionary<int, Crafter> Instances = new Dictionary<int, Crafter>();
 
+        /// <summary>Instant de l'interception par id de requête : mesure la latence ajoutée par l'accord.</summary>
+        private static readonly Dictionary<int, float> SentAt = new Dictionary<int, float>();
+
+        private static float _lastLatencyMs = -1f;
+        private static float _minLatencyMs = -1f;
+        private static float _maxLatencyMs = -1f;
+
         /// <summary>
         /// Noms de matériaux dont le prélèvement local est **en cours** : la réconciliation ne doit pas les
         /// retirer avant que le jeu ne les consomme lui-même, sinon le craft approuvé échouerait faute de
@@ -66,6 +73,15 @@ namespace Coop.Client
         private static int _replayed;
         private static int _refused;
         private static int _replayFailed;
+
+        /// <summary>Dernière latence mesurée entre l'interception et la décision du serveur (ms).</summary>
+        public static float LastLatencyMs => _lastLatencyMs;
+
+        /// <summary>Latence minimale observée sur la session (ms), `-1` si aucune.</summary>
+        public static float MinLatencyMs => _minLatencyMs;
+
+        /// <summary>Latence maximale observée sur la session (ms), `-1` si aucune.</summary>
+        public static float MaxLatencyMs => _maxLatencyMs;
 
         public static int BlockedCount => _blocked;
         public static int ReplayedCount => _replayed;
@@ -194,6 +210,7 @@ namespace Coop.Client
             }
 
             Instances[instanceId] = __instance;
+            SentAt[requestId] = UnityEngine.Time.realtimeSinceStartup;
 
             RememberCost(techType);
             _blocked++;
@@ -219,6 +236,11 @@ namespace Coop.Client
             }
 
             var tech = (TechType)result.TechType;
+            var latencyMs = TakeLatency(result.RequestId);
+
+            // Une demande partie sans passer par le garde (sonde de cadence) n'a pas d'instant de départ :
+            // on n'écrit pas « décision en -1 ms », qui se lirait comme une mesure.
+            var latencyNote = latencyMs >= 0f ? $", décision en {latencyMs:F1} ms" : string.Empty;
 
             if (!result.Granted)
             {
@@ -232,7 +254,7 @@ namespace Coop.Client
                     (result.MissingTechType != 0
                         ? $", manque TechType {result.MissingTechType} ×{result.MissingAmount}"
                         : string.Empty) +
-                    $") — rien n'a été consommé localement (requête {result.RequestId}).");
+                    $") — rien n'a été consommé localement (requête {result.RequestId}{latencyNote}).");
                 return;
             }
 
@@ -259,7 +281,7 @@ namespace Coop.Client
 
             _log?.LogInfo(
                 $"[craft] accord du serveur : '{tech}' — reprise du craft local sur le fabricator " +
-                $"(requête {result.RequestId}, reprises={_replayed}).");
+                $"(requête {result.RequestId}{latencyNote}, reprises={_replayed}).");
 
             try
             {
@@ -279,6 +301,28 @@ namespace Coop.Client
             }
         }
 
+        /// <summary>Latence de la décision pour cet id, en ms (`-1` si l'id n'était pas suivi).</summary>
+        private static float TakeLatency(int requestId)
+        {
+            if (!SentAt.TryGetValue(requestId, out var sent))
+            {
+                return -1f;
+            }
+
+            SentAt.Remove(requestId);
+            var latency = (UnityEngine.Time.realtimeSinceStartup - sent) * 1000f;
+
+            if (latency < 0f)
+            {
+                return -1f;
+            }
+
+            _lastLatencyMs = latency;
+            _minLatencyMs = _minLatencyMs < 0f ? latency : Math.Min(_minLatencyMs, latency);
+            _maxLatencyMs = Math.Max(_maxLatencyMs, latency);
+            return latency;
+        }
+
         /// <summary>
         /// Fermeture de session : aucune demande ni jeton de la session précédente ne doit survivre. Une
         /// réponse arrivée après la coupure ne rejoue donc rien — et le jeu n'a rien consommé pour elle.
@@ -288,6 +332,7 @@ namespace Coop.Client
             var pending = Ledger.PendingCount;
             Ledger.Clear();
             Instances.Clear();
+            SentAt.Clear();
 
             if (pending > 0)
             {

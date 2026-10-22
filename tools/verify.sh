@@ -684,6 +684,8 @@ assert_ad() {
         "la sonde conclut True : bloqué, accordé, produit apparu, refus nommé sans effet"
     expect AD "$client" "\\[sonde\\] cadence : .*verdict=True" \
         "une rafale de demandes est refusée par la cadence, sans coupure"
+    expect AD "$client" "attente de l'accord=[0-9]+\\.[0-9] ms" \
+        "la latence ajoutée par l'accord est mesurée, pas supposée"
     expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence : [1-9][0-9]* ms" \
         "le serveur nomme et date le refus de cadence"
 }
@@ -711,6 +713,8 @@ assert_ae() {
         "la sonde conclut True en Survie : bloqué, accordé, rejoué, produit apparu, refus nommé"
     expect AE "$client" "\\[sonde\\] cadence : .*verdict=True" \
         "la cadence refuse une rafale, même en Survie"
+    expect AE "$client" "attente de l'accord=[0-9]+\\.[0-9] ms" \
+        "la latence de l'accord est mesurée en Survie aussi"
     expect AE "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence :" \
         "le refus de cadence est nommé côté serveur, en Survie"
     expect_missing AE "$client" "mode sans ingrédients" \

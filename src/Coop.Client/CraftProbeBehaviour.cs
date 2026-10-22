@@ -265,8 +265,9 @@ namespace Coop.Client
                     "[sonde] craft : recette='{0}' coût=[{1}] produit='{2}' mode='{3}', " +
                     "bloqué={4}/{5}, matériaux intacts avant accord={6}, accordé={7}, rejoué={8}, " +
                     "produit apparu={9} ({10} -> {11}), matériaux consommés={12}, " +
-                    "coût retiré par la réconciliation={13}, refus nommé={14} ({15}), " +
-                    "rien consommé après refus={16}, échecs de réconciliation={17} — verdict={18}",
+                    "coût retiré par la réconciliation={13}, attente de l'accord={14:F1} ms " +
+                    "(min={15:F1}, max={16:F1}), refus nommé={17} ({18}), " +
+                    "rien consommé après refus={19}, échecs de réconciliation={20} — verdict={21}",
                     tech,
                     costText,
                     product,
@@ -281,6 +282,9 @@ namespace Coop.Client
                     productAfterFirst,
                     consumed,
                     reconciledForCost,
+                    CraftGuard.LastLatencyMs,
+                    CraftGuard.MinLatencyMs,
+                    CraftGuard.MaxLatencyMs,
                     refusedSecond,
                     client.LastCraftOutcome,
                     untouchedAfterRefusal,
