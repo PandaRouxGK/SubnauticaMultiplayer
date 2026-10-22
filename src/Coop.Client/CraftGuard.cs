@@ -251,9 +251,16 @@ namespace Coop.Client
 
             if (!result.Granted)
             {
-                if (Ledger.TryRefuse(result.RequestId, out _))
+                if (Ledger.TryRefuse(result.RequestId, out var refused))
                 {
                     _refused++;
+
+                    // Une demande refusée ne sera jamais rejouée : garder la référence au `Crafter` ne
+                    // servirait plus, et la garderait en vie jusqu'à la fin de la session.
+                    if (refused != null)
+                    {
+                        Instances.Remove(refused.InstanceId);
+                    }
 
                     // Seule une demande passée par le garde a armé une protection : la lever pour un refus
                     // venu d'ailleurs (rafale brute de la sonde) découragerait un craft encore en attente.
@@ -311,6 +318,10 @@ namespace Coop.Client
                     // donc à ce point le jeu a payé : garder la protection 10 s de plus ne protégerait
                     // qu'un matériau déjà parti, et retarderait la réconciliation sans raison.
                     ReleaseCost(tech);
+
+                    // La reprise est faite : l'instance n'a plus de raison d'être retenue (une référence
+                    // Unity gardée pour rien empêcherait sa collecte jusqu'à la fin de la session).
+                    Instances.Remove(pending.InstanceId);
                 }
             }
             catch (Exception exception)

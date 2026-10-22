@@ -5193,6 +5193,7 @@ ouverte ne fait que retarder la réconciliation sur ce matériau.
 |---|---|---|
 | levée de protection | `Coop.Client/CraftGuard.cs` (`ReleaseCost`) | appelée sur **refus** (seulement si la demande venait du garde : une rafale brute de la sonde n'a rien armé) et sur **reprise réussie** ; une reprise refusée par le jeu garde la protection, puisque les matériaux sont toujours là |
 | références par matériau | `Coop.Client/CraftGuard.cs` (`InFlightRefs`) | deux recettes peuvent partager un ingrédient : un refus ne découvre que **sa** référence, et la dernière levée retire l'entrée ; `Clear()` oublie aussi ces deux tables (elles survivaient à la session) |
+| élagage des instances | `Coop.Client/CraftGuard.cs` | après une reprise faite ou un refus, la référence au `Crafter` est retirée : une demande refusée ne sera jamais rejouée, et garder l'objet empêcherait sa collecte jusqu'à la fin de la session |
 | journal | `Coop.Client/CraftGuard.cs` | `[craft] protection levée : Titanium (consommation locale faite ou refus : rien ne reste à protéger) — la réconciliation peut de nouveau agir sur ce matériau.` |
 | harnais | `tools/verify.sh` (**AE**, **AD**) | `expect` sur `protection levée : [A-Za-z]+` en Survie, `expect_missing` en Créatif (aucune protection armée, donc rien à lever) |
 
@@ -5204,6 +5205,7 @@ ouverte ne fait que retarder la réconciliation sur ce matériau.
 | `check-verify-assertions.sh` | rc=0 — 31 étapes, fixtures AE/AD au nouveau format, 20 échecs nommés |
 | étape **AD** (Créatif, 54 s) | **OK** — `mode='Créatif' … coût retiré par la réconciliation=1` ; `grep -c "matériaux protégés\|protection levée"` = **0** |
 | étape **AE** (Survie, 55 s) | **OK** — `matériaux protégés 10 s : Titanium` à 17:54:22.158, `accord du serveur … (décision en 27.3 ms)`, `protection levée : Titanium` à 17:54:22.189 (31 ms plus tard, après la consommation du jeu), puis seconde demande : protection armée, **refus** `MissingMaterial` et `protection levée` **avant** la ligne de refus ; verdict `matériaux consommés=True, coût retiré par la réconciliation=0, attente de l'accord=27.1 ms (min=27.1, max=27.3) … verdict=True` |
+| étape **AD**/**AE**, après l'élagage | **OK (55 s / 55 s)** — `VERDICT GLOBAL : tout est vert` : la reprise sur la même instance et le refus fonctionnent toujours sans la référence conservée |
 | étape **AE**, cadence | **OK** — `[sonde] cadence : demandes=12 refus de cadence=4 … verdict=True` |
 | première tentative | **AE rouge** : l'assertion attendait une levée au refus, mais la protection du **premier** craft (accordé) était encore armée → la levée ne faisait que décrémenter (références). C'est ce qui a mené à lever aussi après une reprise réussie |
 
