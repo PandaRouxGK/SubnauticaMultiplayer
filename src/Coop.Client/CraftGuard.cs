@@ -364,6 +364,23 @@ namespace Coop.Client
             _log?.LogInfo($"[craft] sonde : protection forcée de {string.Join(", ", protectedNames)}.");
         }
 
+        /// <summary>Identifiants réservés à la sonde : aucun id réel du serveur ne les atteint.</summary>
+        private const int ProbeRequestId = 9_001;
+        private const int ProbeInstanceId = 9_001;
+
+        /// <summary>
+        /// Sonde : retient une demande **fictive** pour exercer la purge de fin de session (`Clear`). Aucun
+        /// paquet n'est envoyé, aucune instance Unity n'est retenue. Rend le nombre de demandes en attente.
+        /// </summary>
+        internal static int PendForProbe(ushort techType)
+        {
+            Ledger.Add(ProbeRequestId, ProbeInstanceId, techType);
+            return Ledger.PendingCount;
+        }
+
+        /// <summary>Demandes encore en attente (diagnostic de la sonde et des lignes de purge).</summary>
+        internal static int PendingCountForProbe => Ledger.PendingCount;
+
         /// <summary>Sonde : lève une protection forcée et rejoue les retraits reportés, comme le ferait un accord.</summary>
         internal static void ReleaseForProbe(string techTypeName)
         {

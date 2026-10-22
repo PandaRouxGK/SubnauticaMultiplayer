@@ -5301,3 +5301,38 @@ restait indéfiniment. La levée de protection est maintenant un **point de repr
 - **La reprise s'appuie sur le dernier instantané connu** : un nom absent de cet instantané est compté `0`, ce
   qui retirerait toutes ses copies locales. Vrai pour un instantané **complet** (c'est ce que le serveur
   envoie), faux si un jour il devenait un delta — la restauration de cet invariant n'est pas vérifiée ici.
+
+## 79. La purge de fin de session est exercée (2026-10-22)
+
+Dette écrite trois fois (§72.3, §76.3) : `CraftGuard.Clear()` est branché sur la déconnexion, sur le
+message `Disconnect` et sur un changement d'adresse, mais **aucune étape ne fermait une session avec une
+demande en attente** — on savait le code présent, pas qu'il vidait la table. C'est la dernière dette
+« branchée mais jamais exercée » du lot craft.
+
+### 79.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| sonde, demande fictive | `Coop.Client/CraftGuard.cs` (`PendForProbe`) | retient une demande sous des identifiants **réservés** (9 001), sans paquet réseau et sans instance Unity ; `PendingCountForProbe` relit la table |
+| sonde, purge | `Coop.Client/CraftProbeBehaviour.cs` (`ClearAtSessionEnd`) | appelle `Clear()` — le chemin exact de la déconnexion — puis vérifie `avant=1, après=0` et l'écrit en verdict |
+| harnais | `tools/verify.sh` (**AE**) | `expect` sur `1 demande(s) en attente oubliée(s) à la fermeture de session` (la ligne du garde) **et** sur `[sonde] purge : demandes en attente avant=1, après=0 — verdict=True` ; la phase n'existe qu'en Survie, donc **AD** ne change pas |
+
+### 79.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `check-verify-assertions.sh` | rc=0 — 31 étapes, 20 échecs nommés, fixture AE au nouveau format |
+| étape **AE** (Survie, 54 s) | **OK** — `[craft] 1 demande(s) en attente oubliée(s) à la fermeture de session.` puis `[sonde] purge : demandes en attente avant=1, après=0 — verdict=True` à 18:21:56.640 ; le reste de l'étape (craft, cadence, report/reprise) reste vert |
+| étape **AD** (Créatif, 55 s) | **OK, inchangée** — la phase est désactivée hors Survie (aucune ligne `sonde] purge`) |
+
+### 79.3 Ce que ce lot ne prouve pas
+
+- **C'est un `Clear()` appelé par la sonde**, pas par une vraie coupure réseau : la purge est prouvée, le
+  **déclencheur** (déconnexion, `Disconnect`, changement d'adresse) reste vérifié par lecture du code et par
+  trois appels dans `Plugin.cs`.
+- La demande retenue est fictive (id 9 001) : la purge d'une demande **réellement partie** et dont la réponse
+  arrive après la coupure n'est pas mesurée — c'est le scénario complet que seul un run de reconnexion
+  prouverait.
+- `Clear()` vide aussi `Instances`, `SentAt` et l'état de protection/report ; seule la table des demandes est
+  comptée ici, le reste n'est vérifié qu'indirectement (les étapes suivantes restent vertes).

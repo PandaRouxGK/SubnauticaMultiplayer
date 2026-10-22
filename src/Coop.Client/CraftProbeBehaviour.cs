@@ -353,6 +353,36 @@ namespace Coop.Client
             if (requiresIngredients)
             {
                 DeferAndRetry();
+                ClearAtSessionEnd(tech);
+            }
+        }
+
+        /// <summary>
+        /// Fermeture de session : une demande en attente ne doit pas survivre (une réponse tardive rejouerait
+        /// un craft dans la session suivante). La sonde retient une demande **fictive**, appelle `Clear` — le
+        /// même chemin que la déconnexion, le message `Disconnect` et le changement d'adresse — et vérifie
+        /// que la table est vide ensuite.
+        /// </summary>
+        private static void ClearAtSessionEnd(TechType techType)
+        {
+            var before = CraftGuard.PendForProbe((ushort)techType);
+            CraftGuard.Clear();
+            var after = CraftGuard.PendingCountForProbe;
+            var verdict = before == 1 && after == 0;
+
+            Log.LogInfo(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[sonde] purge : demandes en attente avant={0}, après={1} — verdict={2}",
+                    before,
+                    after,
+                    verdict));
+
+            if (!verdict)
+            {
+                Log.LogError(
+                    $"[sonde] purge : verdict=False — {before} demande(s) retenue(s) avant la purge " +
+                    $"(attendu 1), {after} après (attendu 0).");
             }
         }
 

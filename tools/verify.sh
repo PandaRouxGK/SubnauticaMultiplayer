@@ -731,6 +731,10 @@ assert_ae() {
         "le report est repris dès la levée de la protection"
     expect AE "$client" "\\[sonde\\] report : .*verdict=True" \
         "la sonde mesure le report et sa reprise : rien n'est retiré avant, l'unité part après"
+    expect AE "$client" "1 demande\\(s\\) en attente oubliée\\(s\\) à la fermeture de session" \
+        "la purge de fin de session oublie la demande retenue au lieu de la laisser survivre"
+    expect AE "$client" "\\[sonde\\] purge : demandes en attente avant=1, après=0 — verdict=True" \
+        "la table des demandes est vide après la purge"
     expect AE "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence :" \
         "le refus de cadence est nommé côté serveur, en Survie"
     expect_missing AE "$client" "mode sans ingrédients" \
