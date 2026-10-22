@@ -1016,6 +1016,9 @@ namespace Coop.Client
                 _server = null;
             }
 
+            // Une nouvelle session ne doit pas hériter des demandes de craft de la précédente.
+            CraftGuard.Clear();
+
             _accepted = false;
             _assignedPlayerId = 0;
             _saveWaitStarted = -1.0;
@@ -1591,6 +1594,7 @@ namespace Coop.Client
             _lastHeldItemSignature = null;
             _server = null;
             _pingSentAt.Clear();
+            CraftGuard.Clear();
             _remotes?.ClearAll();
             _vehicles?.ReleaseAll("déconnexion du serveur");
             _nextReconnectTime = _clock.Elapsed.TotalSeconds + ReconnectDelaySeconds;
@@ -1714,6 +1718,7 @@ namespace Coop.Client
                     _accepted = false;
                     _assignedPlayerId = 0;
                     _server = null;
+                    CraftGuard.Clear();
                     _remotes?.ClearAll();
 
                     // Un serveur qui disparaît ne doit pas laisser le monde du client à moitié figé :

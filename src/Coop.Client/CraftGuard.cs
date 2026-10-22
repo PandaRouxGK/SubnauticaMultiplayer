@@ -279,6 +279,23 @@ namespace Coop.Client
             }
         }
 
+        /// <summary>
+        /// Fermeture de session : aucune demande ni jeton de la session précédente ne doit survivre. Une
+        /// réponse arrivée après la coupure ne rejoue donc rien — et le jeu n'a rien consommé pour elle.
+        /// </summary>
+        public static void Clear()
+        {
+            var pending = Ledger.PendingCount;
+            Ledger.Clear();
+            Instances.Clear();
+
+            if (pending > 0)
+            {
+                _log?.LogInfo(
+                    $"[craft] {pending} demande(s) en attente oubliée(s) à la fermeture de session.");
+            }
+        }
+
         /// <summary>Garde les noms de la recette hors de la réconciliation pendant la reprise locale.</summary>
         private static void RememberCost(TechType techType)
         {

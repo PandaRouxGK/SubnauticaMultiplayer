@@ -23,9 +23,9 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 FAILURES=()
-source <(sed -n '/^expect()/,/^}/p;/^expect_missing()/,/^}/p;/^expect_any()/,/^}/p;/^assert_p()/,/^}/p;/^assert_q()/,/^}/p;/^assert_n()/,/^}/p;/^assert_b()/,/^}/p;/^assert_r()/,/^}/p' "$VERIFY")
+source <(sed -n '/^expect()/,/^}/p;/^expect_missing()/,/^}/p;/^expect_any()/,/^}/p;/^assert_p()/,/^}/p;/^assert_q()/,/^}/p;/^assert_n()/,/^}/p;/^assert_b()/,/^}/p;/^assert_r()/,/^}/p;/^assert_ad()/,/^}/p;/^assert_ae()/,/^}/p' "$VERIFY")
 
-for function in expect expect_missing expect_any assert_p assert_q assert_n assert_b assert_r; do
+for function in expect expect_missing expect_any assert_p assert_q assert_n assert_b assert_r assert_ad assert_ae; do
     if ! declare -F "$function" >/dev/null; then
         echo "ECHEC : la fonction $function n'a pas pu être extraite de $VERIFY" >&2
         echo "        (le découpage sed dépend des lignes « function » et « } » en colonne 0)" >&2
@@ -33,7 +33,7 @@ for function in expect expect_missing expect_any assert_p assert_q assert_n asse
     fi
 done
 
-mkdir -p "$WORK_DIR/P" "$WORK_DIR/Q" "$WORK_DIR/N" "$WORK_DIR/B" "$WORK_DIR/R"
+mkdir -p "$WORK_DIR/P" "$WORK_DIR/Q" "$WORK_DIR/N" "$WORK_DIR/B" "$WORK_DIR/R" "$WORK_DIR/AD" "$WORK_DIR/AE"
 
 # 0. Toutes les étapes déclarées doivent être **atteignables**. Le 2026-10-19, la validation de `--only`
 #    s'arrêtait à `O` alors que P et Q existaient : les deux étapes répondaient « étape inconnue », donc
@@ -144,6 +144,33 @@ LOG
 [net] empreinte de sauvegarde acceptée : client=slot='slot0000' session='aae68629' changeSet=3 mode=Survival hash=0x1234 · serveur=slot='slot0000' session='aae68629' changeSet=3 mode=Survival hash=0x1234
 [net] handshake REFUSÉ pour 'killi' : sauvegarde différente (client='slot0001', serveur='slot0000')
 LOG
+    # Étapes AD (Créatif) et AE (Survie) : le craft payé, la cadence nommée, et le régime du jeu. Les lignes
+    # sont recopiées du code (`CraftGuard`, `CraftProbeBehaviour`, `HandleCraftRequest`) et de runs verts.
+    cat > "$WORK_DIR/AD/coop-client.log" <<'LOG'
+[Coop Client] [boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde=True, pauseCliente=désactivée, ramassage=arbitré, craft=arbitré).
+[Coop Client] [craft] interception : 'Accumulator' bloqué avant consommation, en attente du serveur (requête 1, bloqués=1).
+[Coop Client] [craft] accord du serveur : 'Accumulator' — reprise du craft local sur le fabricator (requête 1, reprises=1).
+[Coop Client] [inventaire] adoption envoyée : 3 objet(s) [Copper ×1, FireExtinguisher ×1, Titanium ×1] — le serveur les remplace ensuite par ses décisions.
+[Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Créatif', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=1, refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True
+[Coop Craft] [sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True
+LOG
+    cat > "$WORK_DIR/AD/coop-server.log" <<'LOG'
+[Coop Server] [net] inventaire de 'killi'#1 : révision 2, 3 objet(s) (3 unité(s)) — adoption
+[Coop Server] [net] craft : 'killi'#1 -> 'Accumulator' ACCORDÉ (coût : Titanium ×1) — révision 2 -> 3.
+[Coop Server] [net] craft : 'killi'#1 -> 'Accumulator' REFUSÉ (MissingMaterial : Titanium ×1 (registre 0)) — révision 3 inchangée.
+[Coop Server] [net] craft : 'killi'#1 -> 'Accumulator' REFUSÉ (RateLimited : cadence : 499 ms avant le prochain jeton (rafale 8, 1 par 500 ms)) — révision 3 inchangée.
+LOG
+    cat > "$WORK_DIR/AE/coop-client.log" <<'LOG'
+[Coop Client] [boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde=True, pauseCliente=désactivée, ramassage=arbitré, craft=arbitré).
+[Coop Client] [craft] interception : 'Accumulator' bloqué avant consommation, en attente du serveur (requête 1, bloqués=1).
+[Coop Client] [craft] accord du serveur : 'Accumulator' — reprise du craft local sur le fabricator (requête 1, reprises=1).
+[Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Survie', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=0, refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True
+[Coop Craft] [sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True
+LOG
+    cat > "$WORK_DIR/AE/coop-server.log" <<'LOG'
+[Coop Server] [net] craft : 'killi'#1 -> 'Accumulator' ACCORDÉ (coût : Titanium ×1) — révision 2 -> 3.
+[Coop Server] [net] craft : 'killi'#1 -> 'Accumulator' REFUSÉ (RateLimited : cadence : 499 ms avant le prochain jeton (rafale 8, 1 par 500 ms)) — révision 3 inchangée.
+LOG
     cat > "$WORK_DIR/Q/coop-client-2.log" <<'LOG'
 [net] disparition reçue : clé=0x7ce3b6a1e8e7e312 (véhicule) — motif « véhicule détruit chez le serveur »
 [disparition] retrait de 0x7ce3b6a1e8e7e312 mis en attente — le monde n'est pas encore chargé (appliqué dès qu'il le sera, sinon la sauvegarde ferait revenir l'objet).
@@ -160,12 +187,14 @@ assert_q
 assert_n
 assert_b
 assert_r
+assert_ad
+assert_ae
 if [ "${#FAILURES[@]}" -ne 0 ]; then
     echo "ECHEC : une assertion ne peut pas accepter le format documenté :" >&2
     printf '  - %s\n' "${FAILURES[@]}" >&2
     exit 1
 fi
-echo "OK   les assertions P, Q, N, B et R acceptent les journaux au format du code"
+echo "OK   les assertions P, Q, N, B, R, AD et AE acceptent les journaux au format du code"
 
 # 2. Discrimination : retirer des lignes exigées doit produire des échecs **nommés**. Une assertion qui
 #    resterait verte ici ne prouverait rien en jeu.
@@ -178,6 +207,10 @@ grep -v 'autre(s) client(s) connu(s)' "$WORK_DIR/B/coop-client.log" > "$WORK_DIR
 grep -v 'couleur rejouée' "$WORK_DIR/B/coop-client-2.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/B/coop-client-2.log"
 grep -v 'handshake REFUSÉ pour' "$WORK_DIR/R/coop-server.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/R/coop-server.log"
 grep -v 'handshake REFUSÉ par le serveur' "$WORK_DIR/R/coop-client-2.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/R/coop-client-2.log"
+grep -v "\[craft\] interception" "$WORK_DIR/AD/coop-client.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/AD/coop-client.log"
+grep -v 'RateLimited' "$WORK_DIR/AD/coop-server.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/AD/coop-server.log"
+grep -v "mode='Survie'" "$WORK_DIR/AE/coop-client.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/AE/coop-client.log"
+grep -v 'RateLimited' "$WORK_DIR/AE/coop-server.log" > "$WORK_DIR/tmp" && mv "$WORK_DIR/tmp" "$WORK_DIR/AE/coop-server.log"
 
 FAILURES=()
 assert_p
@@ -185,8 +218,10 @@ assert_q
 assert_n
 assert_b
 assert_r
-if [ "${#FAILURES[@]}" -lt 9 ]; then
-    echo "ECHEC : seulement ${#FAILURES[@]} échec(s) après retrait de neuf lignes exigées —" >&2
+assert_ad
+assert_ae
+if [ "${#FAILURES[@]}" -lt 13 ]; then
+    echo "ECHEC : seulement ${#FAILURES[@]} échec(s) après retrait de treize lignes exigées —" >&2
     echo "        au moins une assertion ne dépend pas de la ligne qu'elle prétend vérifier." >&2
     exit 1
 fi
@@ -201,6 +236,10 @@ expected=(
     'la couleur est appliquée à un avatar qui existait déjà'
     'le serveur refuse la seconde sauvegarde en nommant les deux slots'
     'client 2 : le refus lui est rendu avec le même motif'
+    "l'appel réel du fabricator est bloqué avant toute consommation"
+    'le serveur nomme et date le refus de cadence'
+    "la sonde mesure bien une partie en Survie"
+    'le refus de cadence est nommé côté serveur, en Survie'
 )
 for what in "${expected[@]}"; do
     found=0
@@ -216,5 +255,5 @@ for what in "${expected[@]}"; do
     fi
 done
 
-echo "OK   ${#FAILURES[@]} échec(s) nommés après retrait de neuf lignes — les assertions discriminent"
-echo "VERDICT : les assertions P, Q, N, B et R sont satisfiables et discriminantes (mesure en jeu non incluse)"
+echo "OK   ${#FAILURES[@]} échec(s) nommés après retrait de treize lignes — les assertions discriminent"
+echo "VERDICT : les assertions P, Q, N, B, R, AD et AE sont satisfiables et discriminantes (mesure en jeu non incluse)"

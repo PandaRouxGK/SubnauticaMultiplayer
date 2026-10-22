@@ -5050,6 +5050,7 @@ valait pour n'importe quelle instance de cette recette), et le serveur n'avait *
 | branchement | `ServerNetwork.Inventory.cs` (`HandleCraftRequest`) | la cadence est testée **avant** toute lecture de recette ; le journal nomme et date le refus (`cadence : N ms avant le prochain jeton`) |
 | sonde | `CraftProbeBehaviour` | après la mesure du craft, envoie **12 demandes brutes** (hors garde) et compte les refus `RateLimited` |
 | harnais | étapes **AD** et **AE** | deux assertions de plus chacune : verdict de cadence côté client, refus nommé côté serveur |
+| fermeture de session | `Plugin.cs` (déconnexion, message `Disconnect`, changement d'adresse) | `CraftGuard.Clear()` oublie demandes et jetons : une réponse tardive ne rejoue rien, et le journal compte ce qui a été oublié |
 
 Le seau est en arithmétique entière : le premier jet était en `double`, et un test a montré qu'une recharge
 partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi flottant).
@@ -5070,7 +5071,7 @@ partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi f
 - **Le seau vit en mémoire** : il repart plein à la reconnexion, ce qui est voulu (nouvelle session) mais
   n'empêche pas un client de se reconnecter en boucle pour contourner le rythme (le handshake reste borné
   par le reste du protocole).
-- **Le registre des demandes ne survit pas à une déconnexion** : les demandes en attente sont simplement
-  perdues, et le jeu n'a rien consommé pour elles (`Clear()` n'est pas encore branché sur la fermeture de
-  session — la perte est bénigne, mais elle n'est pas exercée).
+- **La purge à la fermeture de session est branchée mais non exercée en jeu** : `CraftGuard.Clear()` est
+  appelé sur la déconnexion, sur le message `Disconnect` et sur un changement d'adresse ; aucune étape ne
+  ferme une session avec une demande en attente pour vérifier que la réponse tardive ne rejoue rien.
 - **Rien de nouveau côté contenu** : `RocketConstructor` reste hors du garde, et le produit reste local.
