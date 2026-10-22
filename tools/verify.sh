@@ -103,10 +103,10 @@
 #      (révision +1), la réconciliation retire l'objet de `Inventory.main` chez le client, et un second
 #      débit du même objet est **refusé nommément** (`UnknownItem`) sans déplacer la révision. C'est la
 #      seconde tranche de l'inventaire (v20) : le client ne retire rien de son propre chef.
-#   AD un client, sonde de craft -> le serveur **adopte** l'inventaire réel du joueur (seule déclaration
-#      du protocole, une fois par session), lit la **recette du jeu** (`TechData.GetIngredients`), prélève
-#      les matériaux sur son registre et le monde du client s'aligne ; la même demande rejouée est
-#      **refusée en nommant le matériau manquant**. Le produit n'est pas instancié : ce lot arbitre le coût.
+#   AD un client, sonde de craft -> le **vrai fabricator** est patché (`CrafterLogic.Craft`) : l'appel est
+#      **bloqué avant toute consommation**, le serveur lit la recette du jeu (`TechData.GetIngredients`) et
+#      prélève son registre, l'accord **rejoue** le craft, le produit apparaît au ramassage (`TryPickup`),
+#      puis la même demande est **refusée en nommant le matériau manquant** sans rien consommer ni créer.
 #
 # Usage :
 #   tools/verify.sh                    # les trente étapes
@@ -669,8 +669,14 @@ assert_ad() {
         "le serveur prélève le coût de la recette du jeu et sa révision avance"
     expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\((MissingMaterial|NotEnoughMaterial) : .+\\) — révision [0-9]+ inchangée" \
         "la même demande, les matériaux partis, est refusée en nommant le manque"
+    expect AD "$client" "\\[boot\\] GameObject 'Coop.Client.Bootstrap' créé .*craft=arbitré" \
+        "le garde de craft est installé (CrafterLogic.Craft patché)"
+    expect AD "$client" "\\[craft\\] interception : '.*' bloqué avant consommation" \
+        "l'appel réel du fabricator est bloqué avant toute consommation"
+    expect AD "$client" "\\[craft\\] accord du serveur : .* reprise du craft local" \
+        "l'accord du serveur rejoue le craft sur l'instance interceptée"
     expect AD "$client" "\\[sonde\\] craft : .*verdict=True" \
-        "la sonde conclut True sur le coût prélevé et sur le refus nommé"
+        "la sonde conclut True : bloqué, accordé, produit apparu, refus nommé sans effet"
 }
 
 assert_d() {
@@ -1590,7 +1596,7 @@ if wanted AD "$ONLY"; then
     args=(--clients=1 --timeout=480
         "--host-args=-coopmode=server"
         "--client-args=-coopmode=client -coopdebug=craft"
-        "--client-marker=\\[sonde\\] craft :")
+        "--client-marker=\\[sonde\\] craft : recette=")
     if [ "$NO_BUILD" = 1 ]; then
         args+=(--no-build)
     fi

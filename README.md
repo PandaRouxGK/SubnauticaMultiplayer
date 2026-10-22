@@ -30,8 +30,9 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   l'unité retirée du registre quitte réellement `Inventory.main` (réconciliation) ; l'inventaire réel du
   joueur est **adopté** une fois à l'admission, puis **conservé sur disque** par le serveur ;
 - **craft payé** : le serveur lit la **recette du jeu** (`TechData.GetIngredients`), prélève les matériaux
-  **atomiquement** sur son registre et refuse en nommant le manque — le produit reste fabriqué par le
-  client, et le menu du jeu n'est pas encore patché (la sonde est le seul demandeur) ;
+  **atomiquement** sur son registre et refuse en nommant le manque ; le **fabricator** du jeu
+  (`CrafterLogic.Craft`) attend cet accord avant de consommer quoi que ce soit, puis le craft est rejoué —
+  le produit, lui, reste fabriqué par le client ;
 - sauvegarde : le client n'écrit pas (garde sur deux remparts), l'hôte écrit toujours ;
 - hôte dédié : aucun personnage joueur exposé aux clients ;
 - **empreinte de sauvegarde (P0)** : handshake v13 accepté avec `save=slot=…` ; étape P verte ;
@@ -51,7 +52,8 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`PLAN.md` §65), `AA` l'heure du monde diffusée puis appliquée (`PLAN.md` §66), `AB` le registre
   d'inventaire du serveur confronté au ramassage réel, `AC` le débit accordé puis refusé avec le retrait
   réel dans `Inventory.main` (`PLAN.md` §67 et §68) et `AD` l'adoption de l'inventaire, le coût d'une vraie
-  recette prélevé puis refusé nommément (`PLAN.md` §69). `tools/verify.sh` sans `--only` lance bien les
+  recette prélevé puis refusé nommément (`PLAN.md` §69), et le **fabricator réel** bloqué avant consommation
+  puis rejoué sur accord (`PLAN.md` §70). `tools/verify.sh` sans `--only` lance bien les
   trente.
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
@@ -62,10 +64,9 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
 capsule de test), plus de 8 joueurs, et des sauvegardes ou zones différentes ; la désynchronisation des
 véhicules et des avatars n'est pas mesurée non plus (`PLAN.md` §62.4).
 
-**Ce qui n'existe pas encore :** récolte, oxygène et bases partagés ; le **menu de craft** patché et
-l'instanciation du produit après accord (le coût, lui, est arbitré) ; le branchement du débit sur les
-consommateurs du jeu (nourriture, dépôt) ; la réconciliation des objets équipés ; contenu custom livré au
-client ; authentification ou chiffrement.
+**Ce qui n'existe pas encore :** récolte, oxygène et bases partagés ; l'**économie partagée** (le produit
+reste local) ; le branchement du débit sur les autres consommateurs du jeu (nourriture, dépôt) ; la
+réconciliation des objets équipés ; contenu custom livré au client ; authentification ou chiffrement.
 
 ## Prérequis
 

@@ -71,6 +71,11 @@ namespace Coop.Client
             // journal le dit — un ramassage non arbitré n'abîme rien.
             var pickupGuardInstalled = PickupGuard.Install(Log);
 
+            // v21 : le **vrai** craft du jeu (fabricator, menu) demande l'accord du serveur. Même règle que
+            // le ramassage : si la cible n'existe pas dans cette version, le craft reste local et le journal
+            // le dit — un craft non arbitré n'abîme rien, il laisse seulement passer un coût non vérifié.
+            var craftGuardInstalled = CraftGuard.Install(Log);
+
             // Plus de défaut `127.0.0.1` : deux joueurs séparés par Internet ne sont pas sur la même
             // boucle locale, et un client qui se connecte silencieusement à lui-même donnerait une panne
             // incompréhensible. Vide = pas d'adresse, donc **pas de connexion** tant que le joueur n'a pas
@@ -281,7 +286,8 @@ namespace Coop.Client
             Log.LogInfo(
                 $"[boot] GameObject 'Coop.Client.Bootstrap' créé (DontDestroyOnLoad, garde={saveGuardInstalled}, " +
                 $"pauseCliente={(pauseGuardInstalled ? "désactivée" : "NON patchée")}, " +
-                $"ramassage={(pickupGuardInstalled ? "arbitré" : "NON patché")}).");
+                $"ramassage={(pickupGuardInstalled ? "arbitré" : "NON patché")}, " +
+                $"craft={(craftGuardInstalled ? "arbitré" : "NON patché")}).");
         }
 
         /// <summary>
@@ -1991,6 +1997,10 @@ namespace Coop.Client
                     {
                         _craftsRefused++;
                     }
+
+                    // La reprise du craft local est **faite ici**, sur le thread principal, avant que
+                    // l'instantané du coût ne soit traité : le jeu consomme ses matériaux lui-même.
+                    CraftGuard.OnResult(result);
 
                     CoopClientPlugin.Log.LogInfo(
                         $"[craft] résultat : TechType {result.TechType} {(result.Granted ? "ACCORDÉ" : "REFUSÉ")} " +

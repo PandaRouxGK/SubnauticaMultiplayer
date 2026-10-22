@@ -10,23 +10,20 @@ using UnityEngine;
 namespace Coop.Client
 {
     /// <summary>
-    /// Sonde du **craft payé** (v21, `-coopdebug=craft`).
+    /// Sonde du **vrai chemin de craft** (v21, `-coopdebug=craft`).
     ///
-    /// Ce qui est mesuré : le serveur lit la **recette du jeu**, prélève les matériaux sur **son** registre,
-    /// et le monde du client s'aligne (la réconciliation retire les unités prélevées). Puis la même demande
-    /// est rejouée : elle doit être **refusée en nommant le matériau manquant**, sans avancer la révision.
+    /// Elle n'envoie **aucune** demande elle-même : elle appelle `CrafterLogic.Craft` — la méthode que le
+    /// fabricator et le menu utilisent — et mesure ce que le garde en fait. Quatre affirmations :
     ///
-    /// Pourquoi deux demandes : un serveur qui accorderait tout passerait la première, un serveur qui
-    /// refuserait tout passerait la seconde. La preuve est le couple.
+    ///  1. l'appel est **bloqué avant consommation** : il rend `false` et les matériaux locaux ne bougent pas ;
+    ///  2. le serveur **accorde** et le jeu est **rejoué** : le produit apparaît dans `Inventory.main` et les
+    ///     matériaux y sont consommés ;
+    ///  3. la même demande rejouée est **refusée** (matériaux partis) ;
+    ///  4. le refus ne consomme **rien** et ne fabrique **rien**.
     ///
-    /// **La recette est choisie, pas inventée** : la sonde parcourt les `TechType` du jeu, lit leur recette
-    /// par `CraftData.GetRecipe`, et retient la moins chère que `Inventory.main` satisfait réellement. Elle
-    /// ne déclare donc jamais de matériaux qu'elle n'a pas — l'adoption envoyée à l'admission est le vrai
-    /// contenu du joueur.
-    ///
-    /// **Ce que la sonde ne fait pas** : elle ne fabrique pas le produit. L'accord du serveur porte sur le
-    /// **coût** (ce lot) ; le branchement du menu de craft et l'instanciation du produit restent à faire, et
-    /// c'est écrit dans `PLAN.md` §69.4.
+    /// La recette est choisie parmi celles que l'inventaire réel satisfait, et dont le **produit est absent**
+    /// — sans quoi « le produit est apparu » ne serait pas mesurable. Elle n'est jamais déclarée au serveur :
+    /// c'est lui qui lit la recette du jeu.
     /// </summary>
     internal sealed class CraftProbeBehaviour : MonoBehaviour
     {
@@ -35,8 +32,8 @@ namespace Coop.Client
 
         private const float WorldTimeoutSeconds = 120f;
         private const float AdoptionTimeoutSeconds = 90f;
-        private const float ResultTimeoutSeconds = 30f;
-        private const float CostSyncTimeoutSeconds = 30f;
+        private const float ProductTimeoutSeconds = 30f;
+        private const float RefusalSettleSeconds = 2.5f;
         private const int MaxIngredients = 3;
 
         private IEnumerator Start()
@@ -58,8 +55,6 @@ namespace Coop.Client
                 yield break;
             }
 
-            // Sans adoption, le registre serveur ne connaît pas les matériaux sauvegardés : le craft
-            // refuserait pour une raison qui n'a rien à voir avec le coût.
             var adoptionDeadline = Time.realtimeSinceStartup + AdoptionTimeoutSeconds;
             while (client.InventoryAdoptionsSent == 0 && Time.realtimeSinceStartup < adoptionDeadline)
             {
@@ -72,149 +67,206 @@ namespace Coop.Client
                 yield break;
             }
 
-            // Laisse l'instantané d'adoption arriver : la révision est la base de la comparaison.
             yield return new WaitForSecondsRealtime(1f);
+
+            var crafters = UnityEngine.Object.FindObjectsOfType<CrafterLogic>();
+            Log.LogInfo($"[sonde] craft : {crafters.Length} CrafterLogic trouvé(s) dans le monde.");
+
+            if (crafters.Length == 0)
+            {
+                Fail("aucun CrafterLogic dans le monde — le chemin réel du fabricator ne peut pas être exercé");
+                yield break;
+            }
+
+            var crafter = crafters[0];
+
+            // Le `CrafterLogic` du caisson est **désactivé** quand le fabricator est fermé : sa coroutine ne
+            // tourne alors pas, et une reprise approuvée resterait sans effet. La sonde l'active pour la
+            // durée de la mesure (c'est un état de test, pas une règle de produit).
+            var activeBefore = crafter.isActiveAndEnabled;
+            if (!activeBefore)
+            {
+                crafter.enabled = true;
+                if (!crafter.gameObject.activeSelf)
+                {
+                    crafter.gameObject.SetActive(true);
+                }
+
+                Log.LogInfo(
+                    $"[sonde] craft : CrafterLogic réactivé pour la mesure (actif avant={activeBefore}, " +
+                    $"après={crafter.isActiveAndEnabled}).");
+            }
 
             if (!TryChooseRecipe(out var tech, out var cost, out var why))
             {
-                Fail($"aucune recette réalisable avec l'inventaire réel : {why}");
+                Fail($"aucune recette mesurable avec l'inventaire réel : {why}");
                 yield break;
             }
 
+            var product = tech.ToString();
             var costText = Describe(cost);
-            var revisionBefore = client.InventoryRevision;
 
-            var beforeServer = new int[cost.Length];
-            var beforeLocal = new int[cost.Length];
+            var beforeCost = new int[cost.Length];
+            for (var index = 0; index < cost.Length; index++)
+            {
+                beforeCost[index] = InventoryReconciler.CountLocal(cost[index].TechTypeName);
+            }
+
+            var beforeProduct = InventoryReconciler.CountLocal(product);
+            var grantedBefore = client.CraftsGranted;
+            var refusedBefore = client.CraftsRefused;
+
+            // 1. L'appel réel du jeu : il doit être bloqué **avant** toute consommation.
+            var firstStart = crafter.Craft(tech, 1f);
+            var untouchedBeforeApproval = true;
 
             for (var index = 0; index < cost.Length; index++)
             {
-                beforeServer[index] = client.InventoryCountOf(cost[index].TechTypeName);
-                beforeLocal[index] = InventoryReconciler.CountLocal(cost[index].TechTypeName);
-            }
-
-            var removedBefore = client.InventoryRemovedLocally;
-            var requestId = client.SendCraftRequest((ushort)tech);
-
-            if (requestId == 0)
-            {
-                Fail("la demande de craft n'est pas partie (session non acceptée)");
-                yield break;
-            }
-
-            var resultDeadline = Time.realtimeSinceStartup + ResultTimeoutSeconds;
-            while (client.CraftResults == 0 && Time.realtimeSinceStartup < resultDeadline)
-            {
-                yield return new WaitForSecondsRealtime(0.25f);
-            }
-
-            var granted = client.CraftsGranted > 0 && client.LastCraftOutcome == CraftOutcome.Applied;
-            var revisionAfter = client.InventoryRevision;
-            var revisionAdvanced = revisionAfter > revisionBefore;
-
-            // Le serveur a débité : la réconciliation doit retirer les unités du monde chez le client.
-            var syncDeadline = Time.realtimeSinceStartup + CostSyncTimeoutSeconds;
-            var costSynced = false;
-
-            while (Time.realtimeSinceStartup < syncDeadline)
-            {
-                costSynced = true;
-
-                for (var index = 0; index < cost.Length; index++)
+                if (InventoryReconciler.CountLocal(cost[index].TechTypeName) != beforeCost[index])
                 {
-                    var expected = beforeServer[index] - cost[index].Count;
-                    if (expected < 0)
-                    {
-                        expected = 0;
-                    }
+                    untouchedBeforeApproval = false;
+                }
+            }
 
-                    if (client.InventoryCountOf(cost[index].TechTypeName) != expected
-                        || InventoryReconciler.CountLocal(cost[index].TechTypeName) != expected)
-                    {
-                        costSynced = false;
-                        break;
-                    }
+            // 2. L'accord du serveur doit rejouer le craft et créer le produit.
+            var productDeadline = Time.realtimeSinceStartup + ProductTimeoutSeconds;
+            var productAppeared = false;
+            var progressSeen = 0f;
+            var inProgressSeen = false;
+            var pickupIssued = false;
+
+            while (Time.realtimeSinceStartup < productDeadline)
+            {
+                if (crafter.inProgress)
+                {
+                    inProgressSeen = true;
                 }
 
-                if (costSynced)
+                if (crafter.progress > progressSeen)
                 {
+                    progressSeen = crafter.progress;
+                }
+
+                // Le fabricator ne crée l'objet qu'au **ramassage** du produit fini : c'est le bouton de
+                // l'interface qui appelle `TryPickup`, et la mesure fait ce que ce bouton ferait. Sans lui,
+                // la progression atteint 1 et reste en attente indéfiniment (mesuré au run du 2026-10-22).
+                if (!pickupIssued && crafter.progress >= 0.99f)
+                {
+                    pickupIssued = true;
+                    Log.LogInfo("[sonde] craft : progression terminée — ramassage du produit (TryPickup).");
+                    crafter.TryPickup();
+                }
+
+                if (client.CraftsGranted > grantedBefore
+                    && InventoryReconciler.CountLocal(product) > beforeProduct)
+                {
+                    productAppeared = true;
                     break;
                 }
 
                 yield return new WaitForSecondsRealtime(0.25f);
             }
 
-            var removedLocally = client.InventoryRemovedLocally - removedBefore;
-            var removedTotal = 0;
-            foreach (var entry in cost)
+            if (!productAppeared)
             {
-                removedTotal += entry.Count;
+                Log.LogWarning(
+                    $"[sonde] craft : le produit n'est pas apparu — CrafterLogic en cours={inProgressSeen}, " +
+                    $"progression maximale={progressSeen:F2}, actif={crafter.isActiveAndEnabled}.");
             }
 
-            // Seconde demande : les matériaux sont partis, le refus doit être nommé et sans effet.
-            var refusalRevision = client.InventoryRevision;
-            var secondId = client.SendCraftRequest((ushort)tech);
-            var resultsBefore = client.CraftResults;
+            var granted = client.CraftsGranted > grantedBefore;
+            var consumed = true;
 
-            if (secondId == 0)
+            for (var index = 0; index < cost.Length; index++)
             {
-                Fail("la seconde demande de craft (celle qui doit être refusée) n'est pas partie");
-                yield break;
+                var expected = beforeCost[index] - cost[index].Count;
+                if (expected < 0)
+                {
+                    expected = 0;
+                }
+
+                if (InventoryReconciler.CountLocal(cost[index].TechTypeName) != expected)
+                {
+                    consumed = false;
+                }
             }
 
-            var refusalDeadline = Time.realtimeSinceStartup + ResultTimeoutSeconds;
-            while (client.CraftResults == resultsBefore && Time.realtimeSinceStartup < refusalDeadline)
+            var productAfterFirst = InventoryReconciler.CountLocal(product);
+            var blockedFirst = !firstStart;
+
+            // 3. La même demande, les matériaux partis : refus nommé, sans effet.
+            var secondStart = crafter.Craft(tech, 1f);
+            yield return new WaitForSecondsRealtime(RefusalSettleSeconds);
+
+            var refusedSecond = client.CraftsRefused > refusedBefore
+                                && (client.LastCraftOutcome == CraftOutcome.MissingMaterial
+                                    || client.LastCraftOutcome == CraftOutcome.NotEnoughMaterial);
+
+            var untouchedAfterRefusal = InventoryReconciler.CountLocal(product) == productAfterFirst;
+
+            for (var index = 0; index < cost.Length; index++)
             {
-                yield return new WaitForSecondsRealtime(0.25f);
+                if (InventoryReconciler.CountLocal(cost[index].TechTypeName) != Math.Max(beforeCost[index] - cost[index].Count, 0))
+                {
+                    untouchedAfterRefusal = false;
+                }
             }
 
-            var refusedNamed = client.CraftsRefused > 0
-                               && (client.LastCraftOutcome == CraftOutcome.MissingMaterial
-                                   || client.LastCraftOutcome == CraftOutcome.NotEnoughMaterial)
-                               && client.LastCraftMissingTech != 0;
-            var refusalKeptRevision = client.InventoryRevision == refusalRevision;
+            var blockedSecond = !secondStart;
+            var replayed = CraftGuard.ReplayedCount > 0;
 
-            var verdict = granted
-                          && revisionAdvanced
-                          && costSynced
-                          && removedLocally == removedTotal
-                          && client.InventoryReconciliationFailures == 0
-                          && refusedNamed
-                          && refusalKeptRevision;
+            var verdict = blockedFirst
+                          && untouchedBeforeApproval
+                          && granted
+                          && replayed
+                          && productAppeared
+                          && consumed
+                          && blockedSecond
+                          && refusedSecond
+                          && untouchedAfterRefusal
+                          && client.InventoryReconciliationFailures == 0;
 
             Log.LogInfo(
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    "[sonde] craft : recette='{0}' coût=[{1}] accordé={2} révision {3} -> {4}, " +
-                    "matériaux retirés localement={5}/{6}, refus nommé={7} ({8}) — verdict={9}",
+                    "[sonde] craft : recette='{0}' coût=[{1}] produit='{2}' bloqué={3}/{4}, " +
+                    "matériaux intacts avant accord={5}, accordé={6}, rejoué={7}, produit apparu={8} " +
+                    "({9} -> {10}), matériaux consommés={11}, refus nommé={12} ({13}), " +
+                    "rien consommé après refus={14}, échecs de réconciliation={15} — verdict={16}",
                     tech,
                     costText,
+                    product,
+                    blockedFirst,
+                    blockedSecond,
+                    untouchedBeforeApproval,
                     granted,
-                    revisionBefore,
-                    revisionAfter,
-                    removedLocally,
-                    removedTotal,
-                    refusedNamed,
+                    replayed,
+                    productAppeared,
+                    beforeProduct,
+                    productAfterFirst,
+                    consumed,
+                    refusedSecond,
                     client.LastCraftOutcome,
+                    untouchedAfterRefusal,
+                    client.InventoryReconciliationFailures,
                     verdict));
 
             if (!verdict)
             {
                 Log.LogError(
                     "[sonde] craft : verdict=False — " +
-                    $"accordé={granted}, révision avancée={revisionAdvanced} ({revisionBefore} -> {revisionAfter}), " +
-                    $"coût synchronisé={costSynced}, retirés {removedLocally}/{removedTotal}, " +
-                    $"échecs de réconciliation={client.InventoryReconciliationFailures}, " +
-                    $"refus nommé={refusedNamed} ({client.LastCraftOutcome}), " +
-                    $"révision du refus inchangée={refusalKeptRevision}.");
+                    $"bloqué avant consommation={blockedFirst}, matériaux intacts={untouchedBeforeApproval}, " +
+                    $"accordé={granted}, rejoué={replayed}, produit apparu={productAppeared} " +
+                    $"({beforeProduct} -> {productAfterFirst}), consommés={consumed}, " +
+                    $"refus nommé={refusedSecond} ({client.LastCraftOutcome}), " +
+                    $"rien après refus={untouchedAfterRefusal}, " +
+                    $"échecs de réconciliation={client.InventoryReconciliationFailures}.");
             }
         }
 
         /// <summary>
-        /// Retient la recette la **moins chère** que l'inventaire local satisfait réellement.
-        ///
-        /// Le parcours des `TechType` évite de coder en dur une recette qui changerait avec la version du
-        /// jeu : la sonde mesure le serveur, pas une table recopiée.
+        /// Retient la recette la moins chère que l'inventaire local satisfait **et** dont le produit est
+        /// absent : sans cette dernière condition, l'apparition du produit ne prouverait rien.
         /// </summary>
         private static bool TryChooseRecipe(out TechType tech, out InventoryEntry[] cost, out string why)
         {
@@ -224,6 +276,7 @@ namespace Coop.Client
 
             var bestTotal = int.MaxValue;
             var craftable = 0;
+            var satisfied = 0;
 
             foreach (TechType candidate in Enum.GetValues(typeof(TechType)))
             {
@@ -249,28 +302,33 @@ namespace Coop.Client
 
                 craftable++;
 
+                if (InventoryReconciler.CountLocal(candidate.ToString()) > 0)
+                {
+                    continue;
+                }
+
                 var entries = new List<InventoryEntry>(recipe.Count);
                 var total = 0;
-                var satisfied = true;
+                var complete = true;
 
                 foreach (var ingredient in recipe)
                 {
                     if (ingredient == null || ingredient.amount <= 0)
                     {
-                        satisfied = false;
+                        complete = false;
                         break;
                     }
 
                     var name = ingredient.techType.ToString();
                     if (string.IsNullOrEmpty(name) || name.Length > Protocol.MaxTechTypeNameLength)
                     {
-                        satisfied = false;
+                        complete = false;
                         break;
                     }
 
                     if (InventoryReconciler.CountLocal(name) < ingredient.amount)
                     {
-                        satisfied = false;
+                        complete = false;
                         break;
                     }
 
@@ -278,7 +336,14 @@ namespace Coop.Client
                     total += ingredient.amount;
                 }
 
-                if (!satisfied || entries.Count == 0 || total >= bestTotal)
+                if (!complete || entries.Count == 0)
+                {
+                    continue;
+                }
+
+                satisfied++;
+
+                if (total >= bestTotal)
                 {
                     continue;
                 }
@@ -295,8 +360,8 @@ namespace Coop.Client
             }
 
             why = craftable == 0
-                ? "aucune recette lisible dans CraftData"
-                : $"{craftable} recette(s) lue(s), aucune entièrement satisfaite par Inventory.main";
+                ? "aucune recette lisible dans TechData"
+                : $"{craftable} recette(s) lue(s), {satisfied} satisfaite(s) dont le produit est absent";
 
             return false;
         }

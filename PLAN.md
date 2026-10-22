@@ -4888,8 +4888,11 @@ Lignes mesurées du run vert :
 
 - **Aucun menu de craft n'est patché.** La sonde est le seul demandeur ; un joueur qui craft dans le
   fabricator n'obtient ni prélèvement serveur ni refus. C'est la dette la plus visible de ce lot.
+  *(Clos par §70 : `CrafterLogic.Craft` est intercepté, bloqué avant consommation, rejoué sur accord.)*
 - **Le produit n'est pas instancié.** Le serveur décide le coût ; le client « fabriquera après accord » — le
   branchement et la création de l'objet restent à écrire, et aucune étape ne les mesure.
+  *(Clos par §70 : la reprise appelle `CrafterLogic.Craft` sur l'instance interceptée, le produit apparaît
+  au ramassage — `produit apparu=True (0 -> 1)` ; le serveur, lui, n'instancie toujours rien.)*
 - **L'adoption n'est pas vérifiable.** Le serveur ne peut pas lire la sauvegarde d'un client : un client
   hostile peut déclarer des matériaux qu'il n'a pas. Bornée, triée et unique par session, elle reste une
   déclaration — c'est la limite qui justifie de ne pas s'en servir comme preuve d'intégrité.
@@ -4901,3 +4904,68 @@ Lignes mesurées du run vert :
   donc l'abus est borné par l'inventaire, pas par une règle).
 - **L'hôte n'a pas d'adoption** : son registre démarre vide (ou restauré) et ses ramassages ne sont pas
   comptés — le craft mesuré est celui d'un client.
+
+## 70. Le fabricator réel demande l'accord du serveur (2026-10-22)
+
+La v21 arbitrait le coût, mais seul le message `CraftRequest` savait le demander : un joueur qui craftait
+dans le fabricator consommait ses matériaux **sans** que le registre ne bouge. Ce lot branche le **vrai**
+chemin du jeu — `CrafterLogic.Craft(TechType, float)` — et mesure ce chemin, pas une requête de sonde.
+
+### 70.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| garde | `Coop.Client/CraftGuard.cs` | préfixe Harmony sur `CrafterLogic.Craft` : hors session il laisse passer ; sinon il **bloque l'appel** (`return false`) après avoir envoyé `CraftRequest`, puis **rejoue** l'appel sur la même instance à l'accord, avec un jeton consommé une fois |
+| protection du coût | `CraftGuard.RememberCost` + `InventoryReconciler.IsCostInFlight` | les matériaux d'un craft approuvé sont **écartés de la réconciliation** pendant 10 s, sinon le monde les retirerait avant que le fabricator ne les lise (et le craft approuvé échouerait, registre déjà débité) |
+| mode de jeu | `GameModeUtils.RequiresIngredients()` | la protection ne s'arme que si le jeu consomme réellement : en **Créatif/Freedom** rien n'est consommé, et c'est la réconciliation qui applique le coût |
+| sonde | `Coop.Client/CraftProbeBehaviour.cs` | appelle `CrafterLogic.Craft` sur un fabricator **réel** : vérifie le blocage avant consommation, la reprise, l'apparition du produit (`TryPickup`) et le refus sans effet |
+| harnais | `tools/verify.sh` (**étape AD**) | sept assertions : garde installé, interception, reprise, coût prélevé, refus nommé, adoption, verdict de sonde |
+
+Pourquoi bloquer plutôt que laisser crafter puis corriger : un craft lancé a déjà consommé et planifié son
+produit ; le défaire laisserait un objet fabriqué pour rien. Le prix est une **latence d'un aller-retour**
+avant que le fabricator ne démarre — visible, bornée, et préférable à un craft gratuit.
+
+### 70.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `dotnet test` | **404/404** rc=0 (aucun nouveau cas hors jeu : le garde est du code Unity, éprouvé en jeu) |
+| `NetProbe selftest` | **SUCCES** |
+| étape **AD** (runs intermédiaires) | deux échecs de **mesure** : l'arrêt du harnais se déclenchait sur `[sonde] craft : 1 CrafterLogic trouvé(s)` ; puis le produit n'apparaissait pas (`progression maximale=1.00`, `inProgress=True`) parce que le fabricator attend le **ramassage** |
+| étape **AD** (run vert) | **OK (52 s)** — `bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, refus nommé=True (MissingMaterial), rien consommé après refus=True … verdict=True` |
+| non-régression | **AB OK (152 s)**, **AC OK (153 s)**, `VERDICT GLOBAL : tout est vert` |
+| `check-verify-assertions.sh` | rc=0 — 30 étapes déclarées, défaut complet |
+
+### 70.3 Ce que les runs ont trouvé
+
+1. **Le marqueur du harnais arrêtait le run trop tôt.** `[sonde] craft :` matchait la ligne
+   « 1 CrafterLogic trouvé(s) », donc le client était tué avant le verdict. Correction de **mesure** :
+   marqueur `[sonde] craft : recette=`.
+2. **Le `CrafterLogic` du caisson est désactivé et n'avance que si on l'active.** Sans réactivation, la
+   reprise approuvée ne progressait jamais (`inProgress=False`). La sonde l'active pour la mesure et le
+   journalise — c'est un état de test, pas une règle de produit.
+3. **Le fabricator ne crée l'objet qu'au ramassage.** La progression atteignait `1.00` et restait en
+   attente ; c'est le bouton de l'interface qui appelle `TryPickup()`. La sonde fait ce que ce bouton
+   ferait, et la ligne le dit.
+4. **La sauvegarde de test est en mode Créatif.** Le jeu n'y consomme **aucun** matériau : exiger
+   « matériaux consommés localement » était impossible, et protéger le coût de la réconciliation le faisait
+   persister indéfiniment (`Titanium` restait à 3 quand le serveur était à 2). Correction : la protection ne
+   s'arme que si `GameModeUtils.RequiresIngredients()` est vrai ; en Créatif, la réconciliation applique le
+   coût décidé par le serveur. Le journal écrit lequel des deux cas s'applique.
+
+### 70.4 Ce que cette tranche ne prouve pas
+
+- **Une seule instance, un seul produit, un seul client** : un `CrafterLogic` réel (celui du caisson), une
+  recette à un matériau (`Accumulator`, `Titanium ×1`), pas de craft en rafale ni de file d'attente.
+- **Aucune cadence ni plafond** côté serveur : un client peut demander des crafts en boucle ; chaque accord
+  consomme son registre, donc l'abus est borné par l'inventaire, pas par une règle.
+- **Le produit reste local** : le serveur arbitre le coût, le client fabrique ; deux joueurs peuvent encore
+  avoir chacun le leur (économie non partagée).
+- **Un échec de reprise laisse le registre débité** : si le jeu refuse le craft rejoué (recette non
+  satisfaite localement), le journal le nomme (`échecs de reprise=`) mais aucun remboursement n'existe —
+  le protocole n'a toujours pas d'ajout.
+- **La sauvegarde de test est en Créatif** : le chemin « le jeu consomme réellement » (Survie) est codé et
+  protégé, mais **mesuré nulle part**. C'est la limite la plus importante de ce lot.
+- **Latence non mesurée** : le blocage ajoute un aller-retour avant le démarrage du fabricator ; aucune
+  ligne ne chronomètre ce délai.

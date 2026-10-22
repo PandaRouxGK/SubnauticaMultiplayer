@@ -26,12 +26,16 @@ namespace Coop.Client
     {
         private static int _removed;
         private static int _failed;
+        private static int _deferred;
 
         /// <summary>Unités réellement retirées de `Inventory.main` depuis le démarrage.</summary>
         internal static int RemovedItems => _removed;
 
         /// <summary>Retraits impossibles (objet déjà absent, ou sortie du conteneur refusée).</summary>
         internal static int FailedRemovals => _failed;
+
+        /// <summary>Retraits reportés parce qu'un craft approuvé va consommer ces matériaux lui-même.</summary>
+        internal static int DeferredRemovals => _deferred;
 
         /// <summary>Nombre d'unités de ce `TechType` réellement présentes dans l'inventaire du jeu.</summary>
         internal static int CountLocal(string techTypeName)
@@ -128,6 +132,18 @@ namespace Coop.Client
 
             foreach (var removal in removals)
             {
+                // Un craft vient d'être approuvé : le jeu consomme ses propres matériaux dans la foulée.
+                // Les retirer ici les ferait disparaître **avant** que le fabricator ne les lise, et le
+                // craft approuvé échouerait alors que le registre est déjà débité.
+                if (CraftGuard.IsCostInFlight(removal.TechTypeName))
+                {
+                    _deferred++;
+                    log?.LogInfo(
+                        $"[inventaire] réconciliation : retrait de '{removal.TechTypeName}' ×{removal.Count} " +
+                        "reporté — un craft approuvé consomme ce matériau lui-même.");
+                    continue;
+                }
+
                 var remaining = removal.Count;
 
                 while (remaining > 0)
