@@ -5054,6 +5054,7 @@ valait pour n'importe quelle instance de cette recette), et le serveur n'avait *
 | sonde | `CraftProbeBehaviour` | après la mesure du craft, envoie **12 demandes brutes** (hors garde) et compte les refus `RateLimited` |
 | harnais | étapes **AD** et **AE** | deux assertions de plus chacune : verdict de cadence côté client, refus nommé côté serveur |
 | fermeture de session | `Plugin.cs` (déconnexion, message `Disconnect`, changement d'adresse) | `CraftGuard.Clear()` oublie demandes et jetons : une réponse tardive ne rejoue rien, et le journal compte ce qui a été oublié |
+| id de demande valide | `Coop.Model/Messages.cs` (`CraftRequest`) | `RequestId <= 0` est refusé à l'écriture **et** à la lecture : `0` est le sentinelle « non partie », donc une telle demande ne pourrait pas être appariée à sa réponse |
 
 Le seau est en arithmétique entière : le premier jet était en `double`, et un test a montré qu'une recharge
 partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi flottant).
@@ -5063,7 +5064,7 @@ partielle de `499/500` refusait un jeton pourtant disponible à `500` (arrondi f
 | Contrôle | Valeur mesurée |
 |---|---|
 | `dotnet build` | rc=0, **0 avertissement** |
-| `dotnet test` | **423/423** rc=0 — dont 12 tests `CraftRequestLedger` et 7 `CraftBudget` (dont l'aller-retour de `RateLimited`) |
+| `dotnet test` | **424/424** rc=0 — dont 12 tests `CraftRequestLedger`, 7 `CraftBudget` (aller-retour de `RateLimited` compris) et le refus d'un id de requête invalide |
 | étape **AD** (Créatif) | **OK (56 s)** — craft inchangé, puis `[sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True` ; serveur `REFUSÉ (RateLimited : cadence : 499 ms avant le prochain jeton (rafale 8, 1 par 500 ms)) — révision 3 inchangée.` |
 | étape **AE** (Survie) | **OK (56 s)** — le craft consomme toujours réellement le matériau, et la cadence nomme sa rafale |
 | `dotnet run --project tools/NetProbe -- selftest` | **SUCCES** — le codec n'a pas de liste d'issues figée : `RateLimited` passe les contrôles existants |

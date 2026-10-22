@@ -204,6 +204,35 @@ namespace Coop.Model.Tests
         }
 
         [Fact]
+        public void Une_demande_de_craft_sans_id_de_requete_est_refusee()
+        {
+            // `0` est le sentinelle « demande non partie » (SendCraftRequest) : une demande qui le porte ne
+            // pourrait pas être appariée à sa réponse.
+            Assert.Throws<ProtocolException>(() => MessageCodec.Encode(new CraftRequestMessage
+            {
+                RequestId = 0,
+                TechType = 66,
+            }.Write));
+
+            Assert.Throws<ProtocolException>(() => MessageCodec.Encode(new CraftRequestMessage
+            {
+                RequestId = -3,
+                TechType = 66,
+            }.Write));
+
+            // Paquet forgé : id négatif reçu du réseau, refusé plutôt que lu.
+            var forged = new PacketWriter();
+            forged.WriteByte((byte)MessageType.CraftRequest);
+            forged.WriteInt(-1);
+            forged.WriteUInt16(66);
+
+            var reader = new PacketReader(forged.BackingBuffer, 0, forged.Length);
+            reader.ReadByte();
+
+            Assert.Throws<ProtocolException>(() => CraftRequestMessage.Read(reader));
+        }
+
+        [Fact]
         public void Un_resultat_de_craft_porter_le_manque_nomme()
         {
             var message = new CraftResultMessage

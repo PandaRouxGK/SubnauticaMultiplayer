@@ -2183,6 +2183,13 @@ namespace Coop.Model
                 throw new ProtocolException("demande de craft sans TechType (0)");
             }
 
+            // `0` est le sentinelle « demande non partie » côté client (`SendCraftRequest`) : une demande
+            // qui le porte ne pourrait pas être appariée à sa réponse, donc elle n'est pas un message valide.
+            if (RequestId <= 0)
+            {
+                throw new ProtocolException($"demande de craft avec un id de requête invalide ({RequestId} <= 0)");
+            }
+
             writer.WriteByte((byte)MessageType.CraftRequest);
             writer.WriteInt(RequestId);
             writer.WriteUInt16(TechType);
@@ -2196,6 +2203,11 @@ namespace Coop.Model
             if (techType == 0)
             {
                 throw new ProtocolException("demande de craft reçue avec TechType 0");
+            }
+
+            if (requestId <= 0)
+            {
+                throw new ProtocolException($"demande de craft reçue avec un id de requête invalide ({requestId} <= 0)");
             }
 
             return new CraftRequestMessage

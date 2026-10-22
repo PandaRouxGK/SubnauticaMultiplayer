@@ -538,7 +538,10 @@ s'appuierait dessus n'aurait aucune valeur opposable.
    (`Coop.Model/InventoryReconciliation.cs`). L'inverse (serveur > jeu) n'est **pas** corrigé par une
    création d'objet : il est compté et journalisé.
 
-9. **(v21) La cadence des demandes est bornée par un seau à jetons** (`CraftBudget` : `8` en rafale, puis
+9. **(v21) Une demande de craft doit porter un id de requête strictement positif** : `0` est le
+   sentinelle « demande non partie » côté client, et une demande qui le porte ne pourrait pas être
+   appariée à sa réponse. Le message est refusé à l'écriture **et** à la lecture (`ProtocolException`).
+10. **(v21) La cadence des demandes est bornée par un seau à jetons** (`CraftBudget` : `8` en rafale, puis
    `1` par `500 ms`, soit ~`120`/min). Le contrôle vient **avant** toute lecture de recette ; le refus est
    nommé (`CraftOutcome.RateLimited`) et **daté** (`cadence : N ms avant le prochain jeton`), la révision
    ne bouge pas. Le seau est par session : il repart plein à la reconnexion.
