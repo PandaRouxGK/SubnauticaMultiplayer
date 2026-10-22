@@ -530,7 +530,7 @@ s'appuierait dessus n'aurait aucune valeur opposable.
    (`Coop.Model/InventoryReconciliation.cs`). L'inverse (serveur > jeu) n'est **pas** corrigé par une
    création d'objet : il est compté et journalisé.
 
-Ce qui **n'est pas** fait : aucun autre consommateur du jeu (nourriture, dépôt, récolte) n'appelle encore le débit ; le **fabricator**, lui, est patché — `CrafterLogic.Craft` est intercepté avant consommation et rejoué sur accord (#32/#33), donc le menu ne fabrique plus gratuitement ; le produit reste **instancié par le client**, jamais par le serveur ; les objets **équipés** (hors de `Inventory.main.container`) ne sont pas réconciliés ni comptés à
+Ce qui **n'est pas** fait : aucun autre consommateur du jeu (nourriture, dépôt, récolte) n'appelle encore le débit ; le **fabricator**, lui, est patché — `Crafter.PerformAction` (l'action du bouton) est interceptée avant consommation, énergie comprise, et rejouée sur accord (#32/#33), donc le menu ne fabrique plus gratuitement ; le produit reste **instancié par le client**, jamais par le serveur ; les objets **équipés** (hors de `Inventory.main.container`) ne sont pas réconciliés ni comptés à
 l'adoption ; le registre ne connaît ni les emplacements ni les tailles de pile du jeu. Les étapes AB, AC et
 **AD** mesurent que le registre **dit la vérité sur le ramassage**, qu'un débit accordé **vide le monde**
 chez le client et qu'un second débit est refusé nommément, puis que le serveur **adopte** l'inventaire réel,
@@ -613,8 +613,9 @@ Dit franchement, pour que ce document ne laisse pas croire à un contrat plus la
   retirer l'unité de `Inventory.main` par la réconciliation (étape AC). Depuis la **v21**, le serveur
   **adopte** l'inventaire réel du client à l'admission (#30/#31), le conserve sur disque, et vérifie le
   **coût d'un craft** sur les recettes du jeu (#32/#33) — le produit reste fabriqué par le client, mais le
-  **fabricator** ne le fabrique plus sans accord : `CrafterLogic.Craft` est intercepté, bloqué avant toute
-  consommation, puis rejoué une seule fois sur accord (étape AD). Ce qui
+  **fabricator** ne le fabrique plus sans accord : `Crafter.PerformAction` est interceptée, bloquée avant
+  toute consommation (énergie et matériaux), puis rejouée une seule fois sur accord — mesuré en Créatif
+  (étape AD) **et** en Survie, où le jeu consomme réellement les ingrédients (étape AE). Ce qui
   manque encore : le débit n'est pas branché sur les autres consommateurs du jeu (nourriture, dépôt), les objets équipés ne
   sont pas réconciliés, et la récolte (plantes, veines, conteneurs) n'est pas arbitrée.
 - **Aucun transport d'AssetBundle** (M6) : le client ne reçoit pas de prefab, seulement la définition d'une

@@ -12,8 +12,9 @@ namespace Coop.Client
     /// <summary>
     /// Sonde du **vrai chemin de craft** (v21, `-coopdebug=craft`).
     ///
-    /// Elle n'envoie **aucune** demande elle-même : elle appelle `CrafterLogic.Craft` — la méthode que le
-    /// fabricator et le menu utilisent — et mesure ce que le garde en fait. Quatre affirmations :
+    /// Elle n'envoie **aucune** demande elle-même : elle appelle `ITreeActionReceiver.PerformAction` —
+    /// l'action du bouton du fabricator, celle que le menu déclenche, avant toute consommation — et mesure
+    /// ce que le garde en fait. Quatre affirmations :
     ///
     ///  1. l'appel est **bloqué avant consommation** : il rend `false` et les matériaux locaux ne bougent pas ;
     ///  2. le serveur **accorde** et le jeu est **rejoué** : le produit apparaît dans `Inventory.main` et les
@@ -69,32 +70,41 @@ namespace Coop.Client
 
             yield return new WaitForSecondsRealtime(1f);
 
-            var crafters = UnityEngine.Object.FindObjectsOfType<CrafterLogic>();
-            Log.LogInfo($"[sonde] craft : {crafters.Length} CrafterLogic trouvé(s) dans le monde.");
+            // Le point d'entrée du bouton est une action de `Crafter` (`Fabricator` en dérive), pas le
+            // `CrafterLogic` qu'elle anime : c'est l'action qui consomme énergie et matériaux.
+            var crafters = UnityEngine.Object.FindObjectsOfType<Crafter>();
+            Log.LogInfo($"[sonde] craft : {crafters.Length} Crafter trouvé(s) dans le monde.");
 
             if (crafters.Length == 0)
             {
-                Fail("aucun CrafterLogic dans le monde — le chemin réel du fabricator ne peut pas être exercé");
+                Fail("aucun Crafter dans le monde — le chemin réel du fabricator ne peut pas être exercé");
                 yield break;
             }
 
             var crafter = crafters[0];
+            var logic = crafter.logic;
+
+            if (logic == null)
+            {
+                Fail("le Crafter trouvé n'a pas de CrafterLogic — l'action du bouton ne pourrait pas aboutir");
+                yield break;
+            }
 
             // Le `CrafterLogic` du caisson est **désactivé** quand le fabricator est fermé : sa coroutine ne
             // tourne alors pas, et une reprise approuvée resterait sans effet. La sonde l'active pour la
             // durée de la mesure (c'est un état de test, pas une règle de produit).
-            var activeBefore = crafter.isActiveAndEnabled;
+            var activeBefore = logic.isActiveAndEnabled;
             if (!activeBefore)
             {
-                crafter.enabled = true;
-                if (!crafter.gameObject.activeSelf)
+                logic.enabled = true;
+                if (!logic.gameObject.activeSelf)
                 {
-                    crafter.gameObject.SetActive(true);
+                    logic.gameObject.SetActive(true);
                 }
 
                 Log.LogInfo(
                     $"[sonde] craft : CrafterLogic réactivé pour la mesure (actif avant={activeBefore}, " +
-                    $"après={crafter.isActiveAndEnabled}).");
+                    $"après={logic.isActiveAndEnabled}).");
             }
 
             if (!TryChooseRecipe(out var tech, out var cost, out var why))
@@ -116,8 +126,15 @@ namespace Coop.Client
             var grantedBefore = client.CraftsGranted;
             var refusedBefore = client.CraftsRefused;
 
-            // 1. L'appel réel du jeu : il doit être bloqué **avant** toute consommation.
-            var firstStart = crafter.Craft(tech, 1f);
+            // En **Survie**, le jeu consomme les ingrédients lui-même : c'est le seul régime où « matériaux
+            // consommés » prouve autre chose qu'un retrait fait par la réconciliation. On compte donc les
+            // retraits de la réconciliation avant/après, et la ligne le dit.
+            var requiresIngredients = RequiresIngredients();
+            var reconciledBefore = InventoryReconciler.RemovedItems;
+
+            // 1. L'appel réel du jeu — exactement ce que fait le bouton du fabricator : il doit être bloqué
+            //    **avant** toute consommation.
+            var firstStart = ((ITreeActionReceiver)crafter).PerformAction(tech);
             var untouchedBeforeApproval = true;
 
             for (var index = 0; index < cost.Length; index++)
@@ -133,28 +150,35 @@ namespace Coop.Client
             var productAppeared = false;
             var progressSeen = 0f;
             var inProgressSeen = false;
-            var pickupIssued = false;
+            var pickupAttempts = 0;
 
             while (Time.realtimeSinceStartup < productDeadline)
             {
-                if (crafter.inProgress)
+                if (logic.inProgress)
                 {
                     inProgressSeen = true;
                 }
 
-                if (crafter.progress > progressSeen)
+                if (logic.progress > progressSeen)
                 {
-                    progressSeen = crafter.progress;
+                    progressSeen = logic.progress;
                 }
 
                 // Le fabricator ne crée l'objet qu'au **ramassage** du produit fini : c'est le bouton de
                 // l'interface qui appelle `TryPickup`, et la mesure fait ce que ce bouton ferait. Sans lui,
                 // la progression atteint 1 et reste en attente indéfiniment (mesuré au run du 2026-10-22).
-                if (!pickupIssued && crafter.progress >= 0.99f)
+                // L'appel est **retenté** : `TryPickupAsync` abandonne sans rien faire si la progression
+                // n'est pas encore exactement à 1 (mesuré au run du 2026-10-22, seuil de 0.99 atteint avant
+                // la fin réelle : un seul appel restait sans effet).
+                if (logic.progress >= 0.99f)
                 {
-                    pickupIssued = true;
-                    Log.LogInfo("[sonde] craft : progression terminée — ramassage du produit (TryPickup).");
-                    crafter.TryPickup();
+                    pickupAttempts++;
+                    if (pickupAttempts == 1)
+                    {
+                        Log.LogInfo("[sonde] craft : progression terminée — ramassage du produit (TryPickup).");
+                    }
+
+                    logic.TryPickup();
                 }
 
                 if (client.CraftsGranted > grantedBefore
@@ -171,7 +195,8 @@ namespace Coop.Client
             {
                 Log.LogWarning(
                     $"[sonde] craft : le produit n'est pas apparu — CrafterLogic en cours={inProgressSeen}, " +
-                    $"progression maximale={progressSeen:F2}, actif={crafter.isActiveAndEnabled}.");
+                    $"progression maximale={progressSeen:F2}, actif={logic.isActiveAndEnabled}, " +
+                    $"tentatives de ramassage={pickupAttempts}.");
             }
 
             var granted = client.CraftsGranted > grantedBefore;
@@ -192,10 +217,17 @@ namespace Coop.Client
             }
 
             var productAfterFirst = InventoryReconciler.CountLocal(product);
+            var reconciledAfterFirst = InventoryReconciler.RemovedItems;
+            var reconciledForCost = reconciledAfterFirst - reconciledBefore;
             var blockedFirst = !firstStart;
 
+            // Hors mode Créatif, le coût doit avoir disparu **sans** la réconciliation : c'est le jeu qui l'a
+            // pris, à la reprise approuvée. En Créatif le jeu ne consomme rien, et c'est la réconciliation
+            // qui applique le coût décidé par le serveur — l'exiger à zéro y serait faux.
+            var localCostPaidByGame = !requiresIngredients || reconciledForCost == 0;
+
             // 3. La même demande, les matériaux partis : refus nommé, sans effet.
-            var secondStart = crafter.Craft(tech, 1f);
+            var secondStart = ((ITreeActionReceiver)crafter).PerformAction(tech);
             yield return new WaitForSecondsRealtime(RefusalSettleSeconds);
 
             var refusedSecond = client.CraftsRefused > refusedBefore
@@ -221,6 +253,7 @@ namespace Coop.Client
                           && replayed
                           && productAppeared
                           && consumed
+                          && localCostPaidByGame
                           && blockedSecond
                           && refusedSecond
                           && untouchedAfterRefusal
@@ -229,13 +262,15 @@ namespace Coop.Client
             Log.LogInfo(
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    "[sonde] craft : recette='{0}' coût=[{1}] produit='{2}' bloqué={3}/{4}, " +
-                    "matériaux intacts avant accord={5}, accordé={6}, rejoué={7}, produit apparu={8} " +
-                    "({9} -> {10}), matériaux consommés={11}, refus nommé={12} ({13}), " +
-                    "rien consommé après refus={14}, échecs de réconciliation={15} — verdict={16}",
+                    "[sonde] craft : recette='{0}' coût=[{1}] produit='{2}' mode='{3}', " +
+                    "bloqué={4}/{5}, matériaux intacts avant accord={6}, accordé={7}, rejoué={8}, " +
+                    "produit apparu={9} ({10} -> {11}), matériaux consommés={12}, " +
+                    "coût retiré par la réconciliation={13}, refus nommé={14} ({15}), " +
+                    "rien consommé après refus={16}, échecs de réconciliation={17} — verdict={18}",
                     tech,
                     costText,
                     product,
+                    requiresIngredients ? "Survie" : "Créatif",
                     blockedFirst,
                     blockedSecond,
                     untouchedBeforeApproval,
@@ -245,6 +280,7 @@ namespace Coop.Client
                     beforeProduct,
                     productAfterFirst,
                     consumed,
+                    reconciledForCost,
                     refusedSecond,
                     client.LastCraftOutcome,
                     untouchedAfterRefusal,
@@ -258,6 +294,7 @@ namespace Coop.Client
                     $"bloqué avant consommation={blockedFirst}, matériaux intacts={untouchedBeforeApproval}, " +
                     $"accordé={granted}, rejoué={replayed}, produit apparu={productAppeared} " +
                     $"({beforeProduct} -> {productAfterFirst}), consommés={consumed}, " +
+                    $"payé par le jeu={localCostPaidByGame} (retraits de la réconciliation={reconciledForCost}), " +
                     $"refus nommé={refusedSecond} ({client.LastCraftOutcome}), " +
                     $"rien après refus={untouchedAfterRefusal}, " +
                     $"échecs de réconciliation={client.InventoryReconciliationFailures}.");
@@ -364,6 +401,23 @@ namespace Coop.Client
                 : $"{craftable} recette(s) lue(s), {satisfied} satisfaite(s) dont le produit est absent";
 
             return false;
+        }
+
+        /// <summary>
+        /// Le mode exige-t-il des ingrédients ? (Survie / Hardcore : oui ; Créatif / Freedom : non.)
+        /// Indisponible, on répond « non » : le verdict retombe alors sur le comportement Créatif, mesuré.
+        /// </summary>
+        private static bool RequiresIngredients()
+        {
+            try
+            {
+                return GameModeUtils.RequiresIngredients();
+            }
+            catch (Exception exception)
+            {
+                Log.LogWarning($"[sonde] craft : mode de jeu illisible ({exception.GetType().Name}) — supposé sans ingrédients.");
+                return false;
+            }
         }
 
         private static string Describe(InventoryEntry[] entries)

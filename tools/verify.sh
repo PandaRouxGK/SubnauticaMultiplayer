@@ -11,7 +11,7 @@
 # sait attendre ses marqueurs et arrêter ses propres instances) et il ne décide pas de ce qui est vert —
 # les motifs affirmés sont ceux des sondes, recopiés ici tels quels.
 #
-# Les trente étapes, et ce que chacune prouve :
+# Les trente et une étapes, et ce que chacune prouve :
 #   A  un client, sondes avatar + créatures     -> la copie d'avatar est dessinée, l'aller-retour
 #      d'équipement (canal des noms) rend True, et le suivi des créatures rend True.
 #   B  deux clients, sondes de présence + créatures -> l'équipement d'un joueur s'applique sur l'avatar
@@ -103,14 +103,19 @@
 #      (révision +1), la réconciliation retire l'objet de `Inventory.main` chez le client, et un second
 #      débit du même objet est **refusé nommément** (`UnknownItem`) sans déplacer la révision. C'est la
 #      seconde tranche de l'inventaire (v20) : le client ne retire rien de son propre chef.
-#   AD un client, sonde de craft -> le **vrai fabricator** est patché (`CrafterLogic.Craft`) : l'appel est
+#   AD un client, sonde de craft -> le **vrai fabricator** est patché (`Crafter.PerformAction`, l'action du
+#      bouton du menu, qui consomme énergie et matériaux) : l'appel est
 #      **bloqué avant toute consommation**, le serveur lit la recette du jeu (`TechData.GetIngredients`) et
 #      prélève son registre, l'accord **rejoue** le craft, le produit apparaît au ramassage (`TryPickup`),
 #      puis la même demande est **refusée en nommant le matériau manquant** sans rien consommer ni créer.
+#   AE même sonde, sur une **copie en Survie** de la fixture (`slot0002`, `gameMode` 3 -> 0, supprimée
+#      ensuite) -> le jeu **consomme lui-même** les ingrédients à la reprise approuvée : la sonde le lit
+#      (`mode='Survie'`, `coût retiré par la réconciliation=0`) et l'étape refuse toute ligne d'exemption
+#      Créatif. C'est la seule mesure où « matériaux consommés » ne peut pas venir de la réconciliation.
 #
 # Usage :
-#   tools/verify.sh                    # les trente étapes
-#   tools/verify.sh --only=B           # une seule étape (A..AD, ou une liste : --only=A,D)
+#   tools/verify.sh                    # les trente et une étapes
+#   tools/verify.sh --only=B           # une seule étape (A..AE, ou une liste : --only=A,D)
 #   tools/verify.sh --no-build         # ne rebâtit pas les DLL (transmis à chaque run)
 #   tools/verify.sh --step-timeout=240 # borne chaque étape (via `timeout`, s'il est présent)
 #   tools/verify.sh --keep-logs        # garde les journaux copiés dans ./verify-logs/
@@ -157,7 +162,7 @@ usage() {
     cat <<'OPTIONS'
 
 Options :
-  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD  étapes à lancer (défaut : les trente)
+  --only=A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE  étapes à lancer (défaut : les trente et une)
   --step-timeout=SEC  borne chaque étape (défaut : 300 s ; sans effet si `timeout` est absent)
   --no-build          ne reconstruit pas et ne redéploie pas les DLL (transmis à chaque run)
   --keep-logs         garde les journaux copiés dans ./verify-logs/ (sinon supprimés si tout est vert)
@@ -179,7 +184,7 @@ done
 case ",$ONLY," in
     *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ,]*)
         if [ -n "$ONLY" ]; then
-            echo "étape inconnue : « $ONLY » (attendu A..AD, ou une liste comme A,D)" >&2
+            echo "étape inconnue : « $ONLY » (attendu A..AE, ou une liste comme A,D)" >&2
             exit 2
         fi
         ;;
@@ -670,13 +675,38 @@ assert_ad() {
     expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\((MissingMaterial|NotEnoughMaterial) : .+\\) — révision [0-9]+ inchangée" \
         "la même demande, les matériaux partis, est refusée en nommant le manque"
     expect AD "$client" "\\[boot\\] GameObject 'Coop.Client.Bootstrap' créé .*craft=arbitré" \
-        "le garde de craft est installé (CrafterLogic.Craft patché)"
+        "le garde de craft est installé (action du fabricator interceptée)"
     expect AD "$client" "\\[craft\\] interception : '.*' bloqué avant consommation" \
         "l'appel réel du fabricator est bloqué avant toute consommation"
     expect AD "$client" "\\[craft\\] accord du serveur : .* reprise du craft local" \
         "l'accord du serveur rejoue le craft sur l'instance interceptée"
     expect AD "$client" "\\[sonde\\] craft : .*verdict=True" \
         "la sonde conclut True : bloqué, accordé, produit apparu, refus nommé sans effet"
+}
+
+assert_ae() {
+    local server="$WORK_DIR/AE/coop-server.log"
+    local client="$WORK_DIR/AE/coop-client.log"
+
+    # Le serveur prélève le coût de la même façon : c'est le régime du **jeu** qui change, pas la règle.
+    expect AE "$server" "\\[net\\] craft : '[^']+'#[0-9]+ -> '[^']+' ACCORDÉ \\(coût : .+\\) — révision [0-9]+ -> [1-9][0-9]*" \
+        "le serveur prélève le coût de la recette, même en Survie"
+    expect AE "$client" "\\[boot\\] GameObject 'Coop.Client.Bootstrap' créé .*craft=arbitré" \
+        "le garde de craft est installé dans la partie en Survie"
+    expect AE "$client" "\\[craft\\] interception : '.*' bloqué avant consommation" \
+        "l'appel du fabricator est bloqué avant toute consommation, en Survie aussi"
+    expect AE "$client" "\\[craft\\] accord du serveur : .* reprise du craft local" \
+        "l'accord du serveur rejoue le craft local"
+    expect AE "$client" "\\[sonde\\] craft : .*mode='Survie'" \
+        "la sonde mesure bien une partie en Survie (ingrédients exigés)"
+    expect AE "$client" "\\[sonde\\] craft : .*coût retiré par la réconciliation=0" \
+        "le coût a quitté l'inventaire **sans** la réconciliation : c'est le jeu qui l'a consommé"
+    expect AE "$client" "\\[sonde\\] craft : .*matériaux consommés=True" \
+        "les matériaux sont réellement partis de Inventory.main"
+    expect AE "$client" "\\[sonde\\] craft : .*verdict=True" \
+        "la sonde conclut True en Survie : bloqué, accordé, rejoué, produit apparu, refus nommé"
+    expect_missing AE "$client" "mode sans ingrédients" \
+        "aucune exemption Créatif : le jeu exige et consomme les ingrédients"
 }
 
 assert_d() {
@@ -1084,9 +1114,9 @@ else
     echo "verify.sh — journaux temporaires dans $WORK_DIR (supprimés si tout est vert)"
 fi
 if [ -n "$TIMEOUT_CMD" ]; then
-    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD}"
+    echo "            borne par étape : ${STEP_TIMEOUT}s (timeout) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE}"
 else
-    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD}"
+    echo "            borne par étape : aucune (« timeout » absent de cette machine) ; étapes : ${ONLY:-A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE}"
 fi
 
 if wanted A "$ONLY"; then
@@ -1601,6 +1631,64 @@ if wanted AD "$ONLY"; then
         args+=(--no-build)
     fi
     step AD "craft : le coût est prélevé sur le registre du serveur, et un manque est refusé nommément" assert_ad "${args[@]}"
+fi
+
+if wanted AE "$ONLY"; then
+    # v21 — le craft **en Survie**. La fixture `slot0000` est en Créatif (`gameMode=3`) : le jeu n'y consomme
+    # aucun ingrédient, donc « matériaux consommés » n'y prouve qu'un retrait de la réconciliation. Une copie
+    # `slot0002` de la fixture, dont `gameMode` passe à 0 (Survie), est jouée puis supprimée : `slot0000`
+    # n'est jamais modifiée, et une copie qui existait avant nous n'est jamais écrasée.
+    AE_SAVE_ROOT="$GAME_DIR_BASH/SNAppData/SavedGames"
+    AE_PRIMARY="$AE_SAVE_ROOT/slot0000"
+    AE_SURVIVAL="$AE_SAVE_ROOT/slot0002"
+    AE_CREATED=0
+    AE_MODE_CHANGED=1
+
+    if [ ! -d "$AE_PRIMARY" ]; then
+        FAILURES+=("AE : $AE_PRIMARY introuvable — aucune copie en Survie ne peut être préparée")
+        STEP_REPORTS+=("étape AE : ÉCHEC (fixture slot0000 absente)")
+        echo "[échec] sauvegarde de référence absente : $AE_PRIMARY" >&2
+    elif [ -d "$AE_SURVIVAL" ]; then
+        FAILURES+=("AE : $AE_SURVIVAL existe déjà — l'étape n'écrase pas une sauvegarde existante")
+        STEP_REPORTS+=("étape AE : ÉCHEC (slot0002 déjà présent)")
+        echo "[échec] $AE_SURVIVAL existe déjà : renommez-le, l'étape ne l'écrase pas" >&2
+    elif ! cp -a "$AE_PRIMARY" "$AE_SURVIVAL" 2>/dev/null; then
+        FAILURES+=("AE : la copie de slot0000 vers slot0002 a échoué — la mesure en Survie est impossible")
+        STEP_REPORTS+=("étape AE : ÉCHEC (copie impossible)")
+        echo "[échec] copie impossible vers $AE_SURVIVAL" >&2
+    else
+        AE_CREATED=1
+        echo "  sauvegarde : copie de slot0000 vers slot0002 (supprimée à la fin de l'étape)"
+
+        # `gameMode` vit dans `gameinfo.json` (3 = Créatif, 0 = Survie) : c'est la même source que le menu
+        # du jeu, donc les deux instances annoncent le même mode au handshake.
+        if sed -i 's/"gameMode":[0-9]/"gameMode":0/' "$AE_SURVIVAL/gameinfo.json" 2>/dev/null \
+            && grep -q '"gameMode":0' "$AE_SURVIVAL/gameinfo.json"; then
+            echo "  sauvegarde : mode de la copie -> 0 (Survie), relu : $(sed -n 's/.*\("gameMode":[0-9]\).*/\1/p' "$AE_SURVIVAL/gameinfo.json")"
+        else
+            AE_MODE_CHANGED=0
+            FAILURES+=("AE : le mode de la copie n'a pas pu être passé à Survie — aucune mesure fiable")
+            STEP_REPORTS+=("étape AE : ÉCHEC (mode non modifiable)")
+            echo "[échec] impossible d'écrire gameMode=0 dans $AE_SURVIVAL/gameinfo.json" >&2
+        fi
+
+        if [ "$AE_MODE_CHANGED" = 1 ]; then
+            args=(--clients=1 --timeout=480
+                "--host-args=-coopmode=server -coopsave=slot0002"
+                "--client-args=-coopmode=client -coopsave=slot0002 -coopdebug=craft"
+                "--client-marker=\\[sonde\\] craft : recette=")
+            if [ "$NO_BUILD" = 1 ]; then
+                args+=(--no-build)
+            fi
+            step AE "craft en Survie : le jeu consomme lui-même les ingrédients, la réconciliation n'y touche pas" assert_ae "${args[@]}"
+        fi
+
+        # Nettoyage après l'arrêt : le jeu ne doit pas réécrire la copie pendant qu'on la supprime.
+        if [ "$AE_CREATED" = 1 ] && [ -d "$AE_SURVIVAL" ]; then
+            rm -rf "$AE_SURVIVAL"
+            echo "  sauvegarde : slot0002 (copie Survie) supprimée"
+        fi
+    fi
 fi
 
 if wanted D "$ONLY"; then

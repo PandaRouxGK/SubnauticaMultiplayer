@@ -4911,11 +4911,15 @@ La v21 arbitrait le coût, mais seul le message `CraftRequest` savait le demande
 dans le fabricator consommait ses matériaux **sans** que le registre ne bouge. Ce lot branche le **vrai**
 chemin du jeu — `CrafterLogic.Craft(TechType, float)` — et mesure ce chemin, pas une requête de sonde.
 
+*(Cible corrigée par le §71 : la mesure en **Survie** a montré que `CrafterLogic.Craft` ne consomme rien et
+que la consommation est faite par `GhostCrafter.Craft`, appelé par l'action du bouton ; le garde vit
+désormais sur `Crafter.PerformAction`.)*
+
 ### 70.1 Ce qui a été ajouté
 
 | Brique | Fichier | Comportement |
 |---|---|---|
-| garde | `Coop.Client/CraftGuard.cs` | préfixe Harmony sur `CrafterLogic.Craft` : hors session il laisse passer ; sinon il **bloque l'appel** (`return false`) après avoir envoyé `CraftRequest`, puis **rejoue** l'appel sur la même instance à l'accord, avec un jeton consommé une fois |
+| garde | `Coop.Client/CraftGuard.cs` | préfixe Harmony sur `CrafterLogic.Craft` : hors session il laisse passer ; sinon il **bloque l'appel** (`return false`) après avoir envoyé `CraftRequest`, puis **rejoue** l'appel sur la même instance à l'accord, avec un jeton consommé une fois *(cible déplacée par le §71)* |
 | protection du coût | `CraftGuard.RememberCost` + `InventoryReconciler.IsCostInFlight` | les matériaux d'un craft approuvé sont **écartés de la réconciliation** pendant 10 s, sinon le monde les retirerait avant que le fabricator ne les lise (et le craft approuvé échouerait, registre déjà débité) |
 | mode de jeu | `GameModeUtils.RequiresIngredients()` | la protection ne s'arme que si le jeu consomme réellement : en **Créatif/Freedom** rien n'est consommé, et c'est la réconciliation qui applique le coût |
 | sonde | `Coop.Client/CraftProbeBehaviour.cs` | appelle `CrafterLogic.Craft` sur un fabricator **réel** : vérifie le blocage avant consommation, la reprise, l'apparition du produit (`TryPickup`) et le refus sans effet |
@@ -4969,3 +4973,61 @@ avant que le fabricator ne démarre — visible, bornée, et préférable à un 
   protégé, mais **mesuré nulle part**. C'est la limite la plus importante de ce lot.
 - **Latence non mesurée** : le blocage ajoute un aller-retour avant le démarrage du fabricator ; aucune
   ligne ne chronomètre ce délai.
+
+## 71. Le craft en Survie : le garde remonte au-dessus de la consommation (2026-10-22)
+
+Le §70 prouvait le blocage **en Créatif**, où le jeu ne consomme aucun ingrédient : « matériaux consommés »
+y était le fait de la réconciliation, pas du jeu. Ce lot rejoue le même craft sur une **copie en Survie** de
+la fixture (`slot0002`, `gameInfo.gameMode` 3 -> 0) et mesure ce qui est réellement consommé. La mesure a
+trouvé un défaut de produit : le garde était posé **sous** le point de consommation.
+
+### 71.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| copie de sauvegarde | `tools/verify.sh` (bloc **AE**) | copie `slot0000` -> `slot0002`, écrit `"gameMode":0` (Survie), relit la valeur, joue **explicitement** sur `-coopsave=slot0002`, puis supprime la copie ; `slot0000` n'est jamais modifiée et une copie préexistante n'est jamais écrasée |
+| garde remonté | `Coop.Client/CraftGuard.cs` | préfixe Harmony sur `Crafter.PerformAction` — l'action que le bouton du menu déclenche, **avant** `ConsumeEnergy` et `ConsumeResources` — ; la reprise à l'accord rappelle la même action sur la même instance |
+| sonde | `Coop.Client/CraftProbeBehaviour.cs` | appelle `((ITreeActionReceiver)crafter).PerformAction(…)` sur un `Crafter` réel ; relève le mode (`GameModeUtils.RequiresIngredients()`), compte les retraits de `InventoryReconciler` avant/après, et **retente** le ramassage tant que la progression est à 1 |
+| étape | `tools/verify.sh` (**AE**) | neuf assertions : garde installé, interception, reprise, mode `'Survie'`, coût payé **sans** la réconciliation (`0`), matériaux partis, verdict, et **absence** de la ligne d'exemption Créatif |
+
+### 71.2 Ce que les runs ont trouvé
+
+1. **Le garde était sous la consommation.** Premier run AE, garde encore sur `CrafterLogic.Craft` :
+   `matériaux consommés=False`, `coût retiré par la réconciliation=0`, `produit apparu=True` — le joueur
+   obtenait un produit **gratuit** en Survie, et le registre serveur était pourtant débité. L'IL du jeu
+   explique pourquoi : `CrafterLogic.Craft` ne fait que planifier (`timeCraftingBegin`, `numCrafted`,
+   `NotifyChanged`) ; `GhostCrafter.Craft` est `private virtual` et appelle `CrafterLogic.ConsumeEnergy`
+   puis `CrafterLogic.ConsumeResources` **avant** de démarrer ; le bouton passe par
+   `ITreeActionReceiver.PerformAction`, qui rend `false` si l'action est bloquée. Le garde est donc remonté
+   sur `PerformAction` — un seul point, avant toute consommation, pour tous les `Crafter` (fabricator du
+   caisson, fabricator du Cyclops, **et** `ConstructorInput` de la baie de montage).
+2. **Un ramassage tenté une seule fois peut ne rien faire.** `TryPickupAsync` s'abandonne sans effet si
+   `progress < 1` ; avec un seuil de `0,99` déclenché une seule fois, la progression atteignait `1,00` et
+   le produit n'apparaissait jamais (mesuré en Créatif après le déplacement du garde : `produit apparu=False
+   (0 -> 0)`). La sonde retente maintenant `TryPickup` à chaque cycle de 0,25 s, comme un joueur qui
+   reprend son objet.
+
+### 71.3 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `dotnet test` | **404/404** rc=0 |
+| `check-verify-assertions.sh` | rc=0 — **31** étapes déclarées, `--only` et le défaut les acceptent toutes |
+| étape **AD** (Créatif, après déplacement du garde) | **OK (53 s)** — `mode='Créatif' … coût retiré par la réconciliation=1 … verdict=True` |
+| étape **AE** (Survie) | **OK (53 s)** — `recette='Accumulator' coût=[Titanium ×1] … mode='Survie', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=0, refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True` |
+| côté serveur, même run | `[net] craft : 'killi'#1 -> 'Accumulator' ACCORDÉ (coût : Titanium ×1) — révision 2 -> 3.` puis `REFUSÉ (MissingMaterial : Titanium ×1 (registre 0)) — révision 3 inchangée.` |
+| copie de sauvegarde | `sauvegarde : copie de slot0000 vers slot0002`, `mode de la copie -> 0 (Survie), relu : "gameMode":0`, puis `sauvegarde : slot0002 (copie Survie) supprimée` |
+
+### 71.4 Ce que cette tranche ne prouve pas
+
+- **Un fabricator, une recette, un client** : `Accumulator` (`Titanium ×1`) sur le fabricator du caisson.
+  Les autres `Crafter` passent par la même action, mais aucun autre n'est exercé.
+- **`RocketConstructor` n'est pas intercepté** : il ne dérive pas de `Crafter` et lance sa construction par
+  son propre chemin (`StartRocketConstruction`), où `CrafterLogic.ConsumeResources` est appelé directement.
+- **La copie Survie est une conversion** : `gameInfo.json` a été édité, la partie n'a pas été *jouée* en
+  Survie. La nourriture, l'oxygène et la mort du joueur n'ont donc pas été observés ; ce que le mode change
+  ici — `RequiresIngredients()` et la consommation réelle — l'a été.
+- **Le produit reste local** : le serveur arbitre le coût, le client fabrique ; deux joueurs peuvent avoir
+  chacun le leur.
+- **Aucun remboursement** si la reprise échoue, et **latence non chronométrée**.

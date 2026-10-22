@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
 using BepInEx.Logging;
 using Coop.Model;
 using Coop.Shared;
@@ -13,8 +14,16 @@ namespace Coop.Client
     ///
     /// Jusqu'ici, seul un message explicite (`CraftRequest`) savait poser la question : le fabricator
     /// continuait de consommer localement, sans coût arbitré. Ce garde intercepte le point d'entrée que le
-    /// menu et le fabricator utilisent réellement — `CrafterLogic.Craft(TechType, float)` — et **bloque**
+    /// menu du fabricator utilise réellement — `ITreeActionReceiver.PerformAction(TechType)`, que `Crafter`
+    /// implémente explicitement et qui appelle `Crafter.Craft` (redéfini par `GhostCrafter`) — et **bloque**
     /// l'appel jusqu'à la décision.
+    ///
+    /// Mesuré en Survie le 2026-10-22, deux fois plutôt qu'une : `CrafterLogic.Craft` ne consomme **rien**
+    /// (il ne fait que planifier le produit), et `GhostCrafter.Craft` — qui appelle `CrafterLogic.ConsumeEnergy`
+    /// puis `CrafterLogic.ConsumeResources` — est privé et virtual, appelé **par** l'action du menu. Un garde
+    /// posé sur `CrafterLogic.Craft` laissait donc le fabricator d'un vrai joueur consommer ses matériaux,
+    /// même refusé ; le seul point qui précède toute consommation et que le bouton emprunte est
+    /// `PerformAction`.
     ///
     /// Pourquoi bloquer plutôt que laisser passer puis corriger : un craft déjà lancé a consommé ses
     /// matériaux et planifié son produit ; le défaire laisserait un objet fabriqué pour rien. Bloquer avant
@@ -57,8 +66,7 @@ namespace Coop.Client
 
         private sealed class PendingCraft
         {
-            public CrafterLogic Instance;
-            public float CraftTime;
+            public Crafter Instance;
         }
 
         public static int BlockedCount => _blocked;
@@ -92,15 +100,32 @@ namespace Coop.Client
         {
             _log = log;
 
-            var target = AccessTools.Method(
-                typeof(CrafterLogic),
-                "Craft",
-                new[] { typeof(TechType), typeof(float) });
+            // `PerformAction` est une implémentation **explicite** d'interface : son nom dans les métadonnées
+            // est décoré. On la résout par la table d'interface, pas par son nom, pour ne pas dépendre de
+            // cette décoration.
+            MethodInfo target = null;
+            try
+            {
+                var interfaceMethod = AccessTools.Method(
+                    typeof(ITreeActionReceiver),
+                    nameof(ITreeActionReceiver.PerformAction),
+                    new[] { typeof(TechType) });
+                var map = typeof(Crafter).GetInterfaceMap(typeof(ITreeActionReceiver));
+                var index = interfaceMethod == null ? -1 : Array.IndexOf(map.InterfaceMethods, interfaceMethod);
+                if (index >= 0)
+                {
+                    target = map.TargetMethods[index];
+                }
+            }
+            catch (Exception exception)
+            {
+                log.LogError($"[craft] résolution de l'action de craft impossible : {exception.Message}");
+            }
 
             if (target == null)
             {
                 log.LogError(
-                    "[craft] cible introuvable : CrafterLogic.Craft(TechType, float) — le fabricator reste " +
+                    "[craft] cible introuvable : Crafter.PerformAction(TechType) — le fabricator reste " +
                     "local, aucun coût n'est arbitré. Ce n'est pas silencieux, mais ce n'est pas la règle visée.");
                 return false;
             }
@@ -118,20 +143,21 @@ namespace Coop.Client
             }
             catch (Exception exception)
             {
-                log.LogError($"[craft] échec du patch de CrafterLogic.Craft : {exception}");
+                log.LogError($"[craft] échec du patch de l'action de craft : {exception}");
                 return false;
             }
 
             log.LogInfo(
-                "[craft] garde installée : CrafterLogic.Craft intercepté — un craft local attend désormais " +
-                "l'accord du serveur, qui prélève le coût de la recette du jeu.");
+                "[craft] garde installée : action du fabricator interceptée (Crafter.PerformAction) — le craft " +
+                "local attend désormais l'accord du serveur, qui prélève le coût de la recette du jeu ; ni " +
+                "l'énergie ni les matériaux ne partent avant la décision.");
             return true;
         }
 
         /// <summary>
         /// Préfixe. Renvoyer `false` empêche le jeu de démarrer le craft ; l'accord rejouera l'appel.
         /// </summary>
-        private static bool Intercept(CrafterLogic __instance, TechType techType, float craftTime)
+        private static bool Intercept(Crafter __instance, TechType techType, ref bool __result)
         {
             if (Approved.Remove((ushort)techType))
             {
@@ -155,14 +181,13 @@ namespace Coop.Client
                 return true;
             }
 
-            Pending[(ushort)techType] = new PendingCraft
-            {
-                Instance = __instance,
-                CraftTime = craftTime,
-            };
+            Pending[(ushort)techType] = new PendingCraft { Instance = __instance };
 
             RememberCost(techType);
             _blocked++;
+
+            // Le bouton reçoit `false` : ni énergie, ni matériaux, ni animation de craft ne partent.
+            __result = false;
 
             _log?.LogInfo(
                 $"[craft] interception : '{techType}' bloqué avant consommation, en attente du serveur " +
@@ -213,7 +238,7 @@ namespace Coop.Client
 
             try
             {
-                var started = pending.Instance.Craft(tech, pending.CraftTime);
+                var started = ((ITreeActionReceiver)pending.Instance).PerformAction(tech);
                 if (!started)
                 {
                     _replayFailed++;

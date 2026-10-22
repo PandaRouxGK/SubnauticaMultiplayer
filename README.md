@@ -30,9 +30,9 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   l'unité retirée du registre quitte réellement `Inventory.main` (réconciliation) ; l'inventaire réel du
   joueur est **adopté** une fois à l'admission, puis **conservé sur disque** par le serveur ;
 - **craft payé** : le serveur lit la **recette du jeu** (`TechData.GetIngredients`), prélève les matériaux
-  **atomiquement** sur son registre et refuse en nommant le manque ; le **fabricator** du jeu
-  (`CrafterLogic.Craft`) attend cet accord avant de consommer quoi que ce soit, puis le craft est rejoué —
-  le produit, lui, reste fabriqué par le client ;
+  **atomiquement** sur son registre et refuse en nommant le manque ; l'**action du fabricator**
+  (`Crafter.PerformAction`, celle que le bouton du menu déclenche) attend cet accord avant de consommer
+  l'énergie ou les matériaux, puis le craft est rejoué — le produit, lui, reste fabriqué par le client ;
 - sauvegarde : le client n'écrit pas (garde sur deux remparts), l'hôte écrit toujours ;
 - hôte dédié : aucun personnage joueur exposé aux clients ;
 - **empreinte de sauvegarde (P0)** : handshake v13 accepté avec `save=slot=…` ; étape P verte ;
@@ -43,7 +43,7 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`entités créées ici=0`) ;
 - **contrat de contenu (P1bis)** : étape N verte — `définition vérifiée=True (hash=0x3da1f4bf782becdf)`
   et `définition falsifiée refusée=True` chez **les deux** clients, `définitions refusées=0` ;
-- **batterie des trente étapes (A–Z, AA, AB, AC, AD)** : les dix-sept premières ont un verdict vert le 2026-10-19
+- **batterie des trente et une étapes (A–Z, AA, AB, AC, AD, AE)** : les dix-sept premières ont un verdict vert le 2026-10-19
   (`PLAN.md` §46) ; `R`, `S` et `T` prouvent les refus P0 en jeu (slot, session, mode — client divergent
   refusé nommément, l'autre admis), `U` la reconnexion (départ diffusé, réclamations libérées, retour admis, aucun avatar fantôme),
   `V` la présence à **trois** clients et `W` les créatures à trois clients, avec les états périmés
@@ -52,9 +52,10 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   (`PLAN.md` §65), `AA` l'heure du monde diffusée puis appliquée (`PLAN.md` §66), `AB` le registre
   d'inventaire du serveur confronté au ramassage réel, `AC` le débit accordé puis refusé avec le retrait
   réel dans `Inventory.main` (`PLAN.md` §67 et §68) et `AD` l'adoption de l'inventaire, le coût d'une vraie
-  recette prélevé puis refusé nommément (`PLAN.md` §69), et le **fabricator réel** bloqué avant consommation
-  puis rejoué sur accord (`PLAN.md` §70). `tools/verify.sh` sans `--only` lance bien les
-  trente.
+  recette prélevé puis refusé nommément (`PLAN.md` §69), le **fabricator réel** bloqué avant consommation
+  puis rejoué sur accord (`PLAN.md` §70), et `AE` le même craft en **Survie**, sur une copie non-Créative de
+  la fixture : le jeu y consomme lui-même les ingrédients, sans la réconciliation (`PLAN.md` §71).
+  `tools/verify.sh` sans `--only` lance bien les trente et une.
   Deux étapes étaient tombées pour un défaut de **sonde**, pas du protocole : B comptait l'avatar de
   l'hôte comme un pair (corrigé : attente d'un **autre client**), et L téléportait le joueur de 16 m
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
@@ -157,7 +158,7 @@ accepte n'importe qui connaissant l'IP, la clé LiteNetLib ne filtrant que les p
 | `tools/deploy.sh --verify` | secondes | binaires installés = manifeste |
 | `tools/check-verify-assertions.sh` | secondes | toutes les étapes déclarées sont acceptées par `--only` **et** lancées par le défaut, et les assertions P/Q/N/B/R acceptent les formats de journal **et** échouent quand une ligne exigée manque (sans lancer le jeu) |
 | `tools/session-verdict.sh --self-test` | secondes | le graveur de session longue accepte un journal vert **et** échoue sur les six cas rouges (exception, dérive > 2 m, mesure vide, sauvegarde absente, reconnexion absente, durée courte) |
-| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–AD) |
+| `tools/verify.sh --only=A` | ~1 min + chargement | un contrôle **en jeu** (voir l'en-tête de `verify.sh` pour A–AE) |
 | `tools/verify.sh` | long (~45 min) | les vingt-huit étapes, un seul verdict |
 | `tools/p4-session.sh --minutes=30` | 30 min + chargement | une session longue à deux clients (reconnexion au tiers, sauvegarde de l'hôte) et **un** verdict P4 (`PLAN.md` §62) |
 
