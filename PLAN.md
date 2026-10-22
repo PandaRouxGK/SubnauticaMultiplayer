@@ -5213,7 +5213,49 @@ ouverte ne fait que retarder la réconciliation sur ce matériau.
 
 - **La fenêtre reste la seule borne** quand la décision n'arrive jamais (client qui perd la connexion entre
   l'interception et la réponse) : la protection expire alors au bout de 10 s sans avoir servi.
-- **Aucun test hors jeu de `ReleaseCost`** : la logique vit dans `Coop.Client` (Unity, `TechData`), donc seule
-  la sonde en jeu la couvre — un cas « deux recettes partageant un ingrédient » n'est pas exercé.
+- **`ReleaseCost` n'avait aucun test hors jeu** quand ce lot a été écrit : la comptabilité est sortie du
+  client au **§77** (8 cas, `Coop.Model/MaterialProtection.cs`), mais le cas « deux recettes partageant un
+  ingrédient » reste non exercé **en jeu**.
 - **`Clear()` n'est toujours pas exercé en jeu** : la dette du §72.3 reste ouverte (les deux tables sont
   désormais vidées, mais aucune étape ne ferme une session avec une protection armée).
+
+## 77. La protection des matériaux devient testable hors jeu (2026-10-22)
+
+Le §76.3 laissait une dette nette : « aucun test hors jeu de `ReleaseCost` — la logique vit dans
+`Coop.Client` (Unity, `TechData`) ». La comptabilité a été **sortie d'Unity** : le client ne garde que la
+lecture des ingrédients et l'horloge, le reste (références, fenêtre, purge) est du modèle pur.
+
+### 77.1 Ce qui a été ajouté
+
+| Brique | Fichier | Comportement |
+|---|---|---|
+| comptabilité pure | `Coop.Model/MaterialProtection.cs` | `Arm(nowMs, noms)` (une référence par nom, échéance repoussée par l'armement le plus tardif, jamais raccourcie), `Release(noms)` (rend les noms dont la **dernière** référence est partie), `IsProtected(nowMs, nom)` (une entrée échue est oubliée **avec ses références**), `Prune(nowMs)`, `Clear()`, `Count`/`TotalRefs` pour les diagnostics ; fenêtre par défaut **10 s**, ramenée à 1 ms si on lui passe 0 |
+| client | `Coop.Client/CraftGuard.cs` | `InFlightCosts`/`InFlightRefs`/`InFlightSeconds` remplacés par un `MaterialProtection` ; `NowMs()` = `realtimeSinceStartup × 1000` ; `IsCostInFlight`, `RememberCost`, `ReleaseCost` et `Clear` délèguent ; la ligne de journal lit `WindowMs` au lieu d'une constante dupliquée |
+| tests | `tests/Coop.Model.Tests/MaterialProtectionTests.cs` | **8 cas** : fenêtre incluse, expiration qui emporte les références, deux recettes partageant un ingrédient, échéance repoussée, noms vides/doublons, levée d'inconnus, purge, `Clear` et fenêtre invalide |
+
+### 77.2 Mesures du 2026-10-22
+
+| Contrôle | Valeur mesurée |
+|---|---|
+| `dotnet build` | rc=0, **0 avertissement** |
+| `dotnet test` | **433/433** rc=0 (8 nouveaux cas `MaterialProtection`) |
+| étape **AD** (Créatif, 54 s) | **OK** — `mode='Créatif' … coût retiré par la réconciliation=1` ; `grep -c "matériaux protégés\|protection levée"` = **0** |
+| étape **AE** (Survie, 53 s) | **OK** — `matériaux protégés 10 s : Titanium` à 18:04:41.037 puis `protection levée : Titanium` à 18:04:41.062 (**25 ms** plus tard, après la consommation du jeu) ; deuxième demande : même paire à 18:04:44.321 / .348 ; verdict `matériaux consommés=True, coût retiré par la réconciliation=0, attente de l'accord=27.0 ms (min=20.4, max=27.0) … verdict=True` |
+| étape **AE**, cadence | **OK** — `[sonde] cadence : demandes=12 refus de cadence=4 … verdict=True` |
+| recherche du chemin de report | `grep "reporté"` sur les journaux AD **et** AE : **0** occurrence — voir §77.3 |
+
+### 77.3 Ce que ce lot ne prouve pas — et ce qu'il a trouvé
+
+- **La protection n'a encore jamais empêché un retrait réel.** Depuis le §76, la fenêtre est levée **25–30 ms**
+  après l'accord : pour qu'elle serve, il faudrait qu'un tick de réconciliation tombe entre l'interception et
+  la décision. Aucun run ne montre `[inventaire] réconciliation : retrait de 'Titanium' reporté` ; les seules
+  preuves sont l'armement, la levée et les 8 cas hors jeu. Ce qui est prouvé est donc la **comptabilité**, pas
+  l'effet.
+- **Un retrait reporté n'est rejoué qu'à l'instantané suivant** : `InventoryReconciliation.Compute` est appelé
+  à la réception d'un instantané, avec l'instantané précédent comme référence. Si le report tombe dans une
+  fenêtre où plus aucun instantané n'arrive (reprise refusée par le jeu, par exemple), la divergence
+  **reste** jusqu'au prochain changement d'inventaire. C'est une dette de conception, pas un défaut de ce lot.
+- **La lecture des ingrédients reste en jeu** : `TechData.GetIngredients` et `GameModeUtils.RequiresIngredients`
+  ne sont pas testés hors jeu ; le modèle ne reçoit que des noms.
+- **L'horloge est une `float` convertie en millisecondes** : `realtimeSinceStartup × 1000` perd de la précision
+  sur une très longue session ; la fenêtre de 10 s rend l'erreur sans conséquence, mais ce n'est pas mesuré.

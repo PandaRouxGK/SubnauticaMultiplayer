@@ -59,21 +59,12 @@ namespace Coop.Client
         private static float _maxLatencyMs = -1f;
 
         /// <summary>
-        /// Noms de matériaux dont le prélèvement local est **en cours** : la réconciliation ne doit pas les
-        /// retirer avant que le jeu ne les consomme lui-même, sinon le craft approuvé échouerait faute de
-        /// matériaux et le registre serait déjà débité.
+        /// Matériaux dont le prélèvement local est **en cours** : la réconciliation ne doit pas les retirer
+        /// avant que le jeu ne les consomme lui-même, sinon le craft approuvé échouerait faute de matériaux et
+        /// le registre serait déjà débité. La comptabilité (références partagées, fenêtre) est **pure** et
+        /// testée hors jeu : `Coop.Model/MaterialProtection.cs`.
         /// </summary>
-        private static readonly Dictionary<string, float> InFlightCosts =
-            new Dictionary<string, float>(StringComparer.Ordinal);
-
-        /// <summary>
-        /// Nombre de crafts en attente qui protègent le même matériau : deux recettes peuvent partager un
-        /// ingrédient, et lever la protection de l'un ne doit pas découvrir l'autre. À zéro, l'entrée part.
-        /// </summary>
-        private static readonly Dictionary<string, int> InFlightRefs =
-            new Dictionary<string, int>(StringComparer.Ordinal);
-
-        private const float InFlightSeconds = 10f;
+        private static readonly MaterialProtection InFlight = new MaterialProtection();
 
         private static ManualLogSource _log;
         private static int _blocked;
@@ -98,23 +89,13 @@ namespace Coop.Client
         /// <summary>Vrai si ce matériau est en cours de consommation par un craft approuvé.</summary>
         public static bool IsCostInFlight(string techTypeName)
         {
-            if (string.IsNullOrEmpty(techTypeName))
-            {
-                return false;
-            }
+            return InFlight.IsProtected(NowMs(), techTypeName);
+        }
 
-            if (!InFlightCosts.TryGetValue(techTypeName, out var expiresAt))
-            {
-                return false;
-            }
-
-            if (UnityEngine.Time.realtimeSinceStartup > expiresAt)
-            {
-                InFlightCosts.Remove(techTypeName);
-                return false;
-            }
-
-            return true;
+        /// <summary>Horloge en millisecondes : la comptabilité pure prend le temps en argument.</summary>
+        private static long NowMs()
+        {
+            return (long)(UnityEngine.Time.realtimeSinceStartup * 1000f);
         }
 
         public static bool Install(ManualLogSource log)
@@ -363,8 +344,7 @@ namespace Coop.Client
             Ledger.Clear();
             Instances.Clear();
             SentAt.Clear();
-            InFlightCosts.Clear();
-            InFlightRefs.Clear();
+            InFlight.Clear();
 
             if (pending > 0)
             {
@@ -381,7 +361,7 @@ namespace Coop.Client
         /// </summary>
         private static void ReleaseCost(TechType techType)
         {
-            List<string> released = null;
+            IReadOnlyList<string> released;
 
             try
             {
@@ -391,25 +371,13 @@ namespace Coop.Client
                     return;
                 }
 
+                var names = new List<string>(ingredients.Count);
                 foreach (var ingredient in ingredients)
                 {
-                    var name = ingredient.techType.ToString();
-                    if (string.IsNullOrEmpty(name) || !InFlightRefs.TryGetValue(name, out var refs))
-                    {
-                        continue;
-                    }
-
-                    if (refs > 1)
-                    {
-                        InFlightRefs[name] = refs - 1;
-                        continue;
-                    }
-
-                    InFlightRefs.Remove(name);
-                    InFlightCosts.Remove(name);
-                    released ??= new List<string>();
-                    released.Add(name);
+                    names.Add(ingredient.techType.ToString());
                 }
+
+                released = InFlight.Release(names);
             }
             catch (Exception exception)
             {
@@ -419,7 +387,7 @@ namespace Coop.Client
                 return;
             }
 
-            if (released != null && released.Count > 0)
+            if (released.Count > 0)
             {
                 _log?.LogInfo(
                     $"[craft] protection levée : {string.Join(", ", released)} (consommation locale faite ou " +
@@ -455,28 +423,23 @@ namespace Coop.Client
                 if (ingredients == null)
                 {
                     return;
-                }                    var expiresAt = UnityEngine.Time.realtimeSinceStartup + InFlightSeconds;
-                    var protectedNames = new List<string>(ingredients.Count);
+                }
 
+                var names = new List<string>(ingredients.Count);
                 foreach (var ingredient in ingredients)
                 {
-                    var name = ingredient.techType.ToString();
-                    if (!string.IsNullOrEmpty(name))
-                    {
-                        InFlightCosts[name] = expiresAt;
-                        InFlightRefs.TryGetValue(name, out var refs);
-                        InFlightRefs[name] = refs + 1;
-                        protectedNames.Add(name);
-                    }
+                    names.Add(ingredient.techType.ToString());
                 }
+
+                var protectedNames = InFlight.Arm(NowMs(), names);
 
                 // Sans cette ligne, la branche de protection était muette en Survie : impossible de savoir,
                 // dans un journal, si le coût avait été écarté de la réconciliation ou non.
                 if (protectedNames.Count > 0)
                 {
                     _log?.LogInfo(
-                        $"[craft] matériaux protégés {InFlightSeconds:F0} s : {string.Join(", ", protectedNames)} " +
-                        "(le craft approuvé les consomme lui-même).");
+                        $"[craft] matériaux protégés {InFlight.WindowMs / 1000.0:F0} s : " +
+                        $"{string.Join(", ", protectedNames)} (le craft approuvé les consomme lui-même).");
                 }
             }
             catch (Exception exception)
