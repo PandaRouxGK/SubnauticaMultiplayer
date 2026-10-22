@@ -343,6 +343,74 @@ namespace Coop.Client
                     $"[sonde] cadence : verdict=False — {requestsSent} demande(s) partie(s), " +
                     $"{rateLimited} refus de cadence reçu(s) (attendu ≥ 1).");
             }
+
+            // 6. **Report et reprise** (v21) : un retrait qui tombe pendant la fenêtre de protection d'un
+            //    craft est **reporté**, puis repris à la levée de cette protection — pas à l'instantané
+            //    suivant, qui peut ne jamais venir. Le control est forcé (protection armée par la sonde) :
+            //    la fenêtre réelle ne dure que 25–30 ms, une coïncidence n'est pas reproductible.
+            //    **Survie seulement** : en Créatif la fixture `slot0000` est la sauvegarde de référence et ne
+            //    doit pas perdre d'objet.
+            if (requiresIngredients)
+            {
+                DeferAndRetry();
+            }
+        }
+
+        /// <summary>
+        /// Force un retrait pendant qu'un matériau est protégé (il doit être **reporté**), puis lève la
+        /// protection : la reprise doit retirer l'unité. Sans cette preuve, le chemin du report et de sa
+        /// reprise n'était exercé par aucun run.
+        /// </summary>
+        private static void DeferAndRetry()
+        {
+            const string material = "Copper";
+            var localBefore = InventoryReconciler.CountLocal(material);
+
+            if (localBefore < 1)
+            {
+                Log.LogWarning(
+                    $"[sonde] report : aucun '{material}' dans l'inventaire local — contrôle non exécuté.");
+                return;
+            }
+
+            CraftGuard.ProtectForProbe(material);
+
+            // Le serveur ne compterait plus ce matériau (débit) : c'est la seule situation où la
+            // réconciliation a quelque chose à retirer.
+            InventoryReconciler.RememberServerState(Array.Empty<InventoryEntry>());
+            InventoryReconciler.Apply(new[] { new InventoryRemoval(material, 1) }, Log);
+
+            var deferred = InventoryReconciler.PendingDeferrals;
+            var afterDefer = InventoryReconciler.CountLocal(material);
+
+            CraftGuard.ReleaseForProbe(material);
+
+            var afterRetry = InventoryReconciler.CountLocal(material);
+            var pendingAfter = InventoryReconciler.PendingDeferrals;
+            var retried = localBefore - afterRetry;
+            var verdict = deferred == 1 && afterDefer == localBefore && retried == 1 && pendingAfter == 0;
+
+            Log.LogInfo(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[sonde] report : matériau='{0}' local={1}, reportés={2}, retiré à la reprise={3} " +
+                    "({4} -> {5}), attentes restantes={6} — verdict={7}",
+                    material,
+                    localBefore,
+                    deferred,
+                    retried,
+                    afterDefer,
+                    afterRetry,
+                    pendingAfter,
+                    verdict));
+
+            if (!verdict)
+            {
+                Log.LogError(
+                    $"[sonde] report : verdict=False — reportés={deferred} (attendu 1), local inchangé " +
+                    $"après report={afterDefer == localBefore}, retirés à la reprise={retried} (attendu 1), " +
+                    $"attentes restantes={pendingAfter} (attendu 0).");
+            }
         }
 
         /// <summary>

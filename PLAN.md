@@ -5246,11 +5246,11 @@ lecture des ingrédients et l'horloge, le reste (références, fenêtre, purge) 
 
 ### 77.3 Ce que ce lot ne prouve pas — et ce qu'il a trouvé
 
-- **La protection n'a encore jamais empêché un retrait réel.** Depuis le §76, la fenêtre est levée **25–30 ms**
-  après l'accord : pour qu'elle serve, il faudrait qu'un tick de réconciliation tombe entre l'interception et
-  la décision. Aucun run ne montre `[inventaire] réconciliation : retrait de 'Titanium' reporté` ; les seules
-  preuves sont l'armement, la levée et les 8 cas hors jeu. Ce qui est prouvé est donc la **comptabilité**, pas
-  l'effet.
+- **La protection n'avait jamais empêché un retrait réel** quand ce lot a été écrit : depuis le §76 la
+  fenêtre est levée **25–30 ms** après l'accord, donc il faudrait qu'un tick de réconciliation tombe entre
+  l'interception et la décision. C'est désormais prouvé par un contrôle **forcé** au §78 (AE : `retrait de
+  'Copper' ×1 reporté` puis reprise à la levée, verdict=True) — la coïncidence naturelle, elle, reste non
+  observée.
 - **Un retrait reporté n'est rejoué qu'à l'instantané suivant** : `InventoryReconciliation.Compute` est appelé
   à la réception d'un instantané, avec l'instantané précédent comme référence. Si le report tombe dans une
   fenêtre où plus aucun instantané n'arrive (reprise refusée par le jeu, par exemple), la divergence
@@ -5275,7 +5275,8 @@ restait indéfiniment. La levée de protection est maintenant un **point de repr
 | reprise | `Coop.Client/InventoryReconciler.cs` (`RetryDeferred`) | réévalue **seulement** les noms reportés contre cet instantané (`local > annoncé`), puis applique ; un nom encore protégé est reporté de nouveau ; sans rien à retirer elle l'écrit (« plus rien à retirer ») au lieu de se taire |
 | branchement | `Coop.Client/CraftGuard.cs` | après chaque `protection levée`, `RetryDeferred` est appelé — c'est le seul moment où le report peut être repris sans attendre un instantané ; `Clear()` remet aussi cet état à zéro (`Reset`) |
 | alimentation | `Coop.Client/Plugin.cs` | chaque instantané accepté transmet ses entrées à `RememberServerState` |
-| harnais | `tools/verify.sh` (**AD**, **AE**) | `expect_missing` sur `retrait de '…' ×n reporté` : les runs actuels ne produisent **aucun** report, et une assertion le dit désormais au lieu de laisser croire que le chemin est couvert |
+| sonde | `Coop.Client/CraftProbeBehaviour.cs` (`DeferAndRetry`) | **force** la coïncidence : protection armée par la sonde (`ProtectForProbe`), inventaire serveur vidé (`RememberServerState`), retrait demandé (doit être **reporté**), puis levée (`ReleaseForProbe`) — le retrait doit avoir lieu à ce moment. Exécuté **en Survie seulement** : la fixture Créative `slot0000` ne doit pas perdre d'objet |
+| harnais | `tools/verify.sh` (**AE** positive, **AD** négative) | AE : `retrait de '…' ×n reporté`, `reprise de n retrait(s) reporté(s)`, `[sonde] report : … verdict=True` ; AD : `expect_missing` sur les trois, puisque la phase est désactivée en Créatif |
 
 ### 78.2 Mesures du 2026-10-22
 
@@ -5284,15 +5285,17 @@ restait indéfiniment. La levée de protection est maintenant un **point de repr
 | `dotnet build` | rc=0, **0 avertissement** |
 | `dotnet test` | **433/433** rc=0 (inchangé : ce lot ne touche pas le modèle) |
 | `check-verify-assertions.sh` | rc=0 — 31 étapes, 20 échecs nommés |
-| étape **AD** (Créatif, 54 s) | **OK** — aucune ligne `protection levée`, aucun `reporté` ; `coût retiré par la réconciliation=1` |
-| étape **AE** (Survie, 54 s) | **OK** — protection armée puis levée (25–30 ms), aucun `reporté`, `coût retiré par la réconciliation=0`, verdict=True |
-| recherche du chemin de reprise | `grep "reporté\|reprise de"` sur les journaux AD **et** AE : **0** occurrence |
+| étape **AD** (Créatif, 55 s) | **OK** — la phase de report est **désactivée** : `grep -c "reporté\|protection forcée"` = **0** ; `coût retiré par la réconciliation=1`, fixture `slot0000` intacte |
+| étape **AE** (Survie, 54 s) | **OK** — séquence complète mesurée à 18:13:05.927–.928 : `protection forcée de Copper` → `retrait de 'Copper' ×1 reporté` → `protection levée de Copper — reprise des reports` → `reprise de 1 retrait(s) reporté(s) [Copper]` → `[sonde] report : matériau='Copper' local=1, reportés=1, retiré à la reprise=1 (1 -> 0), attentes restantes=0 — verdict=True` ; le craft de l'étape reste vert (`coût retiré par la réconciliation=0`) |
 
 ### 78.3 Ce que ce lot ne prouve pas
 
-- **Le chemin de reprise n'est exercé par aucun run** : il faudrait qu'un retrait soit reporté, donc qu'un
-  tick de réconciliation tombe dans la fenêtre de 25–30 ms. Le code est en place et compilé, mais sa branche
-  non vide n'a jamais tourné — c'est une dette de **preuve**, pas de conception, et le §77.3 la nommait déjà.
+- **La coïncidence réelle n'est pas exercée** : la sonde **force** la protection (elle l'arme elle-même) au
+  lieu d'attendre qu'un tick de réconciliation tombe dans la fenêtre de 25–30 ms d'un vrai craft. Le chemin
+  report → reprise est donc prouvé de bout en bout, mais pas sa probabilité en jeu ; le §77.3 garde cette
+  nuance.
+- **La sonde retire un `Copper` de la copie Survie** (`slot0002`, supprimée après le run) : c'est le prix du
+  contrôle, et la fixture de référence n'est jamais touchée (phase désactivée en Créatif).
 - **Aucun test hors jeu** : `RetryDeferred` lit `Inventory.main` (Unity) ; seule la partie pure (le delta) est
   testée, dans `InventoryReconciliation`.
 - **La reprise s'appuie sur le dernier instantané connu** : un nom absent de cet instantané est compté `0`, ce

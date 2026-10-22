@@ -355,6 +355,25 @@ namespace Coop.Client
         }
 
         /// <summary>
+        /// Sonde : arme une protection **sans** passer par un vrai craft, pour exercer le chemin du report et
+        /// de sa reprise (la fenêtre réelle ne dure que 25–30 ms, une coïncidence n'est pas reproductible).
+        /// </summary>
+        internal static void ProtectForProbe(string techTypeName)
+        {
+            var protectedNames = InFlight.Arm(NowMs(), new[] { techTypeName });
+            _log?.LogInfo($"[craft] sonde : protection forcée de {string.Join(", ", protectedNames)}.");
+        }
+
+        /// <summary>Sonde : lève une protection forcée et rejoue les retraits reportés, comme le ferait un accord.</summary>
+        internal static void ReleaseForProbe(string techTypeName)
+        {
+            var released = InFlight.Release(new[] { techTypeName });
+            _log?.LogInfo(
+                $"[craft] sonde : protection levée de {string.Join(", ", released)} — reprise des reports.");
+            InventoryReconciler.RetryDeferred(_log);
+        }
+
+        /// <summary>
         /// Lève la protection d'une recette dont la demande a été **refusée** : le préfixe a bloqué avant
         /// toute consommation, donc la fenêtre de 10 s ne protège plus rien et ne ferait que retarder la
         /// réconciliation sur ce matériau. Deux recettes peuvent partager un ingrédient : la protection ne

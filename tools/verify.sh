@@ -725,8 +725,12 @@ assert_ae() {
         "en Survie, le coût est écarté de la réconciliation pendant la reprise"
     expect AE "$client" "protection levée : [A-Za-z]+" \
         "un refus lève la protection : rien n'a été consommé, la réconciliation peut reprendre"
-    expect_missing AE "$client" "retrait de '[^']+' ×[0-9]+ reporté" \
-        "la fenêtre ne couvre que 25–30 ms : aucun retrait n'est reporté (constat, pas un succès)"
+    expect AE "$client" "retrait de '[^']+' ×[0-9]+ reporté" \
+        "un retrait tombé pendant la protection est reporté au lieu d'être appliqué"
+    expect AE "$client" "reprise de [0-9]+ retrait\\(s\\) reporté\\(s\\)" \
+        "le report est repris dès la levée de la protection"
+    expect AE "$client" "\\[sonde\\] report : .*verdict=True" \
+        "la sonde mesure le report et sa reprise : rien n'est retiré avant, l'unité part après"
     expect AE "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence :" \
         "le refus de cadence est nommé côté serveur, en Survie"
     expect_missing AE "$client" "mode sans ingrédients" \
