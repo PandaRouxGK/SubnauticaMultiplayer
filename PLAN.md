@@ -143,18 +143,18 @@ serveur qu'une valeur falsifiée est rejetée.
 | **M3** | **Une créature synchro, IA client coupée** | position identique chez les 2 clients, IA uniquement serveur — **clos le 2026-10-20 (§54.2)** : E (deux clients), IA relue coupée, W (trois clients) | **élevé — valide le modèle** |
 | **M4** | Un véhicule (Seamoth) | **clos le 2026-10-20 (§56)** : position diffusée à 10 Hz et interpolée (§33), conduite autoritaire (§40), **énergie mesurée en jeu** (`200,00 -> 100,00`, appliquée chez le client) et **modules transportés puis appliqués** (`transport=True application=True`) | moyen |
 | **M5** | Première action autoritaire | pickup : refus serveur si déjà réclamé — **clos le 2026-10-20 (§54.3)** : L (accordé/refusé, geste bloqué), O/Q (objet retiré, retrait rejoué), 9 tests du registre | moyen |
-| **M6** | Pipeline de contenu | **création et retrait d'entité faits (§41, §42)** : l'hôte fabrique, les clients instancient avec la clé du serveur ; un retrait et un ramassage se répercutent ; reste l'item **custom** et son AssetBundle livré au client | moyen |
+| **M6** | Pipeline de contenu | **création et retrait d'entité faits (§41, §42)** : l'hôte fabrique, les clients instancient avec la clé du serveur ; un retrait et un ramassage se répercutent ; reste l'item **custom** et son AssetBundle livré au client — **gel levé le 2026-10-23 (§83)**, c'est le prochain chantier | moyen |
 
 M3 est le vrai test : si une créature pilotée serveur avec IA client désactivée rend
 correctement chez 2 clients, l'architecture est bonne pour tout le reste.
 
 > **Révisé au §43 (2026-10-19)** : ce tableau est un journal de jalons, pas l'état courant. La séquence
-> qui fait foi pour la suite est celle du §43.5, et **M6-contenu (AssetBundles) y est gelé** jusqu'à ce
-> qu'une session réelle de 30 minutes tienne.
+> qui fait foi pour la suite est celle du §43.5. **M6-contenu (AssetBundles) y était gelé** jusqu'à une
+> session réelle de 30 minutes : le gel est **levé le 2026-10-23** (§83), P4 étant déclarée bonne.
 >
 > **État au 2026-10-20** : M0, M1, M2, M3, **M4** et M5 sont **clos** (critères du §6 prouvés, §54 et §56) ;
-> M6 reste ouvert (AssetBundle gelé, en attente d'une session réelle de 30 min).
-> **Complément au 2026-10-22** : M6 reste ouvert (P4 et AssetBundle gelés), mais l'**économie** du monde
+> M6 reste ouvert — non plus à cause d'un gel, mais parce que l'item **custom** n'existe pas encore (§83).
+> **Complément au 2026-10-22** : l'**économie** du monde
 > est désormais arbitrée de bout en bout — ramassage, débit, adoption, coût du craft, cadence et latence
 > mesurée (v19–v21, §67–§73) : c'est l'infrastructure dont M6 aura besoin, pas M6 lui-même.
 
@@ -3252,7 +3252,7 @@ régression, et elle est trop lente pour être une boucle.
 | **P3** | Substrat de vérification : enregistreur + rejeu hors jeu, **toutes les assertions conservées** | 3–5 | une régression d'interpolation est détectée **hors du jeu**, en secondes |
 | **P4** | Session réelle 30 min, deux joueurs, installation faite par le second | 2–3 | `0 exception`, `0 désync > 2 m`, sauvegarde + rechargement + reconnexion, verdict unique |
 | **P5** | Découper `ServerNetwork` en cinq systèmes (présence, créatures, véhicules, pickup, spawn/despawn) | 5 | `verify.sh` identique, comportement inchangé, aucun nouveau message |
-| — | **Gelé** : pipeline AssetBundles, énergie/modules de véhicule, nouvelles sondes, host migration, matchmaking | — | se rouvre après P4, sur décision explicite |
+| — | **Gelé** : host migration, matchmaking (le pipeline AssetBundles et les nouvelles sondes sont **rouverts** depuis le 2026-10-23, §83) | — | se rouvre après une décision explicite |
 
 Ordonnancement : **P0 → P1 → P2 → P4** est le chemin critique (≈ 8–11 jours) ; **P1bis** et **P3** se font en
 parallèle ; **P5** après, parce que découper un fichier qu'on va encore corriger coûte deux fois.
@@ -3262,7 +3262,8 @@ parallèle ; **P5** après, parce que découper un fichier qu'on va encore corri
 > retraits (§45), réclamations libérées et aucun fantôme (§52), volant tenu par un client tué libéré
 > (§57, étape X). **P5 est fait au sens de son critère observable le 2026-10-20 (§58)** : découpage en
 > cinq domaines, texte inchangé, `verify.sh` identique. **P3 est fait au sens de son critère le 2026-10-20
-> (§59)** : rejeu hors jeu d'un flux réel, régression détectée en ~1 s. P4 reste à faire.
+> (§59)** : rejeu hors jeu d'un flux réel, régression détectée en ~1 s. **P4 est déclarée bonne le
+> 2026-10-23** (§83) : le gel du pipeline AssetBundles est levé par décision explicite.
 
 ### 43.6 Critères d'arrêt
 
@@ -3987,8 +3988,9 @@ ignorés=2591 / 1704 / 951`. Le défaut n'était donc pas une mesure fragile : 9
 - **M5** (ramassage) : objets mobiles mal jugés, collisions de clé **comptées mais non arbitrées**, retour
   arrière jamais exercé. Les collisions demandent un schéma d'identité (clé + position ?) et une décision
   de conception, pas un correctif local.
-- **M6** (contenu) : le pipeline AssetBundle est **gelé** par décision (§43.5) jusqu'à ce qu'une session
-  réelle de 30 minutes tienne. Le livrer ici reviendrait à rouvrir un gel sans la mesure qui le justifie.
+- **M6** (contenu) : le pipeline AssetBundle était **gelé** par décision (§43.5) ; le gel est levé le
+  2026-10-23 (§83), P4 étant déclarée bonne. Le contenu custom n'existe toujours pas — c'est le chantier
+  suivant, pas une dette de ce lot.
 - Les trois clients de V et W ne testent **pas** 4 à 10 joueurs ; `MaxClients=10` reste non exercé au-delà
   de trois.
 
@@ -4039,8 +4041,8 @@ sans clé non arbitrés ; **collisions de clé** comptées, pas arbitrées ; **r
   application=True`). Restent hors du critère §6, et nommés : les **dégâts** (`LiveMixin`) et le `spawn`
   initié par un client ne voyagent toujours pas.
 - **M6 (contenu)** : création/retrait/livraison d'une définition sont prouvés (N, O, Q), mais l'item
-  **custom** (AssetBundle livré au client) est **gelé par décision** (§43.5) jusqu'à une session réelle
-  de 30 min. Le critère §6 le nomme explicitement : M6 reste ouvert par choix, pas par oubli.
+  **custom** (AssetBundle livré au client) n'existe pas encore. Le gel qui le bloquait est **levé le
+  2026-10-23** (§83) : M6 reste ouvert parce que son critère n'est pas atteint, pas par décision de gel.
 
 ### 54.5 Le filtre de tick sort du gestionnaire — et révèle une limite de W
 
@@ -4434,9 +4436,9 @@ journal serveur**, pas la durée demandée — et exige `--minutes` moins 60 s d
 
 ### 62.4 Ce que ce chapitre ne prouve pas
 
-- **La session de 30 minutes n'a pas été jouée.** Le kit est prêt ; il reste à lancer
-  `tools/p4-session.sh` (30 min) avec deux instances, puis la vraie P4 — deux **humains**, installation
-  faite par le second, qui est une propriété de la session et non du code.
+- **La session de 30 minutes n'avait pas été jouée au moment de ce chapitre.** Elle est **déclarée bonne
+  le 2026-10-23** (§83), avec le kit de ce §62 ; ses valeurs ne sont pas annexées au dépôt. Le kit reste
+  l'instrument : `tools/p4-session.sh` (30 min) puis `tools/session-verdict.sh`.
 - **La désync des véhicules et des avatars n'est pas mesurée** (§62.1). Un verdict vert ne dit donc pas
   « aucune divergence nulle part » : il dit « aucune exception, aucune dérive de créature au-dessus de
   2 m, session tenue, sauvegarde, reconnexion et rechargement prouvés ».
@@ -5394,8 +5396,9 @@ session **précédente**, ce qui se lit comme une mesure alors que c'en est une 
 
 ### 81.3 Ce que ce lot ne prouve pas
 
-- **Aucune étape ne ferme puis rouvre une session** : la remise à zéro n'est vérifiée que par lecture du code ;
-  la prouver demanderait le run de reconnexion qui manque déjà à P4.
+- **Aucune étape ne ferme puis rouvre une session** au moment de ce lot : la remise à zéro n'était vérifiée
+  que par lecture du code. C'est **mesuré depuis le 2026-10-23** (§82, étapes AE et AD : `latence avant…
+  puis -1.0`, `nouvelle mesure=19.8 ms`, réadmission sous un id neuf).
 - Les compteurs `bloqués`/`reprises`/`refus` restent, eux, cumulatifs sur la vie du processus — c'est voulu
   (ils racontent ce que le garde a fait), mais ce n'est pas écrit dans la documentation de `Summary()`.
 
@@ -5464,3 +5467,45 @@ H (38 s), I (42 s), C (68 s), D (49 s) et E (97 s) vertes, avec la même sonde q
 puis `21.2 ms`). Ce que ce correctif ne fait pas : rejouer les 31 étapes sur la nouvelle configuration —
 onze l'ont été ; les autres partagent les mêmes DLL et ne changent pas de source, mais leur dernier verdict
 vert date du Debug.
+
+## 83. P4 passée : le gel du pipeline de contenu est levé (2026-10-23)
+
+Décision **explicite**, celle que le §43.5 prévoyait (« se rouvre après P4, sur décision explicite ») : la
+session réelle de 30 minutes est déclarée bonne par le mainteneur le 2026-10-23. Le **gel du pipeline
+AssetBundles est levé**, et avec lui celui des chantiers qui y étaient attachés (contenu custom, nouvelles
+sondes). M6-contenu redevient le prochain travail, et non plus un puits fermé.
+
+### 83.1 Ce que cette décision change
+
+| Avant (gel du 2026-10-19) | Maintenant |
+|---|---|
+| M6-contenu « gelé par décision » : aucun AssetBundle, aucun prefab inconnu du client | **ouvert** : l'item custom et sa livraison au client sont le prochain chantier |
+| « nouvelles sondes » gelées pour ne pas masquer l'absence de session | **levées** : une sonde par mécanisme nouveau reste la règle du projet (§43.4) |
+| énergie/modules de véhicule déjà livrés (§56, §64) ; host migration et matchmaking restent hors périmètre | inchangé : ils ne sont pas rouverts par cette décision |
+
+Ce qui **ne change pas** : un jalon n'est clos que quand son critère du §6 est prouvé. M6 reste **ouvert**
+tant que l'item custom n'est pas créé, livré et instancié chez un client qui ne l'a jamais vu.
+
+### 83.2 Ce que P4 prouve — et ce que la doc doit encore annexer
+
+P4 était le critère « `0 exception`, `0 désync > 2 m`, sauvegarde + rechargement + reconnexion, verdict
+unique » (§43.5), instrumenté par `tools/p4-session.sh` et `tools/session-verdict.sh` (§62). La session est
+déclarée bonne ; **les valeurs du run ne sont pas recopiées dans ce dépôt** (ni journal ni sortie de verdict),
+ce qui reste une dette de preuve : `docs/preuves.md` porte la ligne M6 avec le statut, pas les chiffres.
+L'annexe attendue, quand elle sera disponible : durée tenue, exceptions du mod, dérive maximale, verdict.
+
+### 83.3 Le prochain chantier, dans l'ordre
+
+1. **Contrat d'identité du contenu custom** — une entité custom n'a ni prefab connu du client, ni position
+   d'apparition dans la sauvegarde : il faut une clé dérivée du nom de l'asset (et non de la position), un
+   `definitionHash` (déjà le contrat de P1bis, §45) et un refus nommé quand le hash diverge.
+2. **Livraison du bundle** — le serveur annonce un bundle (nom, taille, empreinte), le client le télécharge
+   avant l'instanciation, et un bundle absent ou corrompu est refusé **nommément** sans créer d'entité.
+3. **Instanciation** — charger le prefab du bundle, l'enregistrer dans `TechType`/`PrefabDatabase` du client
+   pour qu'il soit ramassable et fabricable, puis le faire passer par le chemin d'entité existant
+   (`EntitySpawn`, v10) sans en inventer un second.
+4. **Mesure** — une sonde qui instancie un prefab **absent du jeu**, le retrouve par sa clé, le ramasse et le
+   débite ; plus la contre-épreuve : un bundle dont l'empreinte diverge est refusé.
+
+Le coût de (1)–(3) reste **inconnu** — c'est précisément ce que le gel évitait d'assumer, et c'est désormais
+assumé : le premier pas mesurable est (1), pas la livraison complète.

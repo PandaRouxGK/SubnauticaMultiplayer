@@ -32,7 +32,7 @@ dans la colonne de droite et n'invalident pas le critère.
 | **M3** créature synchro, IA serveur | position identique chez 2 clients, IA serveur | **clos** (2026-10-20) | E (76/76 clés, verdict True), `IA arrêtée=65`, **W** (3 clients) est vert depuis le 2026-10-20 (`écart max=1,02 / 1,04 / 1,28 m`) après correction de la mesure, qui relevait la dérive pendant le glissement (§60). Depuis la **v17** (2026-10-21), la **santé et la mort** d'une créature sont transportées et décidées par le serveur, mesurées par l'étape **Z** (`PLAN.md` §65) ; limites : source du dégât écrite par la sonde, clignotement à la coupure partiellement mesuré |
 | **M4** véhicule | position 10 Hz interpolée, énergie, upgrades, **santé**, conduite arbitrée, `spawn` client | **clos** (2026-10-21) | J vert (151 s) : `énergie 200.00 -> 100.00 (0.50 de la capacité)`, `module 'VehicleHullModule1' installé=True`, `santé 1.00 -> 0.40 (max 200.0, écriture effectuée=True)`, puis côté client `messages=1 … charges appliquées=1 — transport=True application=True` et `santé appliquée=1 dernière=0.40 locale=0.40 écart=0.00 … verdict=True` ; M vert pour la conduite ; **Y** vert (61 s) pour la fabrication demandée par un client. Limites : liste blanche `Seamoth`/`Exosuit`, aucun coût de fabrication, pas de preuve d'effet de jeu (profondeur, destruction) — `PLAN.md` §56 et §64 |
 | **M5** première action autoritaire | pickup refusé si déjà réclamé | **clos** (2026-10-20) | L (accordé/refusé, geste bloqué), O/Q (objet retiré, retrait rejoué), 9 tests `PickupClaimLedger` ; limites : objets mobiles, collisions de clé, retour arrière |
-| **M6** pipeline de contenu | création + retrait, clé serveur | **ouvert** | N/O/Q verts ; l'item custom (AssetBundle) est **gelé** par décision (§43.5). Depuis les v19–v21, l'**économie** est arbitrée au-dessus de la création : ramassage, débit, adoption, coût du craft, cadence (AB–AE, §67–§73) — ce n'est pas le pipeline de contenu, mais c'est ce qui manquait pour qu'un monde tienne |
+| **M6** pipeline de contenu | création + retrait, clé serveur | **ouvert (gel levé le 2026-10-23)** | N/O/Q verts ; l'item custom (AssetBundle) n'existe pas encore, mais le **gel est levé** par décision (§83) — prochain chantier. P4 est déclarée bonne par le mainteneur ; les valeurs du run ne sont pas annexées ici. Depuis les v19–v21, l'**économie** est arbitrée au-dessus de la création : ramassage, débit, adoption, coût du craft, cadence (AB–AE, §67–§73) — ce n'est pas le pipeline de contenu, mais c'est ce qui manquait pour qu'un monde tienne |
 
 ### M4 : énergie et modules, mesurés en jeu (2026-10-20)
 
@@ -178,8 +178,12 @@ dans la colonne de droite et n'invalident pas le critère.
 | Sauvegarde, reconnexion et rechargement sont prouvés par la même session | `[autotest] sauvegarde serveur pendant un run -> verdict=True` ; `PlayerLeft diffusé` + 3 admissions ; `MONDE CHARGÉ` dans `coop-client-2-b.log` | `HostSaveProbeBehaviour` ; `tools/run-session.sh --reconnect` | prouvé (run de 2 min) |
 | Le graveur sait échouer | `SELFTEST: SUCCES (8 cas, 0 échec)`, dont 6 cas rouges | `tools/session-verdict.sh --self-test` | prouvé (2026-10-21) |
 
-**Non prouvé par ce kit** : les 30 minutes elles-mêmes, l'installation par un second joueur, et la
-divergence des **véhicules** et de **position des avatars** (imprimées en `RÉSERVE`, cf. `PLAN.md` §62.1).
+**Les 30 minutes sont déclarées bonnes le 2026-10-23** par le mainteneur, avec ce kit : c'est la mesure qui
+lève le gel du pipeline de contenu (`PLAN.md` §83). Ses valeurs (durée tenue, exceptions, dérive maximale,
+verdict) **ne sont pas annexées au dépôt** — c'est la seule dette de ce chapitre.
+
+**Non prouvé par ce kit** : l'installation par un second joueur, et la divergence des **véhicules** et de
+**position des avatars** (imprimées en `RÉSERVE`, cf. `PLAN.md` §62.1).
 
 ## Connexion à un serveur distant (2026-10-21)
 

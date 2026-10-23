@@ -65,7 +65,10 @@ par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai 
   en une image — refusé par la garde P1 — avant d'être réclamé (corrigé : approche à 10 m/s et attente
   de l'avatar du pair).
 
-**Reste non mesuré en jeu :** la **session de 30 min** (P4), une coïncidence **spontanée** d'un retrait tombé dans la fenêtre de protection (la sonde la force, `PLAN.md` §78.3), la marche (pas de terre ferme près de la
+**P4 (session réelle de 30 min) est déclarée bonne le 2026-10-23**, ce qui **lève le gel du pipeline
+de contenu** (`PLAN.md` §83) ; les valeurs du run ne sont pas annexées au dépôt.
+
+**Reste non mesuré en jeu :** une coïncidence **spontanée** d'un retrait tombé dans la fenêtre de protection (la sonde la force, `PLAN.md` §78.3), la marche (pas de terre ferme près de la
 capsule de test), plus de 8 joueurs, et des sauvegardes ou zones différentes ; la désynchronisation des
 véhicules et des avatars n'est pas mesurée non plus (`PLAN.md` §62.4).
 
