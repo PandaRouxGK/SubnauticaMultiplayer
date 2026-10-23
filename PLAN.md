@@ -5448,3 +5448,17 @@ relancent un neuf.
   aucun contrôle ne dit que les avatars, créatures et véhicules distants sont revenus après la reconnexion.
 - Le délai de relance est de **5 s** (`ReconnectDelaySeconds`) : la borne de 30 s de la sonde le couvre,
   mais aucune mesure ne dit si un joueur le trouve acceptable.
+
+### 82.5 Un piège de méthode trouvé en route : deux configurations de binaires
+
+En rejouant AE avec `--no-build` après une compilation **Release**, la sonde imprimait encore l'ancien
+format : `tools/run-session.sh` déploie les DLL **Debug** (`src/Coop.Client/bin/Debug`, ligne 335) quand
+`tools/deploy.sh` installe les **Release**. Le run testait donc un binaire différent de celui qu'on venait
+de compiler, et le symptôme (une ligne de journal qui ne change pas) ressemble à un correctif inopérant.
+
+Corrigé le 2026-10-23 : `tools/run-session.sh` construit et déploie désormais **Release**, la même
+configuration que `deploy.sh`. Le harnais teste donc le binaire installé, et un `verify.sh --no-build`
+suit la dernière compilation Release. Mesuré après le changement : AE (59 s) et AD (58 s) vertes, avec la
+même sonde qu'avant (`nouvelle mesure=27.1 ms` puis `28.0 ms`). Ce que ce correctif ne fait pas : rejouer
+les 31 étapes sur la nouvelle configuration — seules AD et AE l'ont été ; les autres étapes partagent les
+mêmes DLL et ne changent pas de source, mais leur dernier verdict vert date du Debug.

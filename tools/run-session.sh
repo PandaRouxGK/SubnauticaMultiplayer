@@ -326,15 +326,18 @@ prepare() {
     # fichier non effacé ferait passer un marqueur périmé pour un succès (déjà vu, cf. plus haut).
     rm -f "$SERVER_LOG" "$LOG_DIR"/coop-client*.log
 
+    # **Release**, comme `tools/deploy.sh` : le harnais doit tester le binaire qu'on installe. En Debug,
+    # un `verify.sh --no-build` après une compilation Release rejouait l'ancien binaire sans le dire
+    # (constaté le 2026-10-23 : une ligne de sonde gardait son ancien format, `PLAN.md` §82.5).
     if [ "$BUILD" = "1" ]; then
-        dotnet build src/Coop.Client/Coop.Client.csproj -v q --nologo || return 1
-        dotnet build src/Coop.Server/Coop.Server.csproj -v q --nologo || return 1
-        dotnet build src/Coop.Model/Coop.Model.csproj -v q --nologo || return 1
+        dotnet build src/Coop.Client/Coop.Client.csproj -c Release -v q --nologo || return 1
+        dotnet build src/Coop.Server/Coop.Server.csproj -c Release -v q --nologo || return 1
+        dotnet build src/Coop.Model/Coop.Model.csproj -c Release -v q --nologo || return 1
     fi
 
-    cp -f src/Coop.Client/bin/Debug/Coop.Client.dll "$PLUGINS/" || return 1
-    cp -f src/Coop.Server/bin/Debug/Coop.Server.dll "$PLUGINS/" || return 1
-    cp -f src/Coop.Model/bin/Debug/Coop.Model.dll "$PLUGINS/" || return 1
+    cp -f src/Coop.Client/bin/Release/Coop.Client.dll "$PLUGINS/" || return 1
+    cp -f src/Coop.Server/bin/Release/Coop.Server.dll "$PLUGINS/" || return 1
+    cp -f src/Coop.Model/bin/Release/Coop.Model.dll "$PLUGINS/" || return 1
 }
 
 # Attend un marqueur **après l'en-tête du run courant**. Le fichier est réécrit au démarrage de
