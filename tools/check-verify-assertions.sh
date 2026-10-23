@@ -153,7 +153,7 @@ LOG
 [Coop Client] [inventaire] adoption envoyée : 3 objet(s) [Copper ×1, FireExtinguisher ×1, Titanium ×1] — le serveur les remplace ensuite par ses décisions.
 [Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Créatif', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=1, attente de l'accord=26.6 ms (min=19.4, max=26.6), refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True
 [Coop Craft] [sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True
-[Coop Craft] [sonde] reconnexion : adresse='127.0.0.1:7777', demande retenue=1, encore en attente=0, latence avant=26.6 ms puis -1.0, accepté pendant la coupure=False, réadmis=True, id 1 -> 2 — verdict=True
+[Coop Craft] [sonde] reconnexion : adresse='127.0.0.1:7777', demande retenue=1, encore en attente=0, latence avant=26.6 ms puis -1.0, accepté pendant la coupure=False, réadmis=True, id 1 -> 2, état rejoué=True — verdict=True
 LOG
     cat > "$WORK_DIR/AD/coop-server.log" <<'LOG'
 [Coop Server] [net] inventaire de 'killi'#1 : révision 2, 3 objet(s) (3 unité(s)) — adoption
@@ -174,7 +174,7 @@ LOG
 [Coop Client] [inventaire] réconciliation : 1 unité(s) retirée(s) de Inventory.main, échecs=0 (total retiré=2).
 [Coop Craft] [sonde] report : matériau='Copper' local=1, reportés=1, retiré à la reprise=1 (1 -> 0), attentes restantes=0, instantané restauré=True (5 entrée(s)) — verdict=True
 [Coop Client] [craft] 1 demande(s) en attente oubliée(s) à la fermeture de session.
-[Coop Craft] [sonde] reconnexion : adresse='127.0.0.1:7777', demande retenue=1, encore en attente=0, latence avant=27.4 ms puis -1.0, accepté pendant la coupure=False, réadmis=True, id 1 -> 2 — verdict=True
+[Coop Craft] [sonde] reconnexion : adresse='127.0.0.1:7777', demande retenue=1, encore en attente=0, latence avant=27.4 ms puis -1.0, accepté pendant la coupure=False, réadmis=True, id 1 -> 2, état rejoué=True — verdict=True
 [Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Survie', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=0, attente de l'accord=27.4 ms (min=26.0, max=27.4), refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True
 [Coop Craft] [sonde] cadence : demandes=12 refus de cadence=4 (rafale 8, 1 par 500 ms) — verdict=True
 LOG

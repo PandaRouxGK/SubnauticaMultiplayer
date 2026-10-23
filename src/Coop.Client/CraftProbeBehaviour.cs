@@ -381,6 +381,7 @@ namespace Coop.Client
             var port = (ushort)client.EndpointPort;
             var idBefore = client.AssignedPlayerIdForProbe;
             var latencyBefore = CraftGuard.LastLatencyMs;
+            var inventoryBefore = client.InventoryMessages;
             var pendingBefore = CraftGuard.PendForProbe((ushort)techType);
 
             // Le chemin réel : déconnexion, purge, relance de la connexion (bouton « Rejoindre »).
@@ -405,6 +406,16 @@ namespace Coop.Client
 
                 yield return new WaitForSecondsRealtime(0.25f);
             }
+
+            // Réadmettre n'est pas rejouer : le serveur doit aussi **renvoyer son état**. Un instantané
+            // d'inventaire après l'admission en est la preuve lisible (il porte la révision du serveur).
+            var replayDeadline = Time.realtimeSinceStartup + 10f;
+            while (client.InventoryMessages <= inventoryBefore && Time.realtimeSinceStartup < replayDeadline)
+            {
+                yield return new WaitForSecondsRealtime(0.25f);
+            }
+
+            var replayedState = client.InventoryMessages > inventoryBefore;
 
             var idAfter = client.AssignedPlayerIdForProbe;
             var purged = pendingBefore == 1 && pendingAfter == 0;
@@ -436,7 +447,7 @@ namespace Coop.Client
                     CultureInfo.InvariantCulture,
                     "[sonde] reconnexion : adresse='{0}:{1}', demande retenue={2}, encore en attente={3}, " +
                     "latence avant={4:F1} ms puis {5:F1}, nouvelle mesure={11:F1} ms, " +
-                    "accepté pendant la coupure={6}, réadmis={7}, id {8} -> {9} — verdict={10}",
+                    "accepté pendant la coupure={6}, réadmis={7}, id {8} -> {9}, état rejoué={12} — verdict={10}",
                     host,
                     port,
                     pendingBefore,
@@ -447,15 +458,17 @@ namespace Coop.Client
                     reconnected,
                     idBefore,
                     idAfter,
-                    purged && latencyCleared && newIdentity && measuredAgain,
-                    freshLatency));
+                    purged && latencyCleared && newIdentity && replayedState && measuredAgain,
+                    freshLatency,
+                    replayedState));
 
-            if (!purged || !latencyCleared || !newIdentity || !measuredAgain)
+            if (!purged || !latencyCleared || !newIdentity || !replayedState || !measuredAgain)
             {
                 Log.LogError(
                     $"[sonde] reconnexion : verdict=False — demande retenue={pendingBefore} (attendu 1), " +
                     $"encore en attente={pendingAfter} (attendu 0), latence avant={latencyBefore:F1} puis " +
                     $"{latencyAfter:F1} (attendu ≥ 0 puis < 0), réadmis={reconnected}, id {idBefore} -> {idAfter}, " +
+                    $"instantané d'admission={replayedState} ({inventoryBefore} -> {client.InventoryMessages}), " +
                     $"nouvelle demande refusée={freshAnswered}, nouvelle mesure={freshLatency:F1} ms.");
             }
         }

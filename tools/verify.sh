@@ -697,8 +697,8 @@ assert_ad() {
         "aucun retrait reporté en Créatif : rien n'est protégé, donc rien n'est différé"
     expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence : [1-9][0-9]* ms" \
         "le serveur nomme et date le refus de cadence"
-    expect AD "$client" "\\[sonde\\] reconnexion : .*encore en attente=0.*verdict=True" \
-        "le changement d'adresse purge aussi en Créatif, et le client est réadmis"
+    expect AD "$client" "\\[sonde\\] reconnexion : .*encore en attente=0.*état rejoué=True.*verdict=True" \
+        "le changement d'adresse purge aussi en Créatif, et le client est réadmis avec l'état rejoué"
 }
 
 assert_ae() {
@@ -738,8 +738,8 @@ assert_ae() {
         "la sonde mesure le report et sa reprise : rien n'est retiré avant, l'unité part après"
     expect AE "$client" "1 demande\\(s\\) en attente oubliée\\(s\\) à la fermeture de session" \
         "la purge de fin de session oublie la demande retenue au lieu de la laisser survivre"
-    expect AE "$client" "\\[sonde\\] reconnexion : .*encore en attente=0.*id [0-9]+ -> [0-9]+ — verdict=True" \
-        "le changement d'adresse purge la demande et la latence, puis le client est réadmis"
+    expect AE "$client" "\\[sonde\\] reconnexion : .*encore en attente=0.*id [0-9]+ -> [0-9]+.*état rejoué=True.*verdict=True" \
+        "le changement d'adresse purge la demande et la latence, puis le client est réadmis et l'état rejoué"
     expect AE "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence :" \
         "le refus de cadence est nommé côté serveur, en Survie"
     expect_missing AE "$client" "mode sans ingrédients" \
