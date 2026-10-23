@@ -7,7 +7,57 @@ LiteNetLib, protocole binaire maison **v21**, tick serveur à **20 Hz**.
 L'architecture et l'historique des mesures vivent dans `PLAN.md`. La politique d'autorité système
 par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai aujourd'hui.
 
-## État au 2026-10-22
+## Avancement en un coup d'œil (2026-10-23)
+
+**Comment lire les pourcentages :** critères **nommés et prouvés** / critères nommés — pas une mesure de
+lignes de code. Un jalon clos l'est sur son **critère révisé** (les limites écrites à côté ne comptent pas
+comme manquantes) ; un critère *déclaré* n'est pas un critère *chiffré dans le dépôt*.
+
+### Jalons (`PLAN.md` §6)
+
+| Jalon | Critère | État | % |
+|---|---|---|---|
+| **M0** serveur headless | plugin chargé, tick 20 Hz, monde sans rendu | clos 2026-10-14 | **100 %** (3/3) |
+| **M1** squelette réseau | handshake + ping/pong entre 2 process | clos 2026-10-14 | **100 %** (2/2) |
+| **M2** présence joueurs | 2 clients se voient bouger, distant interpolé | clos 2026-10-20, « self prédictif » remplacé par l'autorité P1 (§54.1) | **100 %** (3/3, critère révisé) |
+| **M3** créature synchro | position identique chez 2 clients, IA serveur | clos 2026-10-20 | **100 %** (2/2) |
+| **M4** véhicule | position 10 Hz interpolée, conduite, énergie, modules, santé, `spawn` client | clos 2026-10-21 | **100 %** (6/6) |
+| **M5** première action autoritaire | pickup refusé si déjà réclamé | clos 2026-10-20 | **100 %** (3/3) |
+| **M6** pipeline de contenu | création, retrait, ramassage, **item custom et AssetBundle livré** | ouvert, gel levé le 2026-10-23 (§83) | **50 %** (4/8) |
+
+**Total jalons : 6,5 / 7 ≈ 93 %.**
+
+### Séquence replanifiée (`PLAN.md` §43.5)
+
+| Étape | Critère observable | État | % |
+|---|---|---|---|
+| **P0** contrat de sauvegarde | refus nommé sur deux sauvegardes, `dotnet test` vert | fait (étapes P, R, S, T) | **100 %** (4/4) |
+| **P1** autorité joueur honnête | téléport refusé, nage normale sans correction, taux publié | fait (étape P) | **100 %** (3/3) |
+| **P1bis** contrat de contenu | entité instanciée par un client qui ne l'a jamais vue, hash divergent refusé | fait (étape N) | **100 %** (2/2) |
+| **P2** reconnexion | client tué/relancé, claims rejoués, aucun fantôme | fait (§45, §52, §57) | **100 %** (3/3) |
+| **P3** substrat de vérification | régression détectée hors jeu en secondes | fait (§59, ~1 s) | **100 %** (2/2) |
+| **P4** session réelle 30 min | 0 exception, 0 désync > 2 m, sauvegarde + reconnexion, verdict unique | **déclarée bonne le 2026-10-23**, valeurs non annexées | **100 % déclaré** (4/4) |
+| **P5** découpage `ServerNetwork` | cinq domaines, `verify.sh` identique | fait (§58) | **100 %** (3/3) |
+| **Gel** | 5 chantiers gelés au 2026-10-19 | AssetBundles **rouvert**, énergie/modules **livrés**, nouvelles sondes **rouvertes** ; host migration et matchmaking non commencés | **60 %** (3/5) |
+
+**Total séquence P0–P5 : 7 / 7 = 100 %** (P4 avec la réserve sur les chiffres).
+
+### Contenu de M6 (`PLAN.md` §41–§42 et §83.3)
+
+| Brique | Preuve | % |
+|---|---|---|
+| Création d'entité par l'hôte, clé du serveur, client tardif | N | **100 %** |
+| Retrait annoncé et rejoué | O, Q | **100 %** |
+| Contrat de définition (`definitionHash`, refus nommé) | N / P1bis | **100 %** |
+| Ramassage répercuté sur une entité créée | O, Q | **100 %** |
+| Item **custom** défini par le serveur (prefab absent du jeu) | — | **0 %** |
+| AssetBundle annoncé, avec empreinte, et livré au client | — | **0 %** |
+| Instanciation d'un prefab inconnu, retrouvée par sa clé | — | **0 %** |
+| Sonde d'un prefab absent du jeu + refus d'un bundle divergent | — | **0 %** |
+
+**Contenu : 4 / 8 = 50 %** — c'est ce qui garde M6 ouvert.
+
+## État au 2026-10-23
 
 **Mesuré en jeu, avec instrument :**
 
