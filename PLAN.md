@@ -5459,7 +5459,8 @@ de compiler, et le symptôme (une ligne de journal qui ne change pas) ressemble 
 
 Corrigé le 2026-10-23 : `tools/run-session.sh` construit et déploie désormais **Release**, la même
 configuration que `deploy.sh`. Le harnais teste donc le binaire installé, et un `verify.sh --no-build`
-suit la dernière compilation Release. Mesuré après le changement : AE et AD (58 s chacune), AB et AC (151 s chacune), U (126 s) et AA (45 s) vertes,
-avec la même sonde qu'avant (`nouvelle mesure=19.8 ms` puis `21.2 ms`). Ce que ce correctif ne fait pas :
-rejouer les 31 étapes sur la nouvelle configuration — six l'ont été ; les autres partagent les mêmes DLL
-et ne changent pas de source, mais leur dernier verdict vert date du Debug.
+suit la dernière compilation Release. Mesuré après le changement : AE et AD (58 s chacune), AB et AC (151 s chacune), U (126 s), AA (45 s),
+H (38 s), I (42 s), C (68 s) et D (49 s) vertes, avec la même sonde qu'avant (`nouvelle mesure=19.8 ms`
+puis `21.2 ms`). Ce que ce correctif ne fait pas : rejouer les 31 étapes sur la nouvelle configuration —
+dix l'ont été ; les autres partagent les mêmes DLL et ne changent pas de source, mais leur dernier verdict
+vert date du Debug.
