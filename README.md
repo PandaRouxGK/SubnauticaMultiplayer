@@ -5,7 +5,9 @@ autoritaire** (BepInEx 5 + HarmonyX), les autres instances sont des clients. Tra
 LiteNetLib, protocole binaire maison **v21**, tick serveur à **20 Hz**.
 
 L'architecture et l'historique des mesures vivent dans `PLAN.md`. La politique d'autorité système
-par système vit dans `docs/authority.md`. Ce README ne dit que ce qui est vrai aujourd'hui.
+par système vit dans `docs/authority.md`, et le tableau du **contenu de base** — ce qui est synchronisé
+et ce qui ne l'est pas, catégorie par catégorie — dans `docs/content-sync.md`. Ce README ne dit que ce
+qui est vrai aujourd'hui.
 
 ## Avancement en un coup d'œil (2026-10-23)
 
@@ -232,7 +234,7 @@ src/Coop.Client/   plugin client : réseau, avatars, créatures, véhicules, gar
 src/Coop.Server/   plugin serveur : admission, diffusion, décisions, canal du launcher
 tests/             tests hors jeu de Coop.Model
 tools/             ApiDump, NetProbe, deploy.sh, run-session.sh, verify.sh
-docs/              protocole, politique d'autorité, table des preuves, comptes rendus de conseil
+docs/              protocole, politique d'autorité, table des preuves, contenu synchronisé, conseil
 ```
 
 ## Limites connues
@@ -266,3 +268,5 @@ docs/              protocole, politique d'autorité, table des preuves, comptes 
   violation visible.
 - `docs/protocol.md` — message par message, avec la source de chaque constante.
 - `docs/preuves.md` — quelle affirmation repose sur quel instrument, et son statut.
+- `docs/content-sync.md` — le contenu de base du jeu (joueur, monde, véhicules, histoire, bases, session)
+  avec, ligne par ligne, ce qui est synchronisé, partiel ou local.
