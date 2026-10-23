@@ -1020,7 +1020,10 @@ namespace Coop.Client
                     CoopClientPlugin.Log.LogDebug($"[net] déconnexion avant changement d'adresse : {exception.Message}");
                 }
 
-                _server = null;
+                // On **garde** la référence : la reconnexion part de l'événement de déconnexion, qui
+                // attend que LiteNetLib ait relâché le pair. Relancer `_net.Connect` dans la même image,
+                // pendant que l'ancien pair est encore « connecté », rendait `null` — mesuré le
+                // 2026-10-23 : le handshake partait ensuite sur un `_server` nul (NullReferenceException).
             }
 
             // Une nouvelle session ne doit pas hériter des demandes de craft de la précédente.
@@ -1031,8 +1034,10 @@ namespace Coop.Client
             _saveWaitStarted = -1.0;
             _loggedSaveWait = false;
             _loggedSaveTimeout = false;
+
+            // Sans session à fermer, `Update` se connecte tout de suite ; avec une session, c'est
+            // `OnPeerDisconnected` qui planifie la relance (5 s) une fois le pair libéré.
             _nextReconnectTime = 0;
-            Connect();
         }
 
         /// <summary>
@@ -1589,7 +1594,12 @@ namespace Coop.Client
         private void OnPeerConnected(NetPeer peer)
         {
             CoopClientPlugin.Log.LogInfo($"[net] connecté au serveur {peer} — envoi du handshake");
-            SendHandshake();
+
+            // Le handshake appartient à **cette** connexion : il part sur le pair reçu, et `_server`
+            // suit. Après un changement d'adresse, `_net.Connect` peut rendre `null` alors qu'un pair
+            // aboutit ; lire `_server` ici levait une NullReferenceException (mesuré le 2026-10-23).
+            _server = peer;
+            SendHandshake(peer);
         }
 
         private void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
@@ -1607,8 +1617,15 @@ namespace Coop.Client
             _nextReconnectTime = _clock.Elapsed.TotalSeconds + ReconnectDelaySeconds;
         }
 
-        private void SendHandshake()
+        private void SendHandshake(NetPeer peer)
         {
+            if (peer == null)
+            {
+                CoopClientPlugin.Log.LogWarning("[net] handshake non envoyé : aucun pair.");
+                return;
+            }
+
+
             // L'empreinte part avec le handshake : c'est elle qui transforme « les deux instances
             // chargent la même sauvegarde » d'hypothèse en contrat vérifié (P0). Si elle n'est pas
             // encore résolue, elle part vide — et le serveur la refuse nommément plutôt que de
@@ -1626,7 +1643,7 @@ namespace Coop.Client
                 Save = save,
             }.Write(_writer);
 
-            _server.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
+            peer.Send(_writer.BackingBuffer, 0, _writer.Length, DeliveryMethod.ReliableOrdered);
             CoopClientPlugin.Log.LogInfo(
                 $"[net] handshake envoyé (protocole v{Protocol.Version}, jeu={_gameVersion}, save={save.Describe()})");
         }

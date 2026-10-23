@@ -112,6 +112,9 @@
 #      ensuite) -> le jeu **consomme lui-même** les ingrédients à la reprise approuvée : la sonde le lit
 #      (`mode='Survie'`, `coût retiré par la réconciliation=0`) et l'étape refuse toute ligne d'exemption
 #      Créatif. C'est la seule mesure où « matériaux consommés » ne peut pas venir de la réconciliation.
+#      La dernière phase exerce le **changement d'adresse** (`SetEndpoint`, bouton « Rejoindre ») : la
+#      demande retenue est purgée, les latences repassent à « aucune mesure », et le client est réadmis
+#      sous un id neuf (PLAN.md §82).
 #
 # Usage :
 #   tools/verify.sh                    # les trente et une étapes
@@ -694,6 +697,8 @@ assert_ad() {
         "aucun retrait reporté en Créatif : rien n'est protégé, donc rien n'est différé"
     expect AD "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence : [1-9][0-9]* ms" \
         "le serveur nomme et date le refus de cadence"
+    expect AD "$client" "\\[sonde\\] reconnexion : .*encore en attente=0.*verdict=True" \
+        "le changement d'adresse purge aussi en Créatif, et le client est réadmis"
 }
 
 assert_ae() {
@@ -733,8 +738,8 @@ assert_ae() {
         "la sonde mesure le report et sa reprise : rien n'est retiré avant, l'unité part après"
     expect AE "$client" "1 demande\\(s\\) en attente oubliée\\(s\\) à la fermeture de session" \
         "la purge de fin de session oublie la demande retenue au lieu de la laisser survivre"
-    expect AE "$client" "\\[sonde\\] purge : demandes en attente avant=1, après=0 — verdict=True" \
-        "la table des demandes est vide après la purge"
+    expect AE "$client" "\\[sonde\\] reconnexion : .*encore en attente=0.*id [0-9]+ -> [0-9]+ — verdict=True" \
+        "le changement d'adresse purge la demande et la latence, puis le client est réadmis"
     expect AE "$server" "\\[net\\] craft : .* REFUSÉ \\(RateLimited : cadence :" \
         "le refus de cadence est nommé côté serveur, en Survie"
     expect_missing AE "$client" "mode sans ingrédients" \
@@ -1658,7 +1663,7 @@ if wanted AD "$ONLY"; then
     args=(--clients=1 --timeout=480
         "--host-args=-coopmode=server"
         "--client-args=-coopmode=client -coopdebug=craft"
-        "--client-marker=\\[sonde\\] craft : recette=")
+        "--client-marker=\\[sonde\\] reconnexion :")
     if [ "$NO_BUILD" = 1 ]; then
         args+=(--no-build)
     fi
@@ -1708,7 +1713,7 @@ if wanted AE "$ONLY"; then
             args=(--clients=1 --timeout=480
                 "--host-args=-coopmode=server -coopsave=slot0002"
                 "--client-args=-coopmode=client -coopsave=slot0002 -coopdebug=craft"
-                "--client-marker=\\[sonde\\] craft : recette=")
+                "--client-marker=\\[sonde\\] reconnexion :")
             if [ "$NO_BUILD" = 1 ]; then
                 args+=(--no-build)
             fi

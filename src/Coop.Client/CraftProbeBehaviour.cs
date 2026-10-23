@@ -353,36 +353,88 @@ namespace Coop.Client
             if (requiresIngredients)
             {
                 DeferAndRetry();
-                ClearAtSessionEnd(tech);
             }
+
+            // 7. **Purge et reconnexion** (v21) : la purge n'était prouvée que par un `Clear()` appelé par la
+            //    sonde. Le chemin réel — changement d'adresse à chaud, celui du bouton « Rejoindre » — est
+            //    exercé ici : il déconnecte, purge (demande retenue et statistiques de latence de la session),
+            //    puis reconnecte. Le serveur doit réadmettre le client sous un id neuf.
+            yield return ReconnectAndCheckPurge(tech);
         }
 
         /// <summary>
-        /// Fermeture de session : une demande en attente ne doit pas survivre (une réponse tardive rejouerait
-        /// un craft dans la session suivante). La sonde retient une demande **fictive**, appelle `Clear` — le
-        /// même chemin que la déconnexion, le message `Disconnect` et le changement d'adresse — et vérifie
-        /// que la table est vide ensuite.
+        /// Exerce le **déclencheur réel** de la purge : `SetEndpoint`, le chemin du bouton « Rejoindre ».
+        /// Il déconnecte, appelle `Clear` (demande en attente et statistiques de latence de la session),
+        /// puis reconnecte. Ce que la sonde mesure : la table est vide, la latence n'est plus une mesure, et
+        /// la reconnexion aboutit — sinon la purge ne serait prouvée que par un appel direct de la sonde.
         /// </summary>
-        private static void ClearAtSessionEnd(TechType techType)
+        private static IEnumerator ReconnectAndCheckPurge(TechType techType)
         {
-            var before = CraftGuard.PendForProbe((ushort)techType);
-            CraftGuard.Clear();
-            var after = CraftGuard.PendingCountForProbe;
-            var verdict = before == 1 && after == 0;
+            var client = ClientNetworkBehaviour.Current;
+            if (client == null)
+            {
+                Log.LogError("[sonde] reconnexion : verdict=False — aucun ClientNetworkBehaviour.");
+                yield break;
+            }
+
+            var host = client.EndpointHost;
+            var port = (ushort)client.EndpointPort;
+            var idBefore = client.AssignedPlayerIdForProbe;
+            var latencyBefore = CraftGuard.LastLatencyMs;
+            var pendingBefore = CraftGuard.PendForProbe((ushort)techType);
+
+            // Le chemin réel : déconnexion, purge, relance de la connexion (bouton « Rejoindre »).
+            client.SetEndpoint(host, port);
+
+            yield return null;
+
+            var acceptedRightAfter = client.Accepted;
+            var pendingAfter = CraftGuard.PendingCountForProbe;
+            var latencyAfter = CraftGuard.LastLatencyMs;
+            var minAfter = CraftGuard.MinLatencyMs;
+
+            var reconnected = false;
+            var deadline = Time.realtimeSinceStartup + 30f;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                if (client.Accepted)
+                {
+                    reconnected = true;
+                    break;
+                }
+
+                yield return new WaitForSecondsRealtime(0.25f);
+            }
+
+            var idAfter = client.AssignedPlayerIdForProbe;
+            var purged = pendingBefore == 1 && pendingAfter == 0;
+            var latencyCleared = latencyBefore >= 0f && latencyAfter < 0f && minAfter < 0f;
+            var newIdentity = reconnected && idAfter != 0 && idAfter != idBefore;
 
             Log.LogInfo(
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    "[sonde] purge : demandes en attente avant={0}, après={1} — verdict={2}",
-                    before,
-                    after,
-                    verdict));
+                    "[sonde] reconnexion : adresse='{0}:{1}', demande retenue={2}, encore en attente={3}, " +
+                    "latence avant={4:F1} ms puis {5:F1}, accepté pendant la coupure={6}, réadmis={7}, " +
+                    "id {8} -> {9} — verdict={10}",
+                    host,
+                    port,
+                    pendingBefore,
+                    pendingAfter,
+                    latencyBefore,
+                    latencyAfter,
+                    acceptedRightAfter,
+                    reconnected,
+                    idBefore,
+                    idAfter,
+                    purged && latencyCleared && newIdentity));
 
-            if (!verdict)
+            if (!purged || !latencyCleared || !newIdentity)
             {
                 Log.LogError(
-                    $"[sonde] purge : verdict=False — {before} demande(s) retenue(s) avant la purge " +
-                    $"(attendu 1), {after} après (attendu 0).");
+                    $"[sonde] reconnexion : verdict=False — demande retenue={pendingBefore} (attendu 1), " +
+                    $"encore en attente={pendingAfter} (attendu 0), latence avant={latencyBefore:F1} puis " +
+                    $"{latencyAfter:F1} (attendu ≥ 0 puis < 0), réadmis={reconnected}, id {idBefore} -> {idAfter}.");
             }
         }
 
