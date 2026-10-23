@@ -172,7 +172,7 @@ LOG
 [Coop Client] [craft] sonde : protection levée de Copper — reprise des reports.
 [Coop Client] [inventaire] réconciliation : reprise de 1 retrait(s) reporté(s) [Copper] — un craft vient de rendre la main.
 [Coop Client] [inventaire] réconciliation : 1 unité(s) retirée(s) de Inventory.main, échecs=0 (total retiré=2).
-[Coop Craft] [sonde] report : matériau='Copper' local=1, reportés=1, retiré à la reprise=1 (1 -> 0), attentes restantes=0 — verdict=True
+[Coop Craft] [sonde] report : matériau='Copper' local=1, reportés=1, retiré à la reprise=1 (1 -> 0), attentes restantes=0, instantané restauré=True (5 entrée(s)) — verdict=True
 [Coop Client] [craft] 1 demande(s) en attente oubliée(s) à la fermeture de session.
 [Coop Craft] [sonde] reconnexion : adresse='127.0.0.1:7777', demande retenue=1, encore en attente=0, latence avant=27.4 ms puis -1.0, accepté pendant la coupure=False, réadmis=True, id 1 -> 2 — verdict=True
 [Coop Craft] [sonde] craft : recette='Accumulator' coût=[Titanium ×1] produit='Accumulator' mode='Survie', bloqué=True/True, matériaux intacts avant accord=True, accordé=True, rejoué=True, produit apparu=True (0 -> 1), matériaux consommés=True, coût retiré par la réconciliation=0, attente de l'accord=27.4 ms (min=26.0, max=27.4), refus nommé=True (MissingMaterial), rien consommé après refus=True, échecs de réconciliation=0 — verdict=True

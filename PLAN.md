@@ -5364,8 +5364,10 @@ après son contrôle.
 
 ### 80.3 Ce que ce lot ne prouve pas
 
-- **La restauration n'est vérifiée qu'indirectement** : aucun run ne montre ensuite une réconciliation qui
-  aurait retiré un objet si l'état était resté amputé — il faudrait un second report dans la même session.
+- **La restauration a été vérifiée directement le 2026-10-23** (§82) : la sonde relit `InventorySnapshotPrevious`
+  après l'avoir rendu et compare l'instantané entrée par entrée (`instantané restauré=True`, compris dans le
+  verdict de l'étape AE). Ce qui reste non mesuré : qu'une réconciliation **ultérieure** n'aurait rien retiré
+  de plus — il faudrait un second report dans la même session.
 - Les deux nouveaux cas testent le **modèle**, pas le client : la conversion millisecondes (`NowMs`) et la
   lecture des ingrédients restent hors jeu.
 
@@ -5408,7 +5410,8 @@ exercé dans l'étape **AE** (et **AD**), et il a trouvé un défaut qu'aucun ru
 
 | Brique | Fichier | Comportement |
 |---|---|---|
-| sonde, chemin réel | `Coop.Client/CraftProbeBehaviour.cs` (`ReconnectAndCheckPurge`) | retient une demande **fictive** (id 9 001), lit la latence de la session, appelle `ClientNetworkBehaviour.SetEndpoint(host, port)` — le chemin exact du bouton « Rejoindre » — puis vérifie : table vide, `LastLatencyMs`/`MinLatencyMs` à `-1`, client **réadmis** sous un id différent |
+| sonde, chemin réel | `Coop.Client/CraftProbeBehaviour.cs` (`ReconnectAndCheckPurge`) | retient une demande **fictive** (id 9 001), lit la latence de la session, appelle `ClientNetworkBehaviour.SetEndpoint(host, port)` — le chemin exact du bouton « Rejoindre » — puis vérifie : table vide, `LastLatencyMs`/`MinLatencyMs` à `-1`, client **réadmis** sous un id différent, et une demande **gardée** postée après la reconnexion réécrit une mesure |
+| sonde, restauration lue | `Coop.Client/CraftProbeBehaviour.cs` (`DeferAndRetry`) | l'instantané rendu par la sonde est relu entrée par entrée (`instantané restauré=True`) : le §80.3 n'est plus vérifié indirectement |
 | correction trouvée par la mesure | `Coop.Client/Plugin.cs` | `OnPeerConnected` transmet le pair à `SendHandshake(NetPeer peer)` et fixe `_server` ; `SetEndpoint` ne met plus `_server` à `null` et ne relance plus `Connect()` dans la même image, c'est `OnPeerDisconnected` qui planifie la relance (5 s) |
 | harnais | `tools/verify.sh` (**AE**, **AD**) | marqueur client déplacé sur `[sonde] reconnexion :` (la dernière ligne de la sonde) ; `expect` sur `encore en attente=0 … id … -> … — verdict=True` dans les deux modes |
 | fixtures | `tools/check-verify-assertions.sh` | lignes de reconnexion dans AD et AE ; quatorzième ligne retirée pour la discrimination → **21 échecs nommés** |
@@ -5430,17 +5433,17 @@ relancent un neuf.
 |---|---|
 | `dotnet build` | rc=0, **0 avertissement** |
 | `check-verify-assertions.sh` | rc=0 — 31 étapes, fixtures AD/AE à jour, **21** échecs nommés pour 14 lignes retirées |
-| étape **AE** (Survie, 68 s) | **OK** — `[sonde] reconnexion : adresse='127.0.0.1:7777', demande retenue=1, encore en attente=0, latence avant=35.0 ms puis -1.0, accepté pendant la coupure=False, réadmis=True, id 1 -> 2 — verdict=True` ; le reste de AE (craft, cadence, report/reprise) reste vert ; `1 demande(s) en attente oubliée(s) à la fermeture de session` vient du `Clear` du changement d'adresse |
-| étape **AD** (Créatif, 68 s) | **OK** — même ligne à `latence avant=28.4 ms puis -1.0`, `id 1 -> 2`, `verdict=True` ; aucune ligne de protection/report (phase toujours désactivée en Créatif) |
+| étape **AE** (Survie, 57 s) | **OK** — `[sonde] reconnexion : adresse='127.0.0.1:7777', demande retenue=1, encore en attente=0, latence avant=26.8 ms puis -1.0, nouvelle mesure=27.2 ms, accepté pendant la coupure=False, réadmis=True, id 1 -> 2 — verdict=True` ; le reste de AE (craft, cadence, report/reprise) reste vert ; `1 demande(s) en attente oubliée(s) à la fermeture de session` vient du `Clear` du changement d'adresse |
+| étape **AD** (Créatif, 58 s) | **OK** — même ligne à `latence avant=28.0 ms puis -1.0`, `nouvelle mesure=27.2 ms`, `id 1 -> 2`, `verdict=True` ; aucune ligne de protection/report (phase toujours désactivée en Créatif) |
 | première tentative | **AE rouge** : le harnais arrêtait les instances sur `[sonde] craft : recette=`, avant la fin de la reconnexion (5 s de délai) ; marqueur déplacé sur la dernière ligne, puis vert |
 
 ### 82.4 Ce que ce lot ne prouve pas
 
 - **La coupure n'est pas accidentelle** : c'est un `Disconnect()` demandé par le client, pas une perte
   réseau. La purge sur coupure subie, avec une réponse de craft encore en vol, reste non mesurée (kit P4).
-- **La latence remise à zéro est lue juste après la déconnexion** : la sonde vérifie `-1` avant la
-  réadmission, pas qu'un craft de la **nouvelle** session réécrit ensuite une mesure (le craft de l'étape
-  a lieu avant la reconnexion).
+- **La latence remise à zéro** est vérifiée juste après la déconnexion (`-1`), **et** une demande postée
+  après la réadmission réécrit bien une mesure (`nouvelle mesure=27.2 ms`) — c'est un refus daté, pas un
+  accord : aucun craft n'est accordé dans la nouvelle session.
 - **La réadmission est vérifiée par l'id** (`1 -> 2`) et par `Accepted`, pas par un état de monde complet :
   aucun contrôle ne dit que les avatars, créatures et véhicules distants sont revenus après la reconnexion.
 - Le délai de relance est de **5 s** (`ReconnectDelaySeconds`) : la borne de 30 s de la sonde le couvre,

@@ -359,7 +359,7 @@ namespace Coop.Client
             //    sonde. Le chemin réel — changement d'adresse à chaud, celui du bouton « Rejoindre » — est
             //    exercé ici : il déconnecte, purge (demande retenue et statistiques de latence de la session),
             //    puis reconnecte. Le serveur doit réadmettre le client sous un id neuf.
-            yield return ReconnectAndCheckPurge(tech);
+            yield return ReconnectAndCheckPurge(tech, crafter);
         }
 
         /// <summary>
@@ -368,7 +368,7 @@ namespace Coop.Client
         /// puis reconnecte. Ce que la sonde mesure : la table est vide, la latence n'est plus une mesure, et
         /// la reconnexion aboutit — sinon la purge ne serait prouvée que par un appel direct de la sonde.
         /// </summary>
-        private static IEnumerator ReconnectAndCheckPurge(TechType techType)
+        private static IEnumerator ReconnectAndCheckPurge(TechType techType, Crafter crafter)
         {
             var client = ClientNetworkBehaviour.Current;
             if (client == null)
@@ -411,12 +411,32 @@ namespace Coop.Client
             var latencyCleared = latencyBefore >= 0f && latencyAfter < 0f && minAfter < 0f;
             var newIdentity = reconnected && idAfter != 0 && idAfter != idBefore;
 
+            // La remise à zéro ne suffirait pas : la **nouvelle** session doit réécrire une mesure. Il faut
+            // une demande passée par le **garde** (une demande brute n'a pas d'instant de départ, donc pas
+            // de latence) : l'appel réel du fabricator en est une, et le refus éventuel est daté lui aussi.
+            var freshBefore = CraftGuard.LastLatencyMs;
+            var freshRefusedBefore = client.CraftsRefused;
+            if (reconnected && crafter != null)
+            {
+                ((ITreeActionReceiver)crafter).PerformAction(techType);
+            }
+
+            var freshDeadline = Time.realtimeSinceStartup + 5f;
+            while (CraftGuard.LastLatencyMs < 0f && Time.realtimeSinceStartup < freshDeadline)
+            {
+                yield return new WaitForSecondsRealtime(0.25f);
+            }
+
+            var freshLatency = CraftGuard.LastLatencyMs;
+            var freshAnswered = client.CraftsRefused > freshRefusedBefore;
+            var measuredAgain = freshBefore < 0f && freshLatency >= 0f;
+
             Log.LogInfo(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "[sonde] reconnexion : adresse='{0}:{1}', demande retenue={2}, encore en attente={3}, " +
-                    "latence avant={4:F1} ms puis {5:F1}, accepté pendant la coupure={6}, réadmis={7}, " +
-                    "id {8} -> {9} — verdict={10}",
+                    "latence avant={4:F1} ms puis {5:F1}, nouvelle mesure={11:F1} ms, " +
+                    "accepté pendant la coupure={6}, réadmis={7}, id {8} -> {9} — verdict={10}",
                     host,
                     port,
                     pendingBefore,
@@ -427,14 +447,16 @@ namespace Coop.Client
                     reconnected,
                     idBefore,
                     idAfter,
-                    purged && latencyCleared && newIdentity));
+                    purged && latencyCleared && newIdentity && measuredAgain,
+                    freshLatency));
 
-            if (!purged || !latencyCleared || !newIdentity)
+            if (!purged || !latencyCleared || !newIdentity || !measuredAgain)
             {
                 Log.LogError(
                     $"[sonde] reconnexion : verdict=False — demande retenue={pendingBefore} (attendu 1), " +
                     $"encore en attente={pendingAfter} (attendu 0), latence avant={latencyBefore:F1} puis " +
-                    $"{latencyAfter:F1} (attendu ≥ 0 puis < 0), réadmis={reconnected}, id {idBefore} -> {idAfter}.");
+                    $"{latencyAfter:F1} (attendu ≥ 0 puis < 0), réadmis={reconnected}, id {idBefore} -> {idAfter}, " +
+                    $"nouvelle demande refusée={freshAnswered}, nouvelle mesure={freshLatency:F1} ms.");
             }
         }
 
@@ -484,13 +506,25 @@ namespace Coop.Client
             var afterRetry = InventoryReconciler.CountLocal(material);
             var pendingAfter = InventoryReconciler.PendingDeferrals;
             var retried = localBefore - afterRetry;
-            var verdict = deferred == 1 && afterDefer == localBefore && retried == 1 && pendingAfter == 0;
+
+            // La restauration est vérifiée **directement** : l'instantané rendu à la réconciliation doit
+            // être celui d'avant le contrôle, entrée par entrée. Sans cette lecture, un état laissé amputé
+            // ne se verrait qu'au prochain report repris (`PLAN.md` §80.3).
+            var restored = current == null ? Array.Empty<InventoryEntry>() : current.InventorySnapshotPrevious;
+            var restoredOk = restored.Length == real.Length;
+            for (var index = 0; restoredOk && index < real.Length; index++)
+            {
+                restoredOk = string.Equals(restored[index].TechTypeName, real[index].TechTypeName, StringComparison.Ordinal)
+                             && restored[index].Count == real[index].Count;
+            }
+
+            var verdict = deferred == 1 && afterDefer == localBefore && retried == 1 && pendingAfter == 0 && restoredOk;
 
             Log.LogInfo(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "[sonde] report : matériau='{0}' local={1}, reportés={2}, retiré à la reprise={3} " +
-                    "({4} -> {5}), attentes restantes={6} — verdict={7}",
+                    "({4} -> {5}), attentes restantes={6}, instantané restauré={7} ({8} entrée(s)) — verdict={9}",
                     material,
                     localBefore,
                     deferred,
@@ -498,6 +532,8 @@ namespace Coop.Client
                     afterDefer,
                     afterRetry,
                     pendingAfter,
+                    restoredOk,
+                    restored.Length,
                     verdict));
 
             if (!verdict)
@@ -505,7 +541,7 @@ namespace Coop.Client
                 Log.LogError(
                     $"[sonde] report : verdict=False — reportés={deferred} (attendu 1), local inchangé " +
                     $"après report={afterDefer == localBefore}, retirés à la reprise={retried} (attendu 1), " +
-                    $"attentes restantes={pendingAfter} (attendu 0).");
+                    $"attentes restantes={pendingAfter} (attendu 0), instantané restauré={restoredOk}.");
             }
         }
 
